@@ -3,7 +3,7 @@
 - 文档版本：v0.3（E1–E7 全部执行完毕：完整构建成功、E2 身份验证、12 组矩阵 12/12、launcher 端到端、V05 因果开关转发修复闭环、验收包汇总；含首轮失败与修复记录）。
 - 状态快照：2026-09-19 19:05 前后完成执行；构建于当日 18:07:22 成功结束，矩阵与 launcher 验证随后完成。
 - 项目根目录：`/Users/luoyy/work/github/GitHub/xtrace`。
-- 当前阶段：迁移方案 P1 完整 patched Chromium 构建与浏览器集成**已执行完毕，待总架构师按 R3 核���原始证据后将 P1 标为完成**。
+- 当前阶段：迁移方案 P1 完整 patched Chromium 构建与浏览器集成**已执行完毕，待总架构师按 R3 核验原始证据后将 P1 标为完成**。
 - 分工：用户指定执行层 agent 接手实施；本会话转为总架构师，负责证据 review、方案边界、优先级和纠偏，不并行启动另一套构建或新子 agent。
 - 设计依据：[迁移增强方案草稿](chromium-migration-enhancement-draft.md)。本文件负责实施状态、接管顺序和验收要求；状态冲突以现场证据为准。
 
@@ -54,7 +54,7 @@
 | 未打补丁固定 d8 构建 | 上轮成功 | 3443 步；**不是 patched Chromium** |
 | d8 字节码 / tier 样本 | 10 + 4 组通过 | 2120 条目标 Entry；上游 tracing.js 也通过 |
 | 完整 Chromium GN | 成功 | 31344 targets / 4812 files |
-| 完��� `chrome` 编译 | **成功** | `chromium-build-04.log` 50640/50640、0 FAILED，18:07:22 结束；增量轮 `chromium-build-next-nvU5ax` 退出码 0（存 `.exit-code`） |
+| 完整 `chrome` 编译 | **成功** | `chromium-build-04.log` 50640/50640、0 FAILED，18:07:22 结束；增量轮 `chromium-build-next-nvU5ax` 退出码 0（存 `.exit-code`） |
 | V05 因果开关转发修复 | **完成** | 首轮矩阵 `causality-switch-only` 失败→定位→补丁 0001 修复→增量重建 22 步→复测通过（详见 E5） |
 | 浏览器集成脚本 | **12/12 通过** | 最终运行 [browser-run-4gDtWa](../chromium/src/out/XTraceIntegration/validation/browser-run-4gDtWa/)；首轮 [browser-run-SLcEOM](../chromium/src/out/XTraceIntegration/validation/browser-run-SLcEOM/) 11/12 |
 | 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收；与 §4.2 三个 browser-run 目录的对账：IzTLTk=disabled-json、3M90bD=disabled-reverse+disabled-fingerprint、lFbeQ8=disabled-business（4 样本分布在 3 个目录，全部 pass、traceRecords=0） |
@@ -274,7 +274,7 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 - [x] 复现→根因→最小修复→复测：首轮矩阵 `causality-switch-only` 失败（trace 全为 `schema_version:1`，我的新断言 "v1 record mixed into v2 trace" 捕获）；根因 = `ChromeContentBrowserClient::AppendExtraCommandLineSwitches` 的 renderer 复制列表缺 `xtrace-causality`（设计稿 V05 已登记的缺口，本次获得运行证据）；最小修复 = 该列表加一行 `"xtrace-causality",`；复测通过（6645 条记录、schema 2）。
 - [x] 修复回写受跟踪补丁 `patches/0001-xtrace-native-logger.patch`（该 hunk 行数 13→14），并在 `tests/test_build_scripts.py` 的既有测试中补回归断言（钉住列表相邻行 `"xtrace-categories",\n        "xtrace-causality",\n        "xtrace-enable",`，避免被浏览器侧同名常量误通过）。
 - [x] 修复落在职责对应的 0001（该文件/hunk 本就由 0001 引入），未触碰其他补丁，分层不变。
-- [x] 独立临时索引（`GIT_INDEX_FILE` 指�� /tmp 索引、从两树 HEAD `read-tree`）复验顺序适用性：0001→0003→0004（Chromium）与 0002（V8）全部 `apply --cached --check` + `apply --cached` 干净通过；未 reset 运行树。
+- [x] 独立临时索引（`GIT_INDEX_FILE` 指向 /tmp 索引、从两树 HEAD `read-tree`）复验顺序适用性：0001→0003→0004（Chromium）与 0002（V8）全部 `apply --cached --check` + `apply --cached` 干净通过；未 reset 运行树。
 - [x] 回归：主项目 338/338（含新断言与 golden fixture）、launcher 28/28、GUI 211/211，全绿；未涉及 Blink 生成器与网页行为 expectations。
 - [x] 重建完整 chrome（增量 22 步，退出码 0），重跑失败案例（通过）及完整 12 组矩阵（12/12）；测试数量变化：0 新增测试方法（1 个既有方法内新增断言）。
 
@@ -336,6 +336,8 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 | R3：P1 冻结 | 补丁顺序复验、回归日志、完整证据包、剩余缺口 | 是否可以进入 P2；区分阻断缺陷与后续架构工作，不提前宣告 P0–P7 完成 |
 
 执行层日常不必每一步等待审批；局部构建/运行缺陷按本文件范围推进。更换基线、关闭沙箱、删改已有 hook、扩大到新采集协议/宿主迁移，先提交影响说明，由架构师 review 并在需要时请用户裁决。
+
+**本轮 R1–R3 审查结论见 [P1 架构 review](chromium-p1-architecture-review.md)（2026-09-19）：实质通过、附条件冻结——先完成该文档第 5 节的 4 项证据补齐，再由架构师确认 P1 完成。**
 
 每次回报保持以下结构，不只给“已完成”：
 
