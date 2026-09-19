@@ -1,9 +1,9 @@
 # Patched Chromium 构建与浏览器集成实施交接
 
-- 文档版本：v0.3（E1–E7 全部执行完毕：完整构建成功、E2 身份验证、12 组矩阵 12/12、launcher 端到端、V05 因果开关转发修复闭环、验收包汇总；含首轮失败与修复记录）。
-- 状态快照：2026-09-19 19:05 前后完成执行；构建于当日 18:07:22 成功结束，矩阵与 launcher 验证随后完成。
+- 文档版本：v0.4（review §5 四项证据补齐完成；P1 经总架构师 R3 核验通过并冻结；后续阶段见 P2 交接文档）。
+- 状态快照：2026-09-19 19:05 前后完成执行；构建于当日 18:07:22 成功结束，矩阵与 launcher 验证随后完成；review 补齐 20:01 完成，架构师冻结确认于当日作出。
 - 项目根目录：`/Users/luoyy/work/github/GitHub/xtrace`。
-- 当前阶段：迁移方案 P1 完整 patched Chromium 构建与浏览器集成**已执行完毕，待总架构师按 R3 核验原始证据后将 P1 标为完成**。
+- 当前阶段：迁移方案 **P1 已完成并通过 R3 核验冻结（2026-09-19）**；下一阶段 P2（采集与写入基础）按 [chromium-p2-capture-foundation-handoff.md](chromium-p2-capture-foundation-handoff.md) 执行。
 - 分工：用户指定执行层 agent 接手实施；本会话转为总架构师，负责证据 review、方案边界、优先级和纠偏，不并行启动另一套构建或新子 agent。
 - 设计依据：[迁移增强方案草稿](chromium-migration-enhancement-draft.md)。本文件负责实施状态、接管顺序和验收要求；状态冲突以现场证据为准。
 
@@ -60,7 +60,7 @@
 | 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收；与 §4.2 三个 browser-run 目录的对账：IzTLTk=disabled-json、3M90bD=disabled-reverse+disabled-fingerprint、lFbeQ8=disabled-business（4 样本分布在 3 个目录，全部 pass、traceRecords=0） |
 | E2 产物身份与基本启动 | **通过** | [e2-identity/](../chromium/src/out/XTraceIntegration/validation/e2-identity/)：Chrome/151.0.7917.0、干净退出、无崩溃签名、无沙箱破坏开关 |
 | launcher 端到端采集 | **通过** | [launcher-smoke-wTuzvt/](../chromium/src/out/XTraceIntegration/validation/launcher-smoke-wTuzvt/)：validator PASS（schema 2 + JSON.parse/stringify）、5926 条记录、运行时反向断言 0 违禁开关 |
-| 最终复现与证据 review | 执行完毕，待架构师 R3 | 本文件 + `integration-progress.json` 已汇总；P1 标记待核验 |
+| 最终复现与证据 review | **已通过 R3（2026-09-19 冻结）** | 架构师 review 见 [chromium-p1-architecture-review.md](chromium-p1-architecture-review.md)；`integration-progress.json` 状态 `accepted-p1` |
 
 ### 3.1 构建收尾记录（v0.3 更新）
 
@@ -372,4 +372,4 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 - [x] 文档、进度清单和原始证据一致；原版自检、d8、静态测试均按其边界表述，未夸大为完整浏览器能力。
 - [x] 剩余 P2–P7 设计工作已在 E6.1 缺口清单明确列出，待总架构师 R3 review 后将 P1 标为完成。
 
-执行层 E1–E7 已全部执行完毕（2026-09-19）；本文件 v0.3 为验收包入口，原始证据目录见 §4.2。
+执行层 E1–E7 已全部执行完毕（2026-09-19）；review §5 四项证据补齐于同日完成并经架构师核验。**P1 于 2026-09-19 通过 R3 核验并冻结**；本文件为验收包入口，原始证据目录见 §4.2，后续阶段见 [P2 交接文档](chromium-p2-capture-foundation-handoff.md)。

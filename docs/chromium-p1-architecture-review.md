@@ -1,6 +1,6 @@
 # P1 架构 Review：完整 patched Chromium 构建与浏览器集成
 
-- 版本：v1.0（2026-09-19）
+- 版本：v1.1（2026-09-19；v1.1 增加第 8 节冻结确认）
 - 审查人：总架构师会话
 - 审查对象：实施交接文档 v0.3（E1–E7 全部自报完成）、迁移草稿 v0.5、`integration-progress.json`、`docs/tool-inventory.md`、`e2-identity/`、`browser-run-SLcEOM/hvdHaB/4gDtWa`、`launcher-smoke-wTuzvt/` 等原始证据
 - 关卡：实施交接文档 §7 的 R1/R2/R3
@@ -118,3 +118,14 @@ for p in 0001 0003 0004; do git -C $ROOT/chromium/src apply --cached --check $RO
 | 18:16:12 | patches/0001 写入 V05 修复 |
 | 18:17:42 | fix1 增量重建退出码 0；out 根 `libchrome_dll.dylib` mtime 18:17:40 |
 | 其后 | hvdHaB 单案例复测通过 → 4gDtWa 全量 12/12 → launcher 冒烟通过 |
+
+## 8. 冻结确认（2026-09-19，v1.1）
+
+第 5 节 4 项已由执行层补齐并经本架构师核验通过：
+
+- 5.1/5.2：`identity.json` 追加 `postFixSupplement` 段（修复后四补丁 SHA-256 + 6 个组件 dylib SHA-256 + 时间线）；我对磁盘文件独立重算，0001=`76ce5768…`、`libchrome_dll`=`75e95f54…`、`libv8`=`efb8c2d8…`、`libcontent`=`31d5214f…` 等全部一致；原顶层修复前摘要保留并注明时点，处理方式正确。
+- 5.3：`integration-progress.json` 状态已先降为 `p1-evidence-complete-pending-r3`，未越门。
+- 5.4：§4.2 浏览器路径行已改为现状描述，patched-repo/XTraceD8Verify 警示保留。
+- 建议项 1–3 一并完成（fix1 表述改为日志可见 2 步、Worker 证据改引最终运行 4gDtWa 数值并注明首轮出处、三份回归日志已用 20:01 修复后运行覆盖存档）；建议 4（`.zcodeignore` 去留）留维护者裁决。
+
+**P1 标记为完成（冻结）。** `integration-progress.json` 状态由架构师改为 `accepted-p1` 并附接受记录。下一阶段：P2 采集与写入基础，交接文档为 [chromium-p2-capture-foundation-handoff.md](chromium-p2-capture-foundation-handoff.md)。
