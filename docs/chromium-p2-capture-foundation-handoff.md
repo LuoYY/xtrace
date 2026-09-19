@@ -1,6 +1,6 @@
 # P2 交接：采集与写入基础（单一 writer / producer 登记 / 计数守恒 / 停止协议 / schema v3）
 
-- 文档版本：v1.0（2026-09-19）。
+- 文档版本：v1.1（2026-09-19；R1 已通过——schema v3 规范 v1.1 冻结、DP2–DP5 全部裁决，执行模式改为**长程单次终审**，见 §7）。
 - 前置状态：**P1 已冻结**（[P1 架构 review](chromium-p1-architecture-review.md) §8 确认；`integration-progress.json` 状态 `accepted-p1`）。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。本会话不并行启动实施。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §6（协议/身份/证据）、§7（写入/背压/停止）、§6.6（旧缺陷收口）、§12.2（测试宿主与基线）、§13.1（已收敛决策）。本文件把上述设计拆成可执行任务与验收关卡；**设计语义以草稿为准，本文件不重述契约内容，只规定落地顺序与验收方式**。
@@ -9,7 +9,7 @@
 
 1. 读本文件全文 + 草稿 §6、§7、§6.6、§13.1，以及 [P1 交接文档](chromium-patched-build-implementation.md) 的 §6（纠偏事项）与 E6.1（缺口清单）。
 2. 确认 P1 现场未被动过：`chromium/src` 与 `chromium/src/v8` 工作树仍为四补丁状态（0001 含 V05 修复），`out/XTraceIntegration` 产物不重建、不清理。
-3. P2 实施**从 P2-E1（schema v3 规范）开始，规范经架构师 R1 审查通过后才写 C++**。不要先动代码后补规范。
+3. ~~P2 实施从 P2-E1 开始~~ **P2-E1（规范）与决策点已通过 R1（2026-09-19）**：规范 [trace-schema-v3.md](trace-schema-v3.md) v1.1 冻结，DP2–DP5 裁决见 [chromium-p2-r1-decisions.md](chromium-p2-r1-decisions.md)。实施直接从 **P2-E2（mojom）** 开始，按 §7 的长程模式推进。
 
 ## 2. 冻结输入（不得变更的基线）
 
@@ -122,13 +122,15 @@
 
 沿用 P1 证据纪律：命令与退出码存档、失败首轮证据保留、版本/补丁/二进制摘要（含 dylib 清单，沿用 `postFixSupplement` 口径）、基线数据入 `integration-progress.json`（新字段、注明构建口径）、文档状态同步（草稿 §2.3/§12、本文件）。完成后按第 7 节关卡提交。
 
-## 5. 实施前需架构师确认的决策点（先提方案再动手）
+## 5. 决策点状态（v1.1：全部已裁决）
 
-1. **schema v3 规范文本**（P2-E1 产出，R1 关卡）。
-2. **控制通道形状**：扩展 `xtrace.mojom` 的 `XTraceHost` 还是新增独立控制接口；停止下发与 watermark 的消息形态。
-3. **溢出丢弃策略默认值**：drop-newest / drop-oldest / 触发即结束采集，及其在 manifest 中的声明方式（草稿 §7.1 要求"已声明"）。
-4. **测试期 stop 触发机制**：browser 测试钩子 vs test-only 开关的具体形态与移除计划。
-5. **shutdown 排空的 task traits 方案**：替代 `SKIP_ON_SHUTDOWN` 的具体选择与关机挂死防护。
+| 决策点 | 状态 |
+| --- | --- |
+| 1. schema v3 规范 | **已冻结**：[trace-schema-v3.md](trace-schema-v3.md) v1.1（R1 通过，并入单调钟基准、producer_id 唯一性（`lseq`）、args 适配包装三处修订） |
+| 2. 控制通道形状 | **已裁决**：[chromium-p2-r1-decisions.md](chromium-p2-r1-decisions.md) DP2——数据面 `XTraceHost`（batch-only + watermark 同管道），控制面独立 `XTraceControl`；附 3 条件（绑定路径实证、`Log` 删除的断言同步、V09 注释） |
+| 3. 溢出丢弃默认 | **已裁决**：DP3——默认 `drop-newest`，`drop-oldest` 可配置，不做"触发即结束"；manifest `overflow_policy` 为唯一权威声明 |
+| 4. 测试期 stop | **已裁决**：DP4——两个 test-only 开关（`--xtrace-stop-after-ms`、`--xtrace-test-capacity`），`XTRACE_TEST_SCAFFOLDING` 标记，launcher 不透传，P3 移除并登记 |
+| 5. shutdown 排空 | **已裁决**：DP5——`BLOCK_SHUTDOWN` + 不等待任何远端 + manifest 队尾任务；附关停实证与无跨进程等待的硬性验收条件 |
 
 ## 6. 纪律与纠偏事项（沿用 P1，新增第 6–8 条）
 
@@ -141,15 +143,51 @@
 7. **计数等式是终态唯一判据**：任何"看起来都写完了"的经验判断不算数；等式不成立即非 complete。
 8. 构建效率：增量编译优先；V8 侧不改动则不应触发全量；失败先分类（依赖/工具链/补丁/链接）再处理，不盲目重跑 sync 或清空 out。
 
-## 7. review 关卡
+## 7. 长程执行模式（v1.1 起；替代分阶段例行审查）
 
-| 关卡 | 执行层提交 | 架构师 review |
+R1 已通过。**P2-E2 → P2-E8 合并为一个连续执行块：中间不设例行审查点**，执行层一次长程推进、一次提交，架构师做 R2+R3 合并终审。
+
+### 7.1 执行块入口条件（已全部满足）
+
+- 规范冻结：[trace-schema-v3.md](trace-schema-v3.md) v1.1。
+- 决策冻结：§5 五项全部裁决。
+- 基线/补丁/构建口径：§2 不变。
+
+### 7.2 执行动作清单（顺序即依赖序；每步关键要点）
+
+| 序 | 动作 | 关键要点（来自规范/裁决/已知坑） |
 | --- | --- | --- |
-| R1：规范 | `trace-schema-v3.md` + 决策点 2–5 方案 | 规范自洽性、与草稿 §6/§7 一致性、P2 边界守卫 |
-| R2：实现与故障注入 | P2-E2～E7 证据（单测、故障注入记录、矩阵、基线对比） | 终态是否可核对、故障路径是否伪报、旧缺陷是否真收口 |
-| R3：P2 冻结 | 补丁顺序复验、回归、证据包、剩余缺口清单 | 是否可进 P3；区分阻断缺陷与后续阶段工作 |
+| 1 | P2-E2 控制与登记通道（mojom） | watermark 与 batch 同管道（保序是结算前提）；描述符随首批携带、注册零往返；`XTraceControl` 绑定路径用单测实证再定；worker 转发停止必须注 V09；逐条 `Log` 删除时同步更新 P1 期断言 |
+| 2 | P2-E3 browser 单一 writer + 协调器 | 拆 `chrome_content_browser_client.cc:6043,6634` 的私有计数器与 `AppendToFile`；browser-network 成为进程内本地 producer；`writer_seq` 仅合并序；shutdown 走 DP5 方案（无跨进程等待）；计数裁决进 `content_unittests` |
+| 3 | P2-E4 renderer 有界批量与计数 | per-thread 缓冲 + 条数/时间双触发 flush（参数进 manifest）；溢出按 DP3；worker 线程销毁即结算；V8 event_logger 路径并入所属线程 producer，不动 0002 |
+| 4 | P2-E5 §6.6 十条收口 | 每条留修复前后对照；summary 模式 `metadata-only` 无 `source`（现有断言旧行为的测试随实现证据同步改，不反向掩盖）；限额触发必须置截断四元组 |
+| 5 | P2-E6 消费端升级 | validator `--schema-version 3` 按规范 §12 全项断言；v1/v2 golden fixtures 走旧路径必须原样全绿；v3 golden 入库；GUI 对 v3 不崩即可 |
+| 6 | P2-E7 故障注入矩阵 | 两个 test-only 开关均走真实停止路径；七个场景逐条出证据（正常 complete、溢出 incomplete、renderer 崩溃未知尾部、磁盘失败、stop 超时、browser 关停 DP5 实证、12 组 v3 重跑 + 基线对比 P1） |
+| 7 | P2-E8 证据包 | 补丁回写 + 干净索引复验（模板见 P1 review §7.1）；dylib 摘要沿用 `postFixSupplement` 口径；文档状态同步 |
 
-回报格式沿用 P1 交接文档 §7 的七行结构。执行层日常不必逐步等审批；涉及基线变更、沙箱、删除既有 hook、范围扩到 P3+ 的，先提交影响说明。
+### 7.3 自主权（不触发升级，工程师全权）
+
+- 实现细节、模块边界、命名、测试组织、默认值调优（batch 大小、flush 间隔、缓冲容量——以 manifest 自描述为准）。
+- bug 修复与重构；编译/测试失败的日常分类处理（§6.8）。
+- 进度痕迹：每完成一项即在 §4 对应任务标题前打勾并附一行证据指针（目录/日志/测试名），不写长报告、不逐步汇报。
+
+### 7.4 升级触发器（命中即停，先回报再继续；不得自行绕道）
+
+1. 需要变更基线：Chromium/V8 版本、GN 参数、沙箱、删除或禁用既有 hook。
+2. 规范与实现不可调和：需要改 trace-schema-v3.md 的语义（先回规范审查，不先斩后奏）。
+3. 正常场景下计数等式无法成立（管道/登记设计有洞）。
+4. 需要新增持久化能力、网络端口、对外接口或新 producer 类型（超出 §3 范围）。
+5. 规范未覆盖的新二选一，或某项 DP 裁决的前提被证伪。
+6. 故障注入暴露设计层问题（如终态伪报的根因在协议而非实现）。
+
+### 7.5 一次性终审提交物（R2+R3 合并）
+
+- 补丁栈（回写后）+ 干净索引顺序复验记录。
+- 测试证据：进程内单测清单与结果、P2-E7 七场景逐项证据、12 组矩阵 v3 结果、与 P1 的基线对比表。
+- 回归：338/28/211 + 新增测试数量（如实）。
+- 文档同步：§4 任务勾选、草稿 §2.3/§12 状态、`integration-progress.json`（新增 P2 段，初始状态 `p2-in-progress`，终审前不得写 accepted）。
+- 已知缺口与边界清单（格式沿用 P1 交接 E6.1）。
+- 终审只认原始证据，不认摘要绿灯。
 
 ## 8. 完成定义
 

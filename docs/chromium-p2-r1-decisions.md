@@ -1,6 +1,6 @@
 # P2 实施决策提案（R1 审查对象，决策点 2–5）
 
-- 版本：v1.0（2026-09-19，执行层提案）。
+- 版本：v1.1（2026-09-19，执行层提案 v1.0；v1.1 由架构师回填四项裁决——全部接受，附条件见各节"裁决"栏）。
 - 对象：[P2 交接文档](chromium-p2-capture-foundation-handoff.md) §5 决策点 2–5。每项给出推荐方案、备选、理由与影响面；架构师裁决后回填"裁决"栏，作为 P2-E2 起的实施依据。
 - 配套规范：[trace-schema-v3.md](trace-schema-v3.md)（决策点 1 的产出）。
 
@@ -40,7 +40,7 @@ interface XTraceControl {
 理由与影响：
 
 - watermark 必须走**原日志通道**（草稿 §7.3 第 3 步）：mojo 管道消息保序，`SubmitWatermark` 放在 `XTraceHost` 上使"watermark 之后无该 producer 新事件"成为管道语义可直接断言的事实；放控制面则失去该保证。
-- 停止是进程级动作、数据是线程级管道，合成一个接口会迫使每线程都收停止消息或跨���程转发——违背"不跨线程共用 mojo::Remote"（草稿 §8.3）。`XTraceControl` 每进程一条，由 renderer 侧控制代理经 `WorkerThreadRegistry` 转发；**转发投递数不作为确认数**（V09），确认只认各自管道的 watermark。
+- 停止是进程级动作、数据是线程级管道，合成一个接口会迫使每线程都收停止消息或跨线程转发——违背"不跨线程共用 mojo::Remote"（草稿 §8.3）。`XTraceControl` 每进程一条，由 renderer 侧控制代理经 `WorkerThreadRegistry` 转发；**转发投递数不作为确认数**（V09），确认只认各自管道的 watermark。
 - 注册零往返：描述符随首批携带（规范 §4.3），无独立 Register 消息；browser 按管道登记进程归属。
 - `Log`（逐条）删除而非降级：规范已定 batch 为唯一路径；保留双路径会让计数等式出现第二个入口。唯一例外是 browser-network producer——它不经 mojo（browser 进程内直接入队 writer），属实现细节不占接口面。
 - `LogAsset` 保留独立方法而非折进 batch：资产行与事件行的 validator 契约不同（§5.3 vs §3），同批混发会让截断/摘要断言互相纠缠。
@@ -48,7 +48,7 @@ interface XTraceControl {
 
 备选（不推荐）：全部折叠进 `XTraceHost`（停止消息每线程一份，浪费且语义错误）；或新增 `XTraceProducerRegistry` 独立注册接口（多一次往返，收益仅显式注册时点，停止语义下无意义）。
 
-**裁决：**（待架构师）
+**裁决：接受推荐方案**（数据面 `XTraceHost` batch-only + watermark 同管道，控制面独立 `XTraceControl`）。附加条件：① `XTraceControl` 的 browser→renderer 绑定路径（interface broker 或 associated channel）在 P2-E2 以单测实证 main-thread 绑定，绑定方案随证据回报，不预设；② 删除逐条 `Log` 影响的 P1 期断言（如 `tests/test_build_scripts.py` 对 logger 内容的引用）随实现同步更新，保留对照证据；③ 经 `WorkerThreadRegistry` 向 worker 转发停止时，代码注释必须引用 V09（投递数不作确认数），确认只认各管道 watermark。
 
 ## DP3：溢出丢弃策略默认值
 
@@ -59,7 +59,7 @@ interface XTraceControl {
 - "溢出即结束"把数据损失升级为 capture 失败，违背"已声明的降采样/丢弃"原则（草稿 §7.1），不提供。
 - manifest `batching.overflow_policy` 声明实际策略（规范 §6）；默认值不写死在代码外的任何文档——producer 配置快照进 manifest 即自描述。
 
-**裁决：**（待架构师）
+**裁决：接受**（默认 `drop-newest`、`drop-oldest` 可配置、不做"触发即结束"）。补充：validator 按 §12.2 校验缺口时，以 manifest 的 `overflow_policy` 为唯一权威声明——`drop-newest` 只允许尾部缺口，`drop-oldest` 必须有 `overflow_intervals` 对应记账，两者之外的中部缺口视为计数缺陷。
 
 ## DP4：测试期 stop 触发机制
 
@@ -77,7 +77,7 @@ interface XTraceControl {
 
 备选（不推荐）：`base::FeatureList` 测试 feature（同样能达成，但引入 feature 基础设施依赖，P3 移除时改动面更大）；browser 测试钩子（覆盖不了真 app 场景，见上）。
 
-**裁决：**（待架构师）
+**裁决：接受**。强制条件：① `XTRACE_TEST_SCAFFOLDING` 注释块必须真实落在每一处开关定义与消费点（P3 按标记 grep 移除，最终验收时核对标记覆盖率）；② launcher 不透传（无对应 CLI 参数），测试驱动直接拼参数；③ 两个开关不出现在任何面向使用者的文档示例中；④ P3 交接文档必须登记移除清单，移除前 P2 终审视为通过但标注临时设施存在。
 
 ## DP5：shutdown 排空的 task traits 方案
 
@@ -100,7 +100,7 @@ interface XTraceControl {
 
 备选（不推荐）：维持 `SKIP_ON_SHUTDOWN` + 关停前主动 flush（需要挂接 browser 生命周期通知，时序脆弱）；`APPLICATION_EXIT` 观察者驱动（同前，且引入对退出顺序的依赖）。
 
-**裁决：**（待架构师）
+**裁决：接受**（`BLOCK_SHUTDOWN` + 不等待任何远端 + manifest 为 runner 队尾任务）。验收条件：① P2-E7 必须有实证用例——browser 关停 mid-capture 产生 `incomplete` manifest 且 reason 为 `browser-shutdown`，仅结算已在 writer 队列内的数据；② 终审时以代码走查核对关停路径无任何跨进程等待（这是 BLOCK_SHUTDOWN 不挂死的前提，属硬性条件）；③ 优先级调整（如需 `USER_BLOCKING`）必须带 P2-E7 的实测数据再议，不预设。
 
 ---
 
@@ -108,4 +108,4 @@ interface XTraceControl {
 
 - 本提案与 [trace-schema-v3.md](trace-schema-v3.md) 共同构成 R1 审查对象（P2 交接 §7 R1 行）。
 - 四项决策互相独立，可分别裁决；DP2 的消息形状在规范 §4/§7/§8 已按推荐方案成文，若裁决偏离推荐，规范相应小节随裁决修订后再进 C++。
-- 裁决方式建议：直接在���文件各"裁决"栏批注（或另发 review 文档）；执行层收到裁决后启动 P2-E2（mojom），按 P2 交接 §4 顺序��进。
+- 裁决方式建议：直接在本文件各"裁决"栏批注（或另发 review 文档）；执行层收到裁决后启动 P2-E2（mojom），按 P2 交接 §4 顺序推进。

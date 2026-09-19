@@ -1,6 +1,6 @@
 # XTrace Trace Schema v3
 
-- 版本：v1.0 草案（P2-E1 产出，待架构师 R1 审查；本文为规范提案，实现以审查通过后的本文件为准）。
+- 版本：v1.1（P2-E1 产出，架构师 R1 审查通过并并入三处修订——§3.1 单调钟基准表述、§4.2/§4.3 tid 复用下 producer_id 唯一性、§10 args 适配包装规则；实现以本文件为准）。
 - 依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §6（协议/身份/证据模型）、§7（写入/背压/停止）、§6.6（旧缺陷收口）、§13.1（已收敛决策）；语义以草稿为准，本文件不另造契约。
 - 现状基线：v1/v2 语义见 [trace-schema-v1.md](trace-schema-v1.md)、[trace-schema-v2.md](trace-schema-v2.md)。**P2 起，新 capture 一律输出 v3；v1/v2 trace 由导入适配器只读兼容，不做原地升级。单个 capture 不混写多个 schema 版本。**
 
@@ -40,10 +40,10 @@
 | `capture_id` | string | browser 为一次采集分配；格式 `c<wall_start_us>-<browser_pid>-<nonce8>`（如 `c1750000000000000-47787-a1b2c3d4`）。一次 browser 生命周期内不复用 |
 | `producer_id` | string | producer 注册身份；格式见 §4.2 |
 | `process_epoch` | string | 进程实例身份 `<pid>.<creation_ticks>`，防 PID 重用；十进制字符串 |
-| `producer_seq` | string | producer 本地递增逻辑序��（先分配序号再过滤/丢弃，见 §7.1）；严格连续，缺口只来自溢出丢弃并以 watermark/manifest 记账 |
+| `producer_seq` | string | producer 本地递增逻辑序号（先分配序号再过滤/丢弃，见 §7.1）；严格连续，缺口只来自溢出丢弃并以 watermark/manifest 记账 |
 | `writer_seq` | string | writer 接受事件的合并顺序；文件内严格递增唯一；**不表示因果顺序** |
 | `config_generation` | string | 事件生成时生效的配置代数。P2 无热更新，恒为启动代 `"0"`；P3 起由 browser 串行分配 |
-| `mono_time_us` | string | producer 进程单调钟微秒；epoch 为进程启动（`base::TimeTicks` 语义）；**不得**与 wall 钟混算 |
+| `mono_time_us` | string | producer 进程单调钟微秒；基准为平台单调钟原点（`base::TimeTicks` 语义，macOS 上通常为系统 boot 起算，**不保证等于进程启动时刻**）；只用于差值计算，不得跨进程比较绝对值，**不得**与 wall 钟混算 |
 | `wall_time_us` | string | producer 进程墙上钟微秒，Unix epoch |
 | `pid` | number | 便捷字段（真实值在 producer_id/process_epoch 中） |
 | `tid` | number | 同上 |
@@ -108,12 +108,14 @@ V8/VMP 热路径（`xtrace:vmp-runtime:` 系）：归属按现状可空——`at
 ### 4.2 producer_id 格式
 
 ```
-<pkind>:<pid>.<epoch>:<tid>
+<pkind>:<pid>.<epoch>:<tid>:<lseq>
 <pkind> ∈ rtx (renderer 主线程) | rtw (renderer worker 线程) | bnet (browser-network)
-示例: rtw:43839.128990467:68976564
+<lseq>  = renderer 进程内单调递增的 producer 序号（进程级原子计数器，从 1 起；主线程与工作线程共用同一序列）
+示例: rtw:43839.128990467:68976564:3
 ```
 
-- 自声明、browser 在注册时核验唯一性（冲突即 capture failed，不静默改名）。
+- 自声明、browser 在注册时核验唯一性（冲突即 capture failed，不静默改名——带 `lseq` 后冲突仅意味实现缺陷）。
+- `lseq` 是 tid 复用的答案：capture 期间操作系统可复用 tid（worker 线程退出后新线程获得同值），进程内序号保证同 tid 的不同 producer 实例仍有唯一 `producer_id`，事件的唯一定位（`capture_id + producer_id + producer_seq`）不受复用影响；browser 不做任何改名或实例推断。
 - `rtw` 线程还需在注册描述符中给出 `worker.kind` 与 `worker.scope_url`（不可得写 unresolved）。
 
 ### 4.3 注册与注销
@@ -242,7 +244,8 @@ accepted = written + failed          （writer 侧：接受 = 落盘成功 + 落
 | v1/v2 | v3 | 变换 |
 | --- | --- | --- |
 | `schema_version: 1\|2` | `schema_version: 3` | 适配器标记来源（`imported_from` 注入 manifest，不入事件行） |
-| `session_id` + `seq`/`session_seq` | `producer_id` + `producer_seq` | v1 的 session 粒度≠v3 producer 粒度：同 session 的行按 `pid:tid` 分组各自重编 `producer_seq`；`event_id` 丢弃 |
+| `session_id` + `seq`/`session_seq` | `producer_id` + `producer_seq` | v1 的 session 粒度≠v3 producer 粒度：同 session 的行按 `pid:tid` 分组各自重编 `producer_seq`；`producer_id` 按 `rt?:<pid>.unknown:<tid>:<分组内出现顺序号>` 合成（`process_epoch` 不可考，见下两行）；`event_id` 丢弃 |
+| v1 自由形态 `args`（含网络材料等嵌套对象） | §5.1 有界值对象 | 逐值包装：内容全文可得时 `original_size=saved_size=实际长度`、`truncated=false`、`sha1` 重算；旧行已声明截断的按原截断信息填四元组；不可得标 `missing`，不得空串冒充 |
 | `global_seq` | `writer_seq` | 原值照搬（本就单调） |
 | `t` | — | 丢弃（phase 别名） |
 | `ts` | `wall_time_us` | 数值→十进制字符串 |
