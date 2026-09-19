@@ -108,7 +108,7 @@
 | V15 | baseline tracing 在本版本确实可用 | `--max-opt=1` 配合 `%CompileBaseline` 和 `--trace-baseline-exec` 产生 `B->`，关闭/开启结果均为 514；不代表热更新已经可用 |
 | V16 | Blink 生成器单测可在兼容的隔离 Python 中完整运行 | Python 3.11.16 下 57/57 通过；Python 3.13 下的 6 项旧 unittest 别名错误已定位，不是新插桩缺陷 |
 
-V05–V07 的文件位置以本轮补丁物化副本为准，原始 Chromium 工作树尚无这些修改；复现材料目录见第 15 节。
+V05–V07 最初在 v0.2 补丁物化副本中核实；当前固定 Chromium 工作树已应用相同补丁。旧验证材料见第 15 节，完整构建与执行层接管状态见[实施交接文档](chromium-patched-build-implementation.md)。
 
 ## 3. 必须保留的事实边界
 
@@ -522,7 +522,7 @@ Agent 首期以限额证据切片和本地索引为输入，结论可以回链�
 | 阶段 | 主要交付 | 验收门槛 | 依赖 |
 | --- | --- | --- | --- |
 | P0：上游 d8 追踪 PoC（最小验证已通过） | 独立产物、10 组覆盖样本、4 组 tier 检查；见第 9.6 节 | 固定版本下样本语义、ShortStar/Wide/分支/调用/返回/异常及真实 tier 已核验；不外推为任意程序保证 | 固定源码与构建环境 |
-| P1：重现 XTrace 基线（静态部分通过） | 四补丁顺序应用及 338 项静态/分析测试已通过；完整构建和 smoke 未做 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
+| P1：重现 XTrace 基线（构建进行中） | 四补丁实际应用及 338 项静态/分析测试通过；完整构建运行中，浏览器集成待执行层验收 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
 | P2：采集与写入基础 | producer 登记、有界批量、manifest、终态和 watermark | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete | P1 |
 | P3：控制面 | browser-only 域、pipe、配置 generation、身份映射 | renderer/worker 首次生效及更新可确认；断连/重连状态明确 | P2 |
 | P4：结构化 Ignition | observer、字节码元数据、执行层与值边界 | 与 P0 对照；无重复/漏记的已支持路径；关闭开销及日志速率可测 | P0、P2/P3 契约 |
@@ -644,7 +644,7 @@ Firefox-Reverse 对照位置以其仓库为根：`additions/browser/components/a
 
 ## 15. 复现材料与下一步
 
-本轮已完成 P0 的最小 d8 构建/运行验证，以及 P1 的补丁/静态测试部分，不等于 P0–P7 全部完成。仍未修改 Chromium/V8 的受跟踪源文件，未启动子 agent，未实现自定义域、writer 或 observer。
+已完成 P0 的最小 d8 构建/运行验证，以及 P1 的补丁/静态测试部分，不等于 P0–P7 全部完成。当前 Chromium/V8 工作树已应用四补丁，完整构建正在进行；未启动子 agent，未实现新的自定义域、writer 或 observer。后续由执行层接管实施，本会话负责架构 review，详见[实施交接文档](chromium-patched-build-implementation.md)。
 
 ### 15.1 本地验证产物
 
@@ -658,7 +658,7 @@ Firefox-Reverse 对照位置以其仓库为根：`additions/browser/components/a
 
 ### 15.2 d8 构建命令
 
-从 XTrace 根目录运行；首次创建输出目录前应确认路径没有其他用途。本轮采用已安装的 Python 3.13.11 驱动 GN，不使用尚未初始化的 depot_tools Python shim。
+以下保留 v0.2 在未打补丁固定源码上的历史命令，使用系统 Python 3.13.11 驱动 GN。当前源码已应用 XTrace 补丁，不应在原 `XTraceD8Verify` 输出目录重跑，否则会覆盖 P0 的未打补丁基线；如需重现原实验，应使用独立干净工作树和独立输出目录。
 
 ```bash
 python3 chromium/src/build/util/lastchange.py -o chromium/src/build/util/LASTCHANGE
@@ -694,4 +694,4 @@ python3 chromium/src/out/XTraceD8Verify/validation/verify_tiers.py \
 
 `d8-cases/summary.json`、`d8-tiers/summary.json` 保存断言结果，旁边保留生成的 JS、stdout/stderr；`baseline-evidence.json` 包含源码/补丁/二进制摘要。运行脚本会覆盖自身上次实验输出，需比较历史结果时先保留相应目录。
 
-下一步可以进入完整 patched Chromium 构建及页面 smoke；第 13.2 节的项目必须在对应实现存在后做集成验收。本轮没有遗留的运行中构建或测试。
+完整 patched Chromium 构建已在 `out/XTraceIntegration` 运行；不得在同一输出目录重复启动 Ninja。当前进度、运行进程、12 组浏览器矩阵、launcher 补验及架构 review 关卡统一见[实施交接文档](chromium-patched-build-implementation.md)。第 13.2 节仍需新实现才能验证的项目不因本次交接而视为完成。
