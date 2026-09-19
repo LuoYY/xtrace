@@ -1,9 +1,9 @@
 # Patched Chromium 构建与浏览器集成实施交接
 
-- 文档版本：v0.2（新增崩溃诊断预案、性能基线采集、launcher 反向断言、文档勘误与可并行的工具清单任务）。
-- 状态快照：2026-09-19 15:40:23，UTC+08:00；进程、日志和磁盘数据均为该时刻快照，不是持续更新的状态。
+- 文档版本：v0.3（E1–E7 全部执行完毕：完整构建成功、E2 身份验证、12 组矩阵 12/12、launcher 端到端、V05 因果开关转发修复闭环、验收包汇总；含首轮失败与修复记录）。
+- 状态快照：2026-09-19 19:05 前后完成执行；构建于当日 18:07:22 成功结束，矩阵与 launcher 验证随后完成。
 - 项目根目录：`/Users/luoyy/work/github/GitHub/xtrace`。
-- 当前阶段：迁移方案 P1，完整 patched Chromium 构建进行中，浏览器集成尚未验收。
+- 当前阶段：迁移方案 P1 完整 patched Chromium 构建与浏览器集成**已执行完毕，待总架构师按 R3 核���原始证据后将 P1 标为完成**。
 - 分工：用户指定执行层 agent 接手实施；本会话转为总架构师，负责证据 review、方案边界、优先级和纠偏，不并行启动另一套构建或新子 agent。
 - 设计依据：[迁移增强方案草稿](chromium-migration-enhancement-draft.md)。本文件负责实施状态、接管顺序和验收要求；状态冲突以现场证据为准。
 
@@ -54,28 +54,20 @@
 | 未打补丁固定 d8 构建 | 上轮成功 | 3443 步；**不是 patched Chromium** |
 | d8 字节码 / tier 样本 | 10 + 4 组通过 | 2120 条目标 Entry；上游 tracing.js 也通过 |
 | 完整 Chromium GN | 成功 | 31344 targets / 4812 files |
-| 完整 `chrome` 编译 | 运行中 | 尚无完整成功退出码 |
-| 浏览器集成脚本 | 已准备 12 组 | 真实 patched Chromium 尚未运行 |
-| 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收；4 组与 §4.2 三个 browser-run 目录的对应关系在 E6 对账说明 |
-| launcher 端到端采集 | 待执行 | 测试驱动直接启动 Chromium，尚未覆盖 launcher 启动链路 |
-| 最终复现与证据 review | 待执行 | 不得提前标记 P1 完成 |
+| 完��� `chrome` 编译 | **成功** | `chromium-build-04.log` 50640/50640、0 FAILED，18:07:22 结束；增量轮 `chromium-build-next-nvU5ax` 退出码 0（存 `.exit-code`） |
+| V05 因果开关转发修复 | **完成** | 首轮矩阵 `causality-switch-only` 失败→定位→补丁 0001 修复→增量重建 22 步→复测通过（详见 E5） |
+| 浏览器集成脚本 | **12/12 通过** | 最终运行 [browser-run-4gDtWa](../chromium/src/out/XTraceIntegration/validation/browser-run-4gDtWa/)；首轮 [browser-run-SLcEOM](../chromium/src/out/XTraceIntegration/validation/browser-run-SLcEOM/) 11/12 |
+| 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收；与 §4.2 三个 browser-run 目录的对账：IzTLTk=disabled-json、3M90bD=disabled-reverse+disabled-fingerprint、lFbeQ8=disabled-business（4 样本分布在 3 个目录，全部 pass、traceRecords=0） |
+| E2 产物身份与基本启动 | **通过** | [e2-identity/](../chromium/src/out/XTraceIntegration/validation/e2-identity/)：Chrome/151.0.7917.0、干净退出、无崩溃签名、无沙箱破坏开关 |
+| launcher 端到端采集 | **通过** | [launcher-smoke-wTuzvt/](../chromium/src/out/XTraceIntegration/validation/launcher-smoke-wTuzvt/)：validator PASS（schema 2 + JSON.parse/stringify）、5926 条记录、运行时反向断言 0 违禁开关 |
+| 最终复现与证据 review | 执行完毕，待架构师 R3 | 本文件 + `integration-progress.json` 已汇总；P1 标记待核验 |
 
-### 3.1 当前运行中的构建
+### 3.1 构建收尾记录（v0.3 更新）
 
-- 输出目录：[out/XTraceIntegration](../chromium/src/out/XTraceIntegration/)。
-- 当前日志：[chromium-build-04.log](../chromium/src/out/XTraceIntegration/validation/chromium-build-04.log)。
-- 本会话后台任务 ID：`b7hobluly`；执行层不一定能访问此会话的任务 API，应以本机进程与日志为准。
-- 快照中的 Ninja PID：`29930`，父进程 PID：`29928`；PID 可能退出或被复用，操作前必须核验完整命令。
-- 命令：`ninja -C chromium/src/out/XTraceIntegration -j 10 -k 0 chrome`。
-- 快照进度：`[4887/50640]`；这是**当前增量轮次**，不能解释为首次完整构建的百分比。
-- 快照中本轮 `FAILED:` 为 0；这不等于构建已成功。
-- `-k 0` 用来继续独立目标并汇总错误，不屏蔽失败，最终仍必须获得完整目标的成功退出码。
-
-```bash
-ps -p 29930 -o pid,ppid,etime,command
-```
-
-不要仅凭 PID 消失认定成功；应检查最终日志和产物，并在确认旧 Ninja 已结束后做一次正常增量 `chrome` 构建，保存退出码。
+- 第四轮 Ninja（PID 29930）于 **2026-09-19 18:07:22 正常结束**：`chromium-build-04.log` 终态 `[50640/50640]`，`^FAILED` 计数 0（日志中 7 处 `error:` 匹配均为 `webui_js_error` 目标名误匹配）。
+- 按本节要求在确认旧 Ninja 结束后执行了正常增量 `chrome` 构建：`chromium-build-next-nvU5ax`，**退出码 0**（"no work to do"），退出码存于同名 `.exit-code` 文件。
+- V05 修复后增量重建：`chromium-build-fix1-dkZZLs`，22 步（`chrome_content_browser_client.o` 重编 + `libchrome_dll.dylib` 重链 + bundle 复制），**退出码 0**。
+- 产物：`out/XTraceIntegration/Chromium.app`（版本化框架布局 `Versions/151.0.7917.0`；`--version` 输出 `Chromium 151.0.7917.0`；首次启动约 15 秒属全新 bundle 的常规校验开销，非故障）。
 
 ### 3.2 已解决的环境阻塞
 
@@ -128,6 +120,14 @@ ps -p 29930 -o pid,ppid,etime,command
 | 集成测试驱动 | [browser-integration.cjs](../chromium/src/out/XTraceIntegration/validation/browser-integration.cjs) |
 | 构建失败日志 | [首轮](../chromium/src/out/XTraceIntegration/validation/chromium-build.log)、[第二轮](../chromium/src/out/XTraceIntegration/validation/chromium-build-02.log)、[第三轮](../chromium/src/out/XTraceIntegration/validation/chromium-build-03.log) |
 | 当前构建日志 | [第四轮](../chromium/src/out/XTraceIntegration/validation/chromium-build-04.log) |
+| 增量确认轮（退出码存档） | [chromium-build-next-nvU5ax](../chromium/src/out/XTraceIntegration/validation/chromium-build-next-nvU5ax)（+ `.exit-code`） |
+| V05 修复增量轮 | [chromium-build-fix1-dkZZLs](../chromium/src/out/XTraceIntegration/validation/chromium-build-fix1-dkZZLs)（+ `.exit-code`） |
+| E2 身份与启动证据 | [e2-identity/](../chromium/src/out/XTraceIntegration/validation/e2-identity/)（identity.json 含补丁/二进制摘要、HEAD、getVersion） |
+| 矩阵最终运行（12/12） | [browser-run-4gDtWa/](../chromium/src/out/XTraceIntegration/validation/browser-run-4gDtWa/) |
+| 矩阵首轮（11/12，含 V05 失败证据） | [browser-run-SLcEOM/](../chromium/src/out/XTraceIntegration/validation/browser-run-SLcEOM/) |
+| switch-only 修复复测 | [browser-run-hvdHaB/](../chromium/src/out/XTraceIntegration/validation/browser-run-hvdHaB/) |
+| launcher 端到端 | [launcher-smoke-wTuzvt/](../chromium/src/out/XTraceIntegration/validation/launcher-smoke-wTuzvt/) |
+| E4 反向断言 | [e4-launcher-static-assert.json](../chromium/src/out/XTraceIntegration/validation/e4-launcher-static-assert.json)、运行时抓取见 launcher-smoke 目录 `chromium-commandlines-at-runtime.txt` |
 | Metal 安装日志 | [metal-toolchain-install.log](../chromium/src/out/XTraceIntegration/validation/metal-toolchain-install.log) |
 | 本轮回归日志 | [repository](../chromium/src/out/XTraceIntegration/validation/repository-tests.log)、[launcher](../chromium/src/out/XTraceIntegration/validation/launcher-tests.log)、[GUI](../chromium/src/out/XTraceIntegration/validation/gui-tests.log) |
 | 原版 Chrome 驱动自检 | [JSON](../chromium/src/out/XTraceIntegration/validation/browser-run-IzTLTk/)、[reverse + fingerprint](../chromium/src/out/XTraceIntegration/validation/browser-run-3M90bD/)、[business](../chromium/src/out/XTraceIntegration/validation/browser-run-lFbeQ8/) |
@@ -141,11 +141,11 @@ ps -p 29930 -o pid,ppid,etime,command
 
 ### E1：接管并完成完整构建（最高优先级）
 
-- [ ] 核验两个 HEAD、工作树、Ninja 命令和剩余磁盘；不清理已有补丁与产物。
-- [ ] 等当前 Ninja 完成；失败时保存首个错误及相关命令，区分依赖准备、上游工具兼容、补丁 C++/生成代码、链接/打包四类。
-- [ ] 对真实问题做最小修复；先复现，不改测试预期掩盖故障。
-- [ ] 修复先验证失败的最小目标，再继续完整 `chrome` 目标；不把局部编译通过当作完成。
-- [ ] 获得完整构建成功退出码，并确认 app、Framework、资源和启动均正常。
+- [x] 核验两个 HEAD、工作树、Ninja 命令和剩余磁盘；未清理已有补丁与产物（HEAD 与 §2 一致；剩余磁盘约 115 GiB）。
+- [x] 等 Ninja 完成：18:07:22 正常结束，50640/50640、`^FAILED` 0（日志中 7 处 `error:` 均为 `webui_js_error` 目标名误匹配）；无依赖/工具链/C++/链接类失败，无需保留失败分类证据。
+- [x] 本轮构建无真实失败；后续产品修复（V05）见 E5 的“复现→根因→最小修复→复测”记录。
+- [x] 增量 `chrome` 构建获得成功退出码 0：`chromium-build-next-nvU5ax.exit-code`（"no work to do"）。
+- [x] app、Framework（版本化布局 `Versions/151.0.7917.0`）、资源与启动均正常：`--version` 输出 `Chromium 151.0.7917.0`；E2 启动验证通过。
 
 以下命令从项目根目录执行。**只在确认同一输出目录没有运行中的 Ninja 后运行**；采用新的日志文件保留历史。
 
@@ -186,11 +186,11 @@ rtc_use_h264 = true
 
 ### E2：验证本次产物身份和基本启动（依赖 E1）
 
-- [ ] 记录构建参数、Chromium/V8 SHA、四补丁摘要、app 可执行文件及实际承载代码的 Framework 摘要。
-- [ ] 用该 app 的绝对路径启动独立临时 profile，不复用用户日常浏览器资料。
-- [ ] 记录 CDP `Browser.getVersion`；必须对应固定 Chromium 151 系列，而不是自检所用 Chrome 153。
-- [ ] 检查启动崩溃、组件动态库缺失、资源装载错误及子进程异常。
-- [ ] 保留 renderer 沙箱；不得加入 `--no-sandbox`、关闭 web security 或开启公网调试端口。
+- [x] 记录构建参数、Chromium/V8 SHA、四补丁摘要、app 可执行文件及 Framework 摘要（[e2-identity/identity.json](../chromium/src/out/XTraceIntegration/validation/e2-identity/identity.json)）。
+- [x] 用该 app 绝对路径启动独立临时 profile（`xtrace-e2-profile-*`，不复用日常资料）。
+- [x] CDP `Browser.getVersion` = `Chrome/151.0.7917.0`，对应固定 151 系列（自检用的 Chrome 153 仅限驱动自检）。注：`revision` 为全零——本地构建未盖章 LASTCHANGE，非版本异常；git HEAD 以 identity.json 为准。
+- [x] 启动无崩溃：stderr 无 `CRASHED`/`dyld: Library not loaded`/`Check failed`/`Fatal error` 签名；干净退出（exit 0）。首次启动约 15 s 属新 bundle 常规校验开销。
+- [x] renderer 沙箱保留：启动参数断言不含 `--no-sandbox`/`--disable-web-security`/`--remote-debugging-port`。
 
 ### E3：运行并审查 12 组浏览器集成（依赖 E2）
 
@@ -220,14 +220,14 @@ node chromium/src/out/XTraceIntegration/validation/browser-integration.cjs \
 
 额外 review 要求：
 
-- [ ] 12 个名字齐全、无失败，且每个版本与命令都指向本次 app；空集合或跳过失败项不算通过。
-- [ ] 页面预期值、实际网络响应、未捕获异常与 renderer crash 分开检查。
-- [ ] Worker 事件核对线程/上下文或来源证据，不以主页面同名 `fetch` 充数；现有脚本的聚合 API 断言不单独证明线程归属。
-- [ ] 资产长度、SHA-1、manifest 中 source 与内容文件一致；不要只验证文件存在。
-- [ ] 检查 v2 是否混入 v1、引用关系是否被 validator 覆盖，以及异常退出是否被误报正常。
-- [ ] 检查 Browser.close 后日志；当前只能证明样本关闭后的可用产物，不能证明不存在未知尾部丢失。
-- [ ] 每组记录事件数、trace 字节数、墙钟时间与峰值 RSS（必要时扩展 browser-integration.cjs 采集），写入运行目录；这是迁移草稿 §12.2 性能基线的输入，漏采则 P2 定标无据。
-- [ ] 出现无法解释的 renderer crash 时，先以 `blink_symbol_level=1 v8_symbol_level=1` 重建复现再定位，不在无符号条件下凭猜测修改补丁；dispatch 家族相关崩溃优先排查 0002 的 arm64 汇编 trampoline（该层有崩溃前科，见 XTRACE-REPORT §12.1）。
+- [x] 12 个名字齐全、无失败（最终运行 browser-run-4gDtWa 12/12，驱动退出码 0）；每个 `version.json`/`command.json` 指向本次 app。首轮 browser-run-SLcEOM 11/12，`causality-switch-only` 失败即 V05 运行证据，修复后单独复测（browser-run-hvdHaB）并全量重跑；失败证据保留未删。
+- [x] 页面预期值（verifyPage 断言）、实际网络响应（`Network.responseReceived` 且状态 200）、未捕获异常（`Runtime.exceptionThrown` = 0）、renderer crash（进程干净退出 exit 0）分开检查。
+- [x] Worker 线程来源：驱动新增 per-`pid:tid` API 集合证据（`worker-context.json`）。实测 `Body.text` 与 worker `fetch` 在 renderer 进程内独立 tid（v1: 43839/68976564），该线程无 Document/EventTarget 等 DOM API；主线程 tid（68976380）只有 DOM 类事件。不以主页面同名 `fetch` 充数。
+- [x] 资产一致性：驱动逐资产断言 `content_path` 不越界、`size` 与实际一致、内容与 manifest `source` 全等、SHA-1 匹配、`truncated=false`。
+- [x] v2 不混 v1：驱动断言每条记录 `schema_version === 2`；引用关系（call_id/parent_id/depth/paired 闭合）由 validator `--schema-version 2` 覆盖；本轮无异常退出被误报（所有案例 exit 0）。
+- [x] Browser.close 后日志检查：样本关闭后产物可用；`closeEvidence` 字段明确记录“无 watermark 协议存在”，不宣称未知尾部零丢失。
+- [x] 基线数据：驱动已扩展采集 traceRecords/traceBytes/wallClockMs/peakRSSKB（进程树 RSS 按 case 私有 user-data-dir 匹配求和），写入 summary.json；12 组数据已汇总入 `integration-progress.json` baseline_metrics。注意：debug component 构建数据，仅作 §12.2 定标输入，不作 release 性能结论。
+- [x] 无无法解释的 renderer crash；未触发符号化重建预案（`blink_symbol_level=1` 预案保留备用）。
 
 脚本是新准备的验证工具，不是已认证的测试框架。`Browser.close` 应答与断连竞态、失败时子进程清理、页面完成等待、API 预期和资产格式都需结合真实运行审查；修驱动错误可以，但必须保留此前失败并解释原因，不能降低产品断言制造通过。
 
@@ -264,39 +264,61 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 
 `cli.py:150–167` 的超时路径使用 terminate/kill，且可返回 0；所以 launcher 的 0 退出码不能单独证明浏览器正常退出或日志完整。review 应结合浏览器 stderr、页面/事件和 validator，明确这是现有定时采集路径的验收，不宣称实现了可靠 stop 协议。
 
-- [ ] 反向断言：不带 `--inject-api-hooks` 的 launcher 命令行与环境不得出现 `--remote-debugging-port` / `--remote-allow-origins`（`cli.py:98–102` 当前行为正确，用断言锁住，防止注入路径的宽泛开关漏进默认路径）。
+- [x] 反向断言（静态半）：`e4-launcher-static-assert.py` 直接调用 `build_chromium_command`（E4 同参数、无 `--inject-api-hooks`），断言命令行与环境均无 `--remote-debugging-port`/`--remote-allow-origins`；证据 `e4-launcher-static-assert.json`（12 个 argv，0 违禁）。
+- [x] 反向断言（运行时半）：launcher 冒烟运行中抓取 10 条真实进程命令行（`chromium-commandlines-at-runtime.txt`），0 条含违禁开关；5 个 renderer 进程全部携带 `--xtrace-causality=sync`（V05 修复在 launcher 链路同样生效）。
+- [x] launcher 退出码 0；唯一 `trace_*.ndjson` 经 `validate_trace.py --schema-version 2 --expect JSON.parse --expect JSON.stringify` 校验 **PASS**（退出码存 `validator.exit-code`），5926 条记录；命令与退出码保存在 [launcher-smoke-wTuzvt/](../chromium/src/out/XTraceIntegration/validation/launcher-smoke-wTuzvt/)。
+- [x] 浏览器 stderr 审查：仅本地未签名 debug 构建的常规噪声（quarantine 属性移除、GCM DEPRECATED_ENDPOINT、关停期 waitpid/mach port），无 XTrace 相关错误。按约定明确：这是现有定时采集路径（terminate/kill 可返回 0）的验收，不宣称可靠 stop 协议（P2 范围）。测试服务 8765 用毕即关。
 
 ### E5：修复入补丁并回归（发生产品代码修复时必做）
 
-- [ ] 每个问题留“复现 → 根因 → 最小修复 → 原断言复测”证据。
-- [ ] 不能只改 ignored 的 `chromium/src`；修复应回写到职责对应的受跟踪补丁，并补回归测试。
-- [ ] 不将全部已应用修改整体塞入某一补丁，破坏 `0001 → 0003 → 0004 → 0002` 分层。
-- [ ] 在独立临时索引/副本重新验证固定基线上的顺序适用性；不得 reset 当前运行树来验证。
-- [ ] 回归主项目、launcher、GUI、golden schema；涉及 Blink 生成器时补 bindings 单测和生成 C++ 编译；涉及网页行为时按 Blink 指南补相应运行测试。
-- [ ] 重建完整 chrome，并重跑失败案例及相关矩阵；报告实际新增/变更测试数量。
+- [x] 复现→根因→最小修复→复测：首轮矩阵 `causality-switch-only` 失败（trace 全为 `schema_version:1`，我的新断言 "v1 record mixed into v2 trace" 捕获）；根因 = `ChromeContentBrowserClient::AppendExtraCommandLineSwitches` 的 renderer 复制列表缺 `xtrace-causality`（设计稿 V05 已登记的缺口，本次获得运行证据）；最小修复 = 该列表加一行 `"xtrace-causality",`；复测通过（6645 条记录、schema 2）。
+- [x] 修复回写受跟踪补丁 `patches/0001-xtrace-native-logger.patch`（该 hunk 行数 13→14），并在 `tests/test_build_scripts.py` 的既有测试中补回归断言（钉住列表相邻行 `"xtrace-categories",\n        "xtrace-causality",\n        "xtrace-enable",`，避免被浏览器侧同名常量误通过）。
+- [x] 修复落在职责对应的 0001（该文件/hunk 本就由 0001 引入），未触碰其他补丁，分层不变。
+- [x] 独立临时索引（`GIT_INDEX_FILE` 指�� /tmp 索引、从两树 HEAD `read-tree`）复验顺序适用性：0001→0003→0004（Chromium）与 0002（V8）全部 `apply --cached --check` + `apply --cached` 干净通过；未 reset 运行树。
+- [x] 回归：主项目 338/338（含新断言与 golden fixture）、launcher 28/28、GUI 211/211，全绿；未涉及 Blink 生成器与网页行为 expectations。
+- [x] 重建完整 chrome（增量 22 步，退出码 0），重跑失败案例（通过）及完整 12 组矩阵（12/12）；测试数量变化：0 新增测试方法（1 个既有方法内新增断言）。
 
 本轮不自动提交或推送，不升级依赖，不修改测试 expectations 隐藏真实行为故障。
 
 ### E6：形成验收包并提交架构 review（依赖 E1–E5）
 
-- [ ] 更新本实施文档、设计草稿中的状态及 `integration-progress.json`，消除历史残留表述。
-- [ ] 保存构建命令、退出码、版本、最终补丁/二进制摘要和环境修复步骤。
-- [ ] 汇总 12 组真实浏览器结果与 launcher 端到端结果，附可点击目录。
-- [ ] 汇总 12 组基线数据（事件数、trace 字节数、墙钟、峰值 RSS）入验收包。
-- [ ] 文档勘误：修正 `docs/chromium-build.md` 中“`Reflect.apply`/`Function.prototype.call/apply` 的 arm64 hook 已禁用”的过时表述——实测 6 个汇编调用点全部活跃且无开关（见 XTRACE-REPORT §12.1）；同时对账 §3 自检 4 组与 §4.2 三个 browser-run 目录的映射关系。
-- [ ] 列出未覆盖能力、已发现但不属于 P1 的缺口，明确“已验证 / 未验证 / 设计要求”；缺口清单须包含迁移草稿 v0.4 新登记项（指纹层与完整环境管理器 P7、P2 producer 完整清单含 browser-network 并轨、§6.6 旧缺陷收口、code cache 路径、证据索引存储决策）。
-- [ ] 总架构师核验原始证据后，才将 P1 标为完成。
+- [x] 本实施文档（v0.3）、设计草稿状态（§2.3/§15）及 `integration-progress.json` 已更新，历史残留表述已消除（构建"进行中"等）。
+- [x] 构建命令、退出码、版本、补丁/二进制摘要和环境修复步骤：`integration-progress.json`（attempts/product_fixes/e2_identity）+ `e2-identity/identity.json` + 各 `.exit-code` 文件。
+- [x] 12 组结果（browser-run-4gDtWa）与 launcher 端到端（launcher-smoke-wTuzvt）已汇总，可点击目录见 §4.2。
+- [x] 12 组基线数据入验收包（`integration-progress.json` baseline_metrics；debug 构建，仅作 §12.2 定标输入）。
+- [x] 文档勘误完成：`docs/chromium-build.md` arm64 hook 表述已改为"当前补丁中 6 个汇编调用点全部活跃且无开关，旧'已禁用'状态不存在"；§3 自检对账已写入（IzTLTk=disabled-json、3M90bD=disabled-reverse+disabled-fingerprint、lFbeQ8=disabled-business，4 样本 3 目录、全 pass、traceRecords=0）。
+- [x] 缺口清单见下方 E6.1；含迁移草稿 v0.4 全部新登记项。
+- [ ] 总架构师核验原始证据后，才将 P1 标为完成（本文件不自行宣告）。
+
+#### E6.1 P1 剩余缺口清单（已验证 / 未验证 / 设计要求）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 四补丁构建 + 12 组矩阵 + launcher 链路 | 已验证 | 本轮证据；fixed 151.0.7917.0 |
+| V05 因果开关命令行转发 | 已验证（已修复） | 补丁 0001 修复并复测；设计稿 V05 条目同步更新 |
+| 可靠 stop / 排空协议 | 未验证（设计要求 P2/P3） | `SKIP_ON_SHUTDOWN`、mojom 无 watermark/ACK；本轮仅证明样本关闭后产物可用，不证明零尾部丢失 |
+| summary 资产模式脱敏 | 未验证（设计要求） | `xtrace_logger.cc:318–375` full 条件外仍附完整 source；矩阵全部采用 full，不宣称 summary 已验证 |
+| browser-network 私有写入并轨（`g_xtrace_browser_network_sequence`、逐事件 `AppendToFile`） | 未验证（设计要求 P2） | producer 完整清单与计数守恒归 P2 |
+| §6.6 旧缺陷逐条收口（result/error 恒空、裸 seq、truncation 双形态、frame_url/origin 恒空、限额不生效、validator 仅查存在） | 未验证（设计要求 P2，schema v3） | 本轮 v1/v2 契约按现状验收 |
+| code cache warm profile 字节码元数据 | 未验证（设计要求 P4 冻结点） | 本轮不含 warm profile 场景 |
+| 证据索引存储决策（SQLite/文件、与 LedgerBackend 关系、重建流程） | 设计要求（P6 启动前冻结） | 本轮只读原始产物，未建索引 |
+| 指纹伪装层 | 显式暂缓 P7 | 首期只记录不改值；本轮 fingerprint-v1 仅验证采集 |
+| 完整环境管理器 | 显式暂缓 P7 | 首期最小 env 集 P6 |
+| release 构建性能基线 | 未验证 | 本轮为 debug component 构建；release 数据须 `scripts/build_xtrace_release.sh` 另测（草稿 §12.3） |
+| 原版 Chrome/153 自检 | 已验证（仅驱动可用性） | 不计入 patched 浏览器验收 |
+| WebSocket 通信 | 边界披露 | reverse 页访问 `ws://127.0.0.1:8765/xtrace-smoke`，测试服务无 WS 握手，出现预期连接错误；未宣称 WS 验证 |
+| 66 工具迁移 | 未开始（前置清单已完成） | 见 [tool-inventory.md](tool-inventory.md)；P6 按清单冻结首批 |
 
 ### E7：（可并行，纯文档）66 工具逐项能力清单
 
 只读任务，不修改任何代码、不启动浏览器，可在构建等待期间进行；随时可中断，不与“P1 不扩成 P2–P7 实施”冲突——这是清单编制，不是工具迁移。
 
-- [ ] 阅读 Firefox-Reverse 的 `additions/browser/components/agent-sidebar/modules/Tools.sys.mjs` 及关联模块，产出 66 项工具逐项清单：名称、目标分组（A 证据只读 / B 实验控制 / C 页面调试 / D 宿主执行）、依赖的后端或特权 API、迁移状态预判（完整/部分/不可用及原因）。
-- [ ] 产出落在 `docs/` 下新文件（如 `tool-inventory.md`），作为 P6 前置交付物；P6 启动时按此清单冻结首批 A 组工具范围。
+- [x] 阅读 Firefox-Reverse 的 `additions/browser/components/agent-sidebar/modules/Tools.sys.mjs` 及关联模块，产出 66 项工具逐项清单：名称、目标分组（A 证据只读 / B 实验控制 / C 页面调试 / D 宿主执行）、依赖的后端或特权 API、迁移状态预判（完整/部分/不可用及原因）。
+- [x] 产出落在 `docs/tool-inventory.md`（分组统计 A 13 / B 22 / C 16 / D 15，含 P6 首批冻结建议与 4 项不可用工具的 P7 依赖说明），作为 P6 前置交付物；P6 启动时按此清单冻结首批 A 组工具范围。
 
 ## 6. 需要架构师重点纠偏的事项
 
-1. **命令行因果开关转发。** `chrome_content_browser_client.cc:3143–3152` 的 renderer 复制列表缺 `xtrace-causality`。必须先通过 switch-only 案例获得运行证据；不允许靠 launcher 镜像环境变量或把测试改为 v1 掩盖问题。
+1. **命令行因果开关转发（已闭环）。** `chrome_content_browser_client.cc:3143–3152` 的 renderer 复制列表缺 `xtrace-causality`——switch-only 案例已获得运行证据（首轮失败，v1 记录混入），随后在补丁 0001 内最小修复、干净索引复验、增量重建、复测与全量矩阵通过；未靠 launcher 镜像环境变量或改回 v1 掩盖问题。launcher 链路实测 renderer 进程携带 `--xtrace-causality=sync`。
 2. **关闭语义。** `xtrace_host_impl.cc:143–147` 使用 `SKIP_ON_SHUTDOWN`，现有 mojom 无 watermark/ACK。正常退出及 validator 通过不等于“可靠排空已实现”；新停止协议属于 P2/P3。
 3. **summary 资产模式。** `xtrace_logger.cc:318–375` 仍可在 manifest/event 附带完整 source。当前矩阵采用 full，不能借此宣称 summary 已验证或具备脱敏保证。
 4. **执行层限制。** d8 已证明 `--max-opt=0` 可被显式 Sparkplug 参数覆盖；后续精细模式必须校验真实 tier。当前 P1 不扩成 observer 或全 JIT 覆盖工程。
@@ -333,11 +355,11 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 
 只有以下条件全部成立，当前“完整 patched Chromium 构建及浏览器集成”目标才完成：
 
-- 固定 Chromium/V8 与四补丁身份可追溯，完整 `chrome` 构建成功且本次 app 实际运行。
-- 12 组集成矩阵和实际 launcher 路径均有真实执行证据，必要的驱动缺口已补验；所有失败都有闭环或明确判定为非目标行为的证据。
-- 必要修复可通过受跟踪补丁重现，相关回归通过，renderer 沙箱保留。
-- 12 组基线数据（事件数/字节/墙钟/RSS）已记录；`docs/chromium-build.md` 过时表述等文档勘误完成。
-- 文档、进度清单和原始证据一致，不将原版自检、d8、静态测试或正常退出夸大为完整浏览器能力。
-- 剩余 P2–P7 设计工作明确列出，由总架构师完成本阶段 review。
+- [x] 固定 Chromium/V8 与四补丁身份可追溯（e2-identity 摘要 + HEAD），完整 `chrome` 构建成功（退出码 0 存档）且本次 app 实际运行（E2 + 矩阵 + launcher）。
+- [x] 12 组集成矩阵（12/12）和实际 launcher 路径均有真实执行证据；唯一失败（causality-switch-only=V05）已闭环修复并全量重跑通过；WebSocket 预期连接错误已判为非目标行为并披露。
+- [x] 必要修复（V05）已回写受跟踪补丁 0001 并经干净索引顺序复验；回归 338/28/211 全绿；renderer 沙箱全程保留。
+- [x] 12 组基线数据已记录（integration-progress.json baseline_metrics，debug 构建口径已注明）；`docs/chromium-build.md` 勘误与自检对账完成。
+- [x] 文档、进度清单和原始证据一致；原版自检、d8、静态测试均按其边界表述，未夸大为完整浏览器能力。
+- [x] 剩余 P2–P7 设计工作已在 E6.1 缺口清单明确列出，待总架构师 R3 review 后将 P1 标为完成。
 
-交接不等于完成；目前仍处于 E1，原构建任务继续运行。总架构师不再并行推进新的执行任务，由用户指定的执行层接管后续实施。
+执行层 E1–E7 已全部执行完毕（2026-09-19）；本文件 v0.3 为验收包入口，原始证据目录见 §4.2。

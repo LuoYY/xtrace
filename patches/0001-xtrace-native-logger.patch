@@ -98,13 +98,14 @@ index fee9425c5c488..6377858aa20fe 100644
  #include "services/network/public/mojom/network_service.mojom.h"
  #include "services/network/public/mojom/url_loader_factory.mojom.h"
  #include "services/network/public/mojom/web_transport.mojom.h"
-@@ -3123,6 +3140,13 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+@@ -3123,6 +3140,14 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
          embedder_support::kOriginTrialPublicKey,
          switches::kReaderModeHeuristics,
          translate::switches::kTranslateSecurityOrigin,
 +        "xtrace-capture-values",
 +        "xtrace-capture-assets",
 +        "xtrace-categories",
++        "xtrace-causality",
 +        "xtrace-enable",
 +        "xtrace-file",
 +        "xtrace-max-body-bytes",

@@ -1,6 +1,6 @@
 # XTrace × Firefox-Reverse：Chromium 迁移增强方案设计草稿
 
-- 版本：v0.4（完整构建与集成验证进行中；本轮为范围补齐与设计收口的文档级修订，记录见第 16 节）
+- 版本：v0.5（完整构建与浏览器集成已执行完毕：构建成功、12 组矩阵 12/12、launcher 补验通过、V05 修复闭环；本轮为状态收口，设计内容不变，记录见第 16 节）
 - 日期：2026-09-19
 - 状态：设计草稿；区分已验证事实、已选定设计和仍需实现验收的项目。
 - 依据：两项目报告、已返回的子 agent 研究结论、固定版本源码核对与本地验证实验。
@@ -76,7 +76,7 @@
 | launcher / GUI 逻辑测试 | 本轮再次分别 28 / 211 项通过；不代表浏览器行为验收 |
 | schema v2 golden fixture 校验 | v0.2 通过 |
 | Blink 上游 Python 单测 | 隔离 Python 3.11.16 中 57 项全部通过；Python 3.13.11 中有 6 项因已删除的 unittest 别名失败，未修改测试 |
-| 完整 patched Chromium 构建及浏览器集成 | 完整 `chrome` 目标构建进行中（2026-09-19 起，当日状态见实施交接文档）；12 组集成脚本已准备，等待本次产物后执行；原版 Chrome 上的脚本自检不计为通过 |
+| 完整 patched Chromium 构建及浏览器集成 | **已完成（待架构 review）**：`chrome` 目标 50640/50640 构建成功（增量退出码 0 存档）；12 组集成矩阵 12/12 通过；launcher 端到端补验通过；首轮发现的 V05 缺口已修复闭环。证据与基线数据见[实施交接文档](chromium-patched-build-implementation.md) |
 
 后续补丁依赖顺序为 `0001 → 0003 → 0004 → 0002`，见 `scripts/apply_patches.sh:85–93`。将依赖补丁一次性对原始树执行检查，不等于逐层应用验证。
 
@@ -101,7 +101,7 @@
 | V02 | 当前补丁与仓库测试的静态契约一致 | 物化 95 个 Chromium、126 个 V8 补丁文件，补入未修改的 document.idl；主套件 338 项通过，无 skip |
 | V03 | launcher、GUI 逻辑和 v2 fixture 基线通过 | 28 项、211 项及 golden validator 通过；不是新 UI 或真实浏览器验收 |
 | V04 | 本机可生成该版本的 d8 构建图 | 使用已有 GN/Clang/Ninja，生成 LASTCHANGE 后 GN 成功；无需修改上游源码或运行全部 hooks |
-| V05 | 仅传 `--xtrace-causality=sync` 的配置转发存在明确缺口 | 顺序应用后的 `chrome_content_browser_client.cc:3143–3152` 复制列表不含此开关；renderer 的读取逻辑仍默认 off；实际启动影响需浏览器验收，不能依赖 launcher 镜像环境变量掩盖缺口 |
+| V05 | 仅传 `--xtrace-causality=sync` 的配置转发缺口——**已修复并验证** | 原缺口：`chrome_content_browser_client.cc` 的 renderer 复制列表不含此开关。2026-09-19 集成矩阵 `causality-switch-only` 首轮失败（v1 记录混入）确证；补丁 0001 加入该开关后干净索引复验、增量重建、单案例与 12 组全量复测通过，launcher 链路 renderer 进程实测携带该开关 |
 | V06 | 当前 `capture_assets=summary` 不排除完整源码 | 物化 `xtrace_logger.cc:318–375` 在 full 条件外向 manifest/event 附加 source；现有测试还断言此内容，迁移时需同步改变实现与契约 |
 | V07 | 当前链路没有热更新与可靠 stop 协议 | `GetCachedConfig` 是静态缓存；mojom 只有 Log/LogBatch/LogAsset，无响应、水位或 generation；不是仅补一个 CDP 命令就能完成 |
 | V08 | 普通 MV3 扩展不能直接作为受信 browser 控制入口 | `debugger_api.cc:247,746,825` 限制信任资格；browser target 在 AttachSession 拒绝不受信客户端 |
@@ -559,7 +559,7 @@ Agent 首期以限额证据切片和本地索引为输入，结论可以回链�
 | 阶段 | 主要交付 | 验收门槛 | 依赖 |
 | --- | --- | --- | --- |
 | P0：上游 d8 追踪 PoC（最小验证已通过） | 独立产物、10 组覆盖样本、4 组 tier 检查；见第 9.6 节 | 固定版本下样本语义、ShortStar/Wide/分支/调用/返回/异常及真实 tier 已核验；不外推为任意程序保证 | 固定源码与构建环境 |
-| P1：重现 XTrace 基线（构建进行中） | 四补丁实际应用及 338 项静态/分析测试通过；完整构建运行中，浏览器集成待执行层验收 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
+| P1：重现 XTrace 基线（**构建与浏览器集成已完成，待 R3 review 冻结**） | 四补丁实际应用及静态/分析测试通过；完整 `chrome` 构建成功；12 组矩阵 12/12；launcher 端到端通过；V05 修复闭环 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
 | P2：采集与写入基础 | producer 登记（§7.1 全部写入源，含 browser-network 并轨）、有界批量、manifest、终态和 watermark；§6.6 旧缺陷逐条收口 | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete；限额与 summary 截断有触发用例 | P1 |
 | P3：控制面 | browser-only 域、pipe、配置 generation、身份映射 | renderer/worker 首次生效及更新可确认；断连/重连状态明确 | P2 |
 | P4：结构化 Ignition | observer、字节码元数据（含 code cache 路径决策）、执行层与值边界 | 与 P0 对照；无重复/漏记的已支持路径；关闭开销及日志速率在 **release 构建**上可测（debug 构建 JS 执行慢约一个数量级，不作性能依据） | P0、P2/P3 契约 |
@@ -691,7 +691,7 @@ Firefox-Reverse 对照位置以其仓库为根：`additions/browser/components/a
 
 ## 15. 复现材料与下一步
 
-已完成 P0 的最小 d8 构建/运行验证，以及 P1 的补丁/静态测试部分，不等于 P0–P7 全部完成。当前 Chromium/V8 工作树已应用四补丁，完整构建正在进行；未启动子 agent，未实现新的自定义域、writer 或 observer。后续由执行层接管实施，本会话负责架构 review，详见[实施交接文档](chromium-patched-build-implementation.md)。
+已完成 P0 的最小 d8 构建/运行验证、P1 的补丁/静态测试部分，以及 P1 的完整 patched Chromium 构建、12 组浏览器集成矩阵与 launcher 端到端补验（2026-09-19；唯一产品修复为 V05 因果开关转发，已在补丁 0001 内闭环）。66 项工具迁移前置清单已产出（[tool-inventory.md](tool-inventory.md)）。P1 的最终冻结待总架构师核验原始证据；未启动子 agent，未实现新的自定义域、writer 或 observer。实施证据与剩余缺口见[实施交接文档](chromium-patched-build-implementation.md)。
 
 ### 15.1 本地验证产物
 
@@ -741,9 +741,10 @@ python3 chromium/src/out/XTraceD8Verify/validation/verify_tiers.py \
 
 `d8-cases/summary.json`、`d8-tiers/summary.json` 保存断言结果，旁边保留生成的 JS、stdout/stderr；`baseline-evidence.json` 包含源码/补丁/二进制摘要。运行脚本会覆盖自身上次实验输出，需比较历史结果时先保留相应目录。
 
-完整 patched Chromium 构建已在 `out/XTraceIntegration` 运行；不得在同一输出目录重复启动 Ninja。当前进度、运行进程、12 组浏览器矩阵、launcher 补验及架构 review 关卡统一见[实施交接文档](chromium-patched-build-implementation.md)。第 13.2 节仍需新实现才能验证的项目不因本次交接而视为完成。
+完整 patched Chromium 构建已在 `out/XTraceIntegration` 完成（增量确认退出码 0 存档）；同一输出目录的后续增量构建须先确认无运行中 Ninja。12 组浏览器矩阵、launcher 补验结果、基线数据与架构 review 关卡统一见[实施交接文档](chromium-patched-build-implementation.md)。第 13.2 节仍需新实现才能验证的项目不因本次完成而视为完成。
 
 ## 16. 修订记录
 
-- v0.4（2026-09-19）：登记指纹伪装层缓期与环境管理最小集（§1.1、§5）；新增既有缺陷收口表（§6.6）；补 producer 完整清单与采样计数约定（§7.1）；补 worklet 边界（§8.3）、code cache 路径（§9.2）、tier 校验双层（§9.4）、能力协商三态与非增强浏览器立场（§11.1）、证据索引存储决策（§11.2）；更新 P2/P4/P6 阶段交付与验收（§12）、测试宿主分配与基线采集（§12.2）、迭代成本预算（§12.3）、收敛决策表（§13.1）、源码索引（§14）。本轮为文档级补充，不改变任何已验证结论与实施状态。
+- v0.5（2026-09-19）：P1 完整构建与浏览器集成执行完毕并写入状态：`chrome` 50640/50640 构建成功、12 组矩阵 12/12、launcher 端到端通过、V05 缺口修复闭环（补丁 0001 + 回归断言 + 干净索引复验）；产出 66 工具清单 `docs/tool-inventory.md`（P6 前置交付物）；`docs/chromium-build.md` arm64 hook 表述勘误。仅状态与文档更新，设计决策不变。
+- v0.4（2026-09-19）：登记指纹伪装层缓期与环境管理最小集（§1.1、§5）；新增既有缺陷收口表（§6.6）；补 producer 完整清单与采样计数约定（§7.1）；补 worklet 边界（§8.3）、code cache 路径（§9.2）、tier 校验双层（§9.4）、能力协商三态与非增强浏览器立场（§11.1）、证据索引存储决策（§11.2）；更新 P2/P4/P6 阶段��付与验收（§12）、测试宿主分配与基线采集（§12.2）、迭代成本预算（§12.3）、收敛决策表（§13.1）、源码索引（§14）。本轮为文档级补充，不改变任何已验证结论与实施状态。
 - v0.3（2026-09-19）：四补丁应用到固定工作树；P0 d8 验证完成；转入完整构建与浏览器集成。

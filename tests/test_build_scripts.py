@@ -2870,6 +2870,12 @@ class BuildScriptTests(unittest.TestCase):
                    / "chrome_content_browser_client.cc").read_text(encoding="utf-8")
 
         self.assertIn('"xtrace-causality"', logger)
+        # The renderer switch-forwarding list must carry the causality switch;
+        # adjacency pins it to kSwitchNames (not the browser-side constant).
+        self.assertIn(
+            '"xtrace-categories",\n        "xtrace-causality",\n        "xtrace-enable",',
+            browser,
+        )
         self.assertIn('"schema_version\\":2"', logger)
         self.assertIn("thread_local std::vector<XTraceActivation>", logger)
         self.assertIn("AppendCausalityFields", logger)
