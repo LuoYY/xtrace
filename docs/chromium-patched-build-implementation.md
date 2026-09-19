@@ -1,6 +1,6 @@
 # Patched Chromium 构建与浏览器集成实施交接
 
-- 文档版本：v0.1。
+- 文档版本：v0.2（新增崩溃诊断预案、性能基线采集、launcher 反向断言、文档勘误与可并行的工具清单任务）。
 - 状态快照：2026-09-19 15:40:23，UTC+08:00；进程、日志和磁盘数据均为该时刻快照，不是持续更新的状态。
 - 项目根目录：`/Users/luoyy/work/github/GitHub/xtrace`。
 - 当前阶段：迁移方案 P1，完整 patched Chromium 构建进行中，浏览器集成尚未验收。
@@ -26,7 +26,7 @@
 | Chromium HEAD | `73088b4e50b1dc69eaa0bdb14a8e4592813174fd` |
 | V8 HEAD | `af6aa2ec5047676cfb3150b46449faac7578be7e`，来自上述 Chromium 的 DEPS |
 | DevTools HEAD | `07482123637227aa4c1afef4b1b80abb66683063` |
-| XTrace HEAD | `787d13ac80307e280c92bfd09852b6d6aa8c6d6d`，分支 `enhance` |
+| XTrace HEAD | `787d13ac80307e280c92bfd09852b6d6aa8c6d6d`，分支 `enhance`；其后仅有文档自身的提交（如 47d6994），不计入基线差异 |
 | 源码状态 | Chromium/V8 已顺序应用四补丁；尚无本轮额外 C++ 修复 |
 | 工作树快照 | Chromium `git status --short` 为 93 条，V8 为 126 条；目录折叠意味着这不是精确修改文件数 |
 | 主仓库状态 | 创建本交接文档前干净；不能据此认定 nested Chromium/V8 也干净 |
@@ -56,7 +56,7 @@
 | 完整 Chromium GN | 成功 | 31344 targets / 4812 files |
 | 完整 `chrome` 编译 | 运行中 | 尚无完整成功退出码 |
 | 浏览器集成脚本 | 已准备 12 组 | 真实 patched Chromium 尚未运行 |
-| 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收 |
+| 原版 Chrome 脚本自检 | 4 组关闭采集样本通过 | Chrome/153.0.8010.50；只证明测试驱动可用，不算固定版本验收；4 组与 §4.2 三个 browser-run 目录的对应关系在 E6 对账说明 |
 | launcher 端到端采集 | 待执行 | 测试驱动直接启动 Chromium，尚未覆盖 launcher 启动链路 |
 | 最终复现与证据 review | 待执行 | 不得提前标记 P1 完成 |
 
@@ -226,6 +226,8 @@ node chromium/src/out/XTraceIntegration/validation/browser-integration.cjs \
 - [ ] 资产长度、SHA-1、manifest 中 source 与内容文件一致；不要只验证文件存在。
 - [ ] 检查 v2 是否混入 v1、引用关系是否被 validator 覆盖，以及异常退出是否被误报正常。
 - [ ] 检查 Browser.close 后日志；当前只能证明样本关闭后的可用产物，不能证明不存在未知尾部丢失。
+- [ ] 每组记录事件数、trace 字节数、墙钟时间与峰值 RSS（必要时扩展 browser-integration.cjs 采集），写入运行目录；这是迁移草稿 §12.2 性能基线的输入，漏采则 P2 定标无据。
+- [ ] 出现无法解释的 renderer crash 时，先以 `blink_symbol_level=1 v8_symbol_level=1` 重建复现再定位，不在无符号条件下凭猜测修改补丁；dispatch 家族相关崩溃优先排查 0002 的 arm64 汇编 trampoline（该层有崩溃前科，见 XTRACE-REPORT §12.1）。
 
 脚本是新准备的验证工具，不是已认证的测试框架。`Browser.close` 应答与断连竞态、失败时子进程清理、页面完成等待、API 预期和资产格式都需结合真实运行审查；修驱动错误可以，但必须保留此前失败并解释原因，不能降低产品断言制造通过。
 
@@ -262,6 +264,8 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 
 `cli.py:150–167` 的超时路径使用 terminate/kill，且可返回 0；所以 launcher 的 0 退出码不能单独证明浏览器正常退出或日志完整。review 应结合浏览器 stderr、页面/事件和 validator，明确这是现有定时采集路径的验收，不宣称实现了可靠 stop 协议。
 
+- [ ] 反向断言：不带 `--inject-api-hooks` 的 launcher 命令行与环境不得出现 `--remote-debugging-port` / `--remote-allow-origins`（`cli.py:98–102` 当前行为正确，用断言锁住，防止注入路径的宽泛开关漏进默认路径）。
+
 ### E5：修复入补丁并回归（发生产品代码修复时必做）
 
 - [ ] 每个问题留“复现 → 根因 → 最小修复 → 原断言复测”证据。
@@ -278,8 +282,17 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 - [ ] 更新本实施文档、设计草稿中的状态及 `integration-progress.json`，消除历史残留表述。
 - [ ] 保存构建命令、退出码、版本、最终补丁/二进制摘要和环境修复步骤。
 - [ ] 汇总 12 组真实浏览器结果与 launcher 端到端结果，附可点击目录。
-- [ ] 列出未覆盖能力、已发现但不属于 P1 的缺口，明确“已验证 / 未验证 / 设计要求”。
+- [ ] 汇总 12 组基线数据（事件数、trace 字节数、墙钟、峰值 RSS）入验收包。
+- [ ] 文档勘误：修正 `docs/chromium-build.md` 中“`Reflect.apply`/`Function.prototype.call/apply` 的 arm64 hook 已禁用”的过时表述——实测 6 个汇编调用点全部活跃且无开关（见 XTRACE-REPORT §12.1）；同时对账 §3 自检 4 组与 §4.2 三个 browser-run 目录的映射关系。
+- [ ] 列出未覆盖能力、已发现但不属于 P1 的缺口，明确“已验证 / 未验证 / 设计要求”；缺口清单须包含迁移草稿 v0.4 新登记项（指纹层与完整环境管理器 P7、P2 producer 完整清单含 browser-network 并轨、§6.6 旧缺陷收口、code cache 路径、证据索引存储决策）。
 - [ ] 总架构师核验原始证据后，才将 P1 标为完成。
+
+### E7：（可并行，纯文档）66 工具逐项能力清单
+
+只读任务，不修改任何代码、不启动浏览器，可在构建等待期间进行；随时可中断，不与“P1 不扩成 P2–P7 实施”冲突——这是清单编制，不是工具迁移。
+
+- [ ] 阅读 Firefox-Reverse 的 `additions/browser/components/agent-sidebar/modules/Tools.sys.mjs` 及关联模块，产出 66 项工具逐项清单：名称、目标分组（A 证据只读 / B 实验控制 / C 页面调试 / D 宿主执行）、依赖的后端或特权 API、迁移状态预判（完整/部分/不可用及原因）。
+- [ ] 产出落在 `docs/` 下新文件（如 `tool-inventory.md`），作为 P6 前置交付物；P6 启动时按此清单冻结首批 A 组工具范围。
 
 ## 6. 需要架构师重点纠偏的事项
 
@@ -290,6 +303,7 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 5. **测试范围。** 聚合 API 名字、单个 profile 名称和逻辑测试绿灯不是所有浏览器行为的证明；特别审查 Worker 来源、网络材料、异常路径和实际产物身份。
 6. **已知样本边界。** reverse 页面访问固定 `ws://127.0.0.1:8765/xtrace-smoke`，现有服务器不提供 WebSocket 握手；可能出现预期连接错误，不能宣称 WebSocket 成功通信已验证，也不能吞掉其他网络错误。
 7. **补丁与构建效率。** 一次处理同类根因，先最小目标后全量；只在确认版本或工具链不匹配后考虑调整，不每次失败都重跑 sync/清空 out。
+8. **基线与诊断。** 12 组矩阵同时承担性能基线采集（事件数/字节/墙钟/RSS），漏采则 P2 性能目标无从定标；renderer 崩溃按 E3 的符号化预案重建复现，不在无符号条件下猜修补丁。
 
 ## 7. 分工、review 关卡与回报格式
 
@@ -322,6 +336,7 @@ PYTHONPATH="$ROOT/xtrace-launcher" PYTHONDONTWRITEBYTECODE=1 \
 - 固定 Chromium/V8 与四补丁身份可追溯，完整 `chrome` 构建成功且本次 app 实际运行。
 - 12 组集成矩阵和实际 launcher 路径均有真实执行证据，必要的驱动缺口已补验；所有失败都有闭环或明确判定为非目标行为的证据。
 - 必要修复可通过受跟踪补丁重现，相关回归通过，renderer 沙箱保留。
+- 12 组基线数据（事件数/字节/墙钟/RSS）已记录；`docs/chromium-build.md` 过时表述等文档勘误完成。
 - 文档、进度清单和原始证据一致，不将原版自检、d8、静态测试或正常退出夸大为完整浏览器能力。
 - 剩余 P2–P7 设计工作明确列出，由总架构师完成本阶段 review。
 

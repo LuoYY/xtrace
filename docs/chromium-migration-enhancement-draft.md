@@ -1,6 +1,6 @@
 # XTrace × Firefox-Reverse：Chromium 迁移增强方案设计草稿
 
-- 版本：v0.3（完整构建与集成验证进行中）
+- 版本：v0.4（完整构建与集成验证进行中；本轮为范围补齐与设计收口的文档级修订，记录见第 16 节）
 - 日期：2026-09-19
 - 状态：设计草稿；区分已验证事实、已选定设计和仍需实现验收的项目。
 - 依据：两项目报告、已返回的子 agent 研究结论、固定版本源码核对与本地验证实验。
@@ -27,8 +27,14 @@
 | Ignition 执行前事件与选定 WebIDL 入口 | MV3 sidePanel、多平台 | 全量无损高频采集、零开销 |
 | Electron、Node Host、首批只读分析工具 | 其余工具分批迁移 | 通用自动还原任意 VMP 算法 |
 | 日志、脚本资产、分析结论的证据链 | 编译器层语义增强 | 默认兼容任意 Chromium 版本 |
+| 最小隔离实验环境（独立 profile、专用实例生命周期与端口管理） | 完整环境管理器；指纹伪装层 | 对未授权第三方目标站的使用 |
 
 所有测试以本地、自有或明确授权的页面和样本为对象。增强能力不以关闭 renderer 沙箱、向公网暴露调试端口或默认执行外部脚本为前提。
+
+两个原属 Firefox-Reverse 主能力的取舍在此显式登记（v0.4 补充，此前版本未提，属无声的范围缺口）：
+
+- **指纹伪装层（FrxFingerprintConfig 对应物）显式暂缓至 P7。** 首期只记录指纹面 API 的读取（现有 `fingerprint` 类别），不修改任何返回值。理由：首期目标是可验证的采集语义与控制面；指纹覆盖层按迁移分析报告的三档策略落地（UA/UA-CH/时区/locale/屏幕走 CDP override 与启动开关，零补丁；hardwareConcurrency/WebGL 任意串/canvas/audio 噪声需 Blink patch，可参考 Brave farbling），是独立工程，与采集契约无依赖。环境管理的接口设计须为其预留挂载点（每环境一份指纹 JSON）。
+- **环境管理首期只交付最小集。** 首个闭环的“创建隔离实验环境”由 P6 的最小 env 能力承担：隔离 profile、专用实例启动/停止、实例所有权与端口管理。Firefox-Reverse `EnvironmentBackend` 的端口扫描、真实 bind 探测、进程状态机与 macOS `exec -a` 伪装逻辑届时平移；完整版（含指纹挂载、暖 profile 复用策略）随 P7 一并落地。
 
 ## 2. 依据、基线与验证状态
 
@@ -70,7 +76,7 @@
 | launcher / GUI 逻辑测试 | 本轮再次分别 28 / 211 项通过；不代表浏览器行为验收 |
 | schema v2 golden fixture 校验 | v0.2 通过 |
 | Blink 上游 Python 单测 | 隔离 Python 3.11.16 中 57 项全部通过；Python 3.13.11 中有 6 项因已删除的 unittest 别名失败，未修改测试 |
-| 完整 patched Chromium 构建及浏览器集成 | 完整 `chrome` 目标构建进行中；12 组集成脚本已准备，等待本次产物后执行；原版 Chrome 上的脚本自检不计为通过 |
+| 完整 patched Chromium 构建及浏览器集成 | 完整 `chrome` 目标构建进行中（2026-09-19 起，当日状态见实施交接文档）；12 组集成脚本已准备，等待本次产物后执行；原版 Chrome 上的脚本自检不计为通过 |
 
 后续补丁依赖顺序为 `0001 → 0003 → 0004 → 0002`，见 `scripts/apply_patches.sh:85–93`。将依赖补丁一次性对原始树执行检查，不等于逐层应用验证。
 
@@ -179,7 +185,8 @@ Electron 工作台（首期）             MV3 sidePanel（后续）
 | 浏览器调试、DOM、网络工具 | 采用 CDP / XTrace adapters | 声明字段与后端实际采集一致 |
 | WebApiTraceCore | 重写为 Blink 生成器与运行时支持 | 不假设 setter、constructor、Promise 完成已覆盖 |
 | JsvmpTraceCore | 重写为 V8 observer 与消费端协议 | 分清 script ID、字节码 offset 和 VMP 的 VPC |
-| 环境管理 | 映射到独立 profile、启动参数、存储和显式 CDP 能力 | 不承诺 Chromium 无法提供的 Gecko 行为 |
+| 环境管理 | 首期最小集映射到独立 profile、启动参数、存储和显式 CDP 能力；完整环境管理器随 P7（§1.1） | 不承诺 Chromium 无法提供的 Gecko 行为 |
+| 指纹配置层 | 显式暂缓至 P7（§1.1）；首期保留现有 fingerprint 采集类别，只记录不改值 | 三档策略按迁移分析报告 §7 执行：CDP override 与启动开关优先，Blink patch 只补剩余字段 |
 
 工具迁移建议分组：
 
@@ -187,6 +194,8 @@ Electron 工作台（首期）             MV3 sidePanel（后续）
 - **B：实验控制**——启动环境、打开本地测试页面、开始/停止采集、查询状态。
 - **C：页面调试**——DOM、网络、调试器、截图等，逐项声明作用范围和副作用。
 - **D：宿主执行**——文件写入、Node/Python、依赖安装等，最后接入，执行前经过统一策略。
+
+66 项工具的逐项能力清单是 P6 的**前置交付物**，不是 P6 中的活动：它只依赖阅读 Firefox-Reverse 源码，不依赖任何浏览器产物，可在 P1 期间并行完成（交接文档 E7）。每项标注完整/部分/不可用及原因，并给出目标分组（A–D）；P6 启动时按清单冻结首批 A 组工具范围，不在验收时临时议定。
 
 Firefox-Reverse 文件需逐项核对许可证和来源。不得因为 XTrace 根目录为 MIT，就将迁入的 MPL-2.0 文件或 Chromium/Blink/V8 修改统一改标为 MIT。
 
@@ -246,6 +255,23 @@ browser 绑定日志 receiver 时登记进程归属，核验 renderer 上报的�
 
 现有 oracle 中 `derived`、`observed_output`、`unresolved` 的含义应显式映射，不因 UI 展示需要改成确定的“已还原算法”。
 
+### 6.6 既有缺陷清单的收口
+
+`docs/runtime-trace-plan.md` 与 `docs/trace-log-improvements.md`（2026-07）列出的已知缺陷不得随 producer 移植原样进入 v3。逐条处置如下；P2 验收逐项核对，v3 validator 必须断言字段被实际填充而不仅是存在：
+
+| 旧缺陷（出处） | v3 处置 |
+| --- | --- |
+| `result`/`error` 恒为 null（trace-log-improvements §1.1） | 值与错误进入 §6.4 的有界值/资产契约；producer 移植时接线，不接线的字段删除，不留恒空字段 |
+| `seq` 每进程重复、非文件级单调（§1.2） | §6.2 以 `producer_seq` + `writer_seq` 替代；不再有裸 `seq` |
+| truncation 双形态并存（§1.3） | 单一截断形态：资产引用 + 原始长度/保存长度/摘要（§6.4） |
+| `frame_url`/`origin` 恒空（§2.1） | §6.2 分层身份字段；缺失写 unresolved，不留空字符串占位 |
+| 脱敏边界文档与实现矛盾（§3.1） | 默认本地全保真 + 显式外发脱敏策略（§11.2）；文档与实现必须一致 |
+| `LogBatch` 已实现但无调用点，逐事件 IPC（§4.1） | §7.1 的有界批量是唯一上报路径 |
+| upload body/header 限额从不生效（§4.2） | §6.4 限额与截断状态；P2 验收包含限额触发用例 |
+| validator 只查字段存在（§5.1） | v3 validator 增加按事件类型断言已填充的契约测试 |
+| summary 模式仍附完整 source（本稿 V06） | 迁移时同步修改实现与契约；测试证明 summary 不嵌入完整源码（§6.4） |
+| browser-network 私有计数器与逐事件 `AppendToFile`（`chrome_content_browser_client.cc:6043,6634`） | 并入 §7.1 单一 writer 与计数守恒；producer 完整清单见 §7.1 |
+
 ## 7. 写入、背压与停止协议
 
 这是结构化高频采集的前置工程，不应等字节码事件接入后再补。
@@ -259,7 +285,14 @@ browser 绑定日志 receiver 时登记进程归属，核验 renderer 上报的�
 - 选中过滤条件的事件先分配逻辑序号；溢出导致的缺口以累计计数和区间摘要记录，不能悄悄重排成连续序号。
 - crash 可能丢失最后一段尚未上报的事件和计数；不能将未知损失伪装成零。
 
-选定计数契约如下：producer 记录 `eligible/enqueued/dropped`，writer 记录 `accepted/written/failed`。正常收尾要求 `eligible = enqueued + dropped`、`enqueued = accepted`、`accepted = written + failed`；每个 producer 的终止 watermark 携带最终序号与计数。只有这些等式成立、所有 producer 已结算且 `dropped = failed = 0`，才可报告 complete；crash 等导致计数未知时报告 incomplete，不补成零。这是实现验收契约，不是现有 writer 的保证。
+首期须登记的 producer 清单（缺一不得结算 complete）：
+
+- renderer 内 XTraceLogger 各线程实例（含 dedicated/shared/service worker 线程）；
+- browser 进程网络插桩（`chrome_content_browser_client.cc` 的 URLLoaderThrottle 路径）——当前它使用私有计数器 `g_xtrace_browser_network_sequence` 并逐事件 `AppendToFile` 自行写文件，迁移时必须取消其私有写入路径、并入单一 writer，同时拆除该私有计数器；
+- 资产通道与动态代码通道（作为所属 producer 计数的一部分，或单列 producer；二选一写入 manifest）；
+- V8 事件经 event_logger 回调汇入 Blink，计入所属 renderer/Worker 线程 producer，不单列。
+
+选定计数契约如下：producer 记录 `eligible/enqueued/dropped`，writer 记录 `accepted/written/failed`。正常收尾要求 `eligible = enqueued + dropped`、`enqueued = accepted`、`accepted = written + failed`；每个 producer 的终止 watermark 携带最终序号与计数。只有这些等式成立、所有 producer 已结算且 `dropped = failed = 0`，才可报告 complete；crash 等导致计数未知时报告 incomplete，不补成零。这是实现验收契约，不是现有 writer 的保证。若将来引入 1/k 采样，被采样排除的事件计入单列的 `sampled_out`，不混入 `dropped`，保证上述等式在采样模式下仍成立。
 
 ### 7.2 capture 状态机
 
@@ -336,6 +369,7 @@ idle → starting → active → stopping → complete
 - 已有 Worker：在所属线程应用新配置并逐一确认。
 - 新 Worker：首次执行前读取最新 generation；不能只依赖向现有线程广播。
 - Service Worker：覆盖其独立启动和生命周期路径。
+- Worklet（AudioWorklet 等）首期不覆盖其配置传播与事件归属；指纹面部分读取可能发生在 worklet 线程内，能力表必须披露此缺口，不得在覆盖声明中默认包含。
 - 更新时由 browser 串行分配 generation、快照当前参与集合；后来加入的 producer 继承最新版，退出者记录退出结果，不伪造 applied ACK。
 - 更新进行中允许旧/新 generation 同时出现在日志中；状态接口报告尚未确认的 producer。进入 stopping 后拒绝 update，并按注册裁决确定最终需结算集合。
 - 不跨线程共用普通 `mojo::Remote`、可变 logger、V8 对象或裸 GC 指针。
@@ -379,6 +413,7 @@ idle → starting → active → stopping → complete
 - Return、Throw、ReThrow 和不正常返回路径；不把 Entry/Exit 名称直接解释为每个 opcode 的完整 before/after。
 - 函数调用、递归、生成器与 async 的激活身份，不能用 C++ 栈深度替代完整 JS 语义。
 - accumulator/寄存器输入可从现有设施验证获取；所有 opcode 执行后的值与精确 def-use 不属于第一版保证。
+- V8 code cache：字节码可能经反序列化而非编译产生，元数据 hook 只挂编译路径会在 warm profile 下缺数据。P4 设计冻结时二选一：精细模式禁用/绕开 code cache 并披露行为差异，或在反序列化路径补元数据事件；验收必须覆盖 warm profile 场景。
 
 字段需区分 `v8_bytecode` 与分析器推断的 `virtual_opcode/vpc`。后者是样本相关推断，不能把 V8 opcode 政名后冒充 VMP 指令。
 
@@ -402,7 +437,7 @@ V8 初始化后全局 flags 可冻结，因此运行期控制使用独立采集�
 | Sparkplug 扩展 | 后续提供 baseline 对照 | 编译时是否生成 trace 调用影响动态启用能力 |
 | jitless 实验 | 特定对照测试 | 改变更多可执行内存、Regexp/Wasm 等行为，不作为默认替代 |
 
-`max_opt=0/1/2/3` 分别对应 Ignition/Sparkplug/Maglev/TurboFan 的最高 JS tier 意图。本轮已实测：`--max-opt=0` 默认保持 Ignition，但附加 `--sparkplug --always-sparkplug` 可以覆盖弱 implication 并实际进入 baseline。Host 的精细模式必须拒绝冲突的 tier 参数，并校验有效配置和真实执行层，不能只看 `max_opt` 字符串；Maglev/TurboFan 的观测覆盖尚未测试。
+`max_opt=0/1/2/3` 分别对应 Ignition/Sparkplug/Maglev/TurboFan 的最高 JS tier 意图。本轮已实测：`--max-opt=0` 默认保持 Ignition，但附加 `--sparkplug --always-sparkplug` 可以覆盖弱 implication 并实际进入 baseline。精细模式的校验分两层：Host 在启动前做静态参数检查，`XTrace.startCapture`（browser 侧）做权威拒绝并回报实际生效配置——绕过 Host 直接以 `--js-flags` 启动的路径也必须被拦住；不能只看 `max_opt` 字符串。Maglev/TurboFan 的观测覆盖尚未测试。
 
 ### 9.5 现有 hooks 的处理
 
@@ -495,7 +530,7 @@ V8 初始化后全局 flags 可冻结，因此运行期控制使用独立采集�
 
 Host 启动时结合 browser 的 `getCapabilities` 与自身 adapter 状态建立实际工具清单。每项能力声明输入/输出、目标范围、权限、副作用、完整性限制及当前可用原因。
 
-原版 Chromium 可以运行明确的 CDP 能力子集，但不能静默把增强能力替换成较弱行为后返回成功。
+原版 Chromium 可以运行明确的 CDP 能力子集，但不能静默把增强能力替换成较弱行为后返回成功。能力协商的输出是三态清单：**可用 / 降级且明示 / 不可用且拒绝**。首期选定：Host 不连接非增强浏览器——探测到无 XTrace 域的实例时，增强能力一律报告不可用并给出原因；CDP 通用子集（页面调试类工具）是否可用由逐项能力清单标注，不做任何隐式行为替代。后续若支持原版浏览器降级模式，降级项必须在工具结果与 UI 中显式标注。
 
 ### 11.2 统一 Broker
 
@@ -511,6 +546,8 @@ Broker 至少约束：
 
 Agent 首期以限额证据切片和本地索引为输入，结论可以回链到事件、脚本和候选验证结果，而不是将全部 trace 填入上下文。
 
+证据索引的存储形态在 P6 启动前冻结，三项一并决策：索引 schema 与 capture manifest 的引用关系；是否复用 LedgerBackend 的 SQLite（同库或分库）；索引损坏或缺失滞后时的重建流程。冻结前 P6 首批工具只读原始产物与临时索引，不对外承诺持久查询接口。
+
 ### 11.3 UI 首期变化
 
 复用现有 Electron 主进程/渲染进程隔离，补充 capture 状态、模式与覆盖范围、停止进度、丢弃/失败计数、证据跳转和授权记录。Node 权限不下放到渲染页面。
@@ -523,11 +560,11 @@ Agent 首期以限额证据切片和本地索引为输入，结论可以回链�
 | --- | --- | --- | --- |
 | P0：上游 d8 追踪 PoC（最小验证已通过） | 独立产物、10 组覆盖样本、4 组 tier 检查；见第 9.6 节 | 固定版本下样本语义、ShortStar/Wide/分支/调用/返回/异常及真实 tier 已核验；不外推为任意程序保证 | 固定源码与构建环境 |
 | P1：重现 XTrace 基线（构建进行中） | 四补丁实际应用及 338 项静态/分析测试通过；完整构建运行中，浏览器集成待执行层验收 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
-| P2：采集与写入基础 | producer 登记、有界批量、manifest、终态和 watermark | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete | P1 |
+| P2：采集与写入基础 | producer 登记（§7.1 全部写入源，含 browser-network 并轨）、有界批量、manifest、终态和 watermark；§6.6 旧缺陷逐条收口 | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete；限额与 summary 截断有触发用例 | P1 |
 | P3：控制面 | browser-only 域、pipe、配置 generation、身份映射 | renderer/worker 首次生效及更新可确认；断连/重连状态明确 | P2 |
-| P4：结构化 Ignition | observer、字节码元数据、执行层与值边界 | 与 P0 对照；无重复/漏记的已支持路径；关闭开销及日志速率可测 | P0、P2/P3 契约 |
+| P4：结构化 Ignition | observer、字节码元数据（含 code cache 路径决策）、执行层与值边界 | 与 P0 对照；无重复/漏记的已支持路径；关闭开销及日志速率在 **release 构建**上可测（debug 构建 JS 执行慢约一个数量级，不作性能依据） | P0、P2/P3 契约 |
 | P5：Blink 选定接口 | 生成器修改、scope、模式和覆盖表 | 生成 C++ 编译；异常、重入、overload、Fast API/cache 分路径测试通过 | P2/P3 契约 |
-| P6：Agent 闭环 | Node adapters、首批工具、Electron 证据界面 | 一次真实 capture → stop → 分析 → UI 证据跳转；所有执行入口经过 Broker | P3，P4/P5 的最小能力 |
+| P6：Agent 闭环 | Node adapters、最小 env 能力、首批工具（A 组清单按 §5 前置冻结）、Electron 证据界面 | 一次真实 capture → stop → 分析 → UI 证据跳转；所有执行入口经过 Broker | P3，P4/P5 的最小能力 |
 | P7：扩展 | Sparkplug、更多接口、其余工具、sidePanel、跨平台 | 每项有独立覆盖矩阵与回归，不能借首期结果宣称全覆盖 | P6 |
 
 P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻辑抽离及只读 adapter 可提前做，但不能越过尚未验证的采集契约完成端到端验收。本表是工作拆分，不是当前运行中的任务列表。
@@ -552,7 +589,9 @@ P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻�
 | 性能 | 关闭时开销、启用时事件速率、批大小、峰值 RSS、队列占用、丢弃率、停止耗时 |
 | 安全边界 | 非受信控制拒绝、workspace 越界与符号链接、敏感字段、模型外发控制 |
 
-性能目标值在 P0/P1 获得基线后确定。草稿不预设缺乏测量支持的“零开销”或固定吞吐承诺。
+性能目标值在 P0/P1 获得基线后确定。草稿不预设缺乏测量支持的“零开销”或固定吞吐承诺。P1 的 12 组集成矩阵同时承担基线采集：每组记录事件数、trace 字节数、墙钟时间与峰值 RSS，作为本节目标值的输入；不补采则 P2 定标无据。
+
+进程内测试宿主分配：writer 与计数守恒 → `content_unittests`（或 browser 侧单测目标）；renderer/Worker 配置传播与生命周期 → `content_browsertests`；bind_gen scope → 现有 bindings Python 单测 + 生成代码编译 + `blink_web_tests` 页面级用例。注意 0001 的浏览器网络插桩位于 chrome/ 层，`content_shell` 覆盖不到，相关用例必须用完整 `chrome` 目标。上述测试目标均已在 XTraceIntegration 的 GN 图中存在，可直接构建。
 
 ### 12.3 补丁与回归管理
 
@@ -561,6 +600,7 @@ P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻�
 - d8 PoC 与 Chromium 主构建使用独立产物目录，避免混用不同 instrumentation 的生成物。
 - 轻量测试与需要 patched Chromium 的集成检查分开；缺少可选源码时明确 skip，集成任务中则应因缺前置失败。
 - 升级 Chromium、移除现有汇编 hooks 和扩展架构单独排期，不混进首个闭环。
+- P4/P5 的 C++ 迭代按“改补丁 → 增量编译 → 浏览器验收”的循环预算时间；d8 独立产物只覆盖 V8 语义验证，凡涉及 Blink/embedder 边界的改动必须走完整 `chrome` 目标。性能结论一律以 release 构建（`scripts/build_xtrace_release.sh`）为准。
 
 ## 13. 风险、待验证项与冻结点
 
@@ -589,6 +629,12 @@ P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻�
 | P4 第一版观测 | Ignition 执行前事件、规范化 bytecode offset、按版本元数据 | 不承诺 opcode 执行后值、全 JIT 或精确 VMP 指令 |
 | P5 接口与模式 | 使用第 10.4 节已核对的接口；Fast API/cache 的模式在模板建立前确定 | 当前真实签名、Promise 转换和 NADC 语义已核实 |
 | P6 首批工具 | 证据只读加受控 capture 生命周期；宿主任意执行后置 | 首先验证统一 Broker 与证据回链，不一次性迁完 66 项 |
+| 指纹伪装层 | 显式暂缓至 P7；首期只记录不改值 | 独立工程，与采集契约无依赖；env 接口预留挂载点（§1.1） |
+| 环境管理 | 首期最小集归 P6；完整环境管理器随 P7 | frx EnvironmentBackend 的端口/状态机/伪装逻辑届时平移 |
+| 能力协商 | 三态清单；首期 Host 不连接非增强浏览器 | §11.1；禁止隐式降级 |
+| 采样计数 | `sampled_out` 单列，不混入 `dropped` | 保证 §7.1 等式在采样模式下成立 |
+| code cache | P4 冻结时二选一：禁用并披露，或补反序列化元数据事件 | 验收须覆盖 warm profile（§9.2） |
+| 证据索引存储 | P6 启动前冻结（SQLite/文件、与 LedgerBackend 关系、重建流程） | 冻结前首批工具只读原始产物（§11.2） |
 
 以上是本版选定的实现要求，不伪装成当前实现已具备的能力；只有实际实现后的验收才可证明遵守契约。
 
@@ -597,7 +643,7 @@ P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻�
 1. 新 observer 的 GC/寄存器安全、无 getter/Proxy 副作用的值序列化、关闭开销与高频吞吐：需要 P4 实现及压力测试。
 2. producer 注册、销毁、generation 更新和停止竞态：需要 P2/P3 的真实 IPC 测试及 crash/超时故障注入。
 3. 新 Blink scope 的异常、Promise 和 CEReactions 行为：需要真实生成 C++、编译和页面测试；上游 Python 单测不证明新 scope 正确。
-4. 网络 crosswalk、BFCache 和 Worker/SW 覆盖：需要浏览器集成样本，不以 URL 或邻近时间推测补齐。
+4. 网络 crosswalk、BFCache 和 Worker/SW 覆盖：需要浏览器集成样本，不以 URL 或邻近时间推测补齐；code cache warm 路径下的字节码元数据来源同样需浏览器集成验证。
 5. Agent 持久化、取消、重连和 Broker 不可绕过：需要迁移 adapter 后的宿主/UI 测试。
 6. 完整 patched Chromium 构建与浏览器 smoke：不能由补丁适用检查、文本断言或未打补丁的 d8 代替。
 
@@ -626,6 +672,7 @@ P4 与 P5 在公共协议和生命周期契约冻结后可并行；Agent 纯逻�
 | CEReactions 重入 | `chromium/src/third_party/blink/renderer/core/html/custom/ce_reactions_scope.cc:23` |
 | NoAllocDirectCall 当前语义 | `chromium/src/third_party/blink/renderer/bindings/IDLExtendedAttributes.md:1258` |
 | browser target 注册 | `chromium/src/content/browser/devtools/browser_devtools_agent_host.cc:226` |
+| browser-network 私有写入与计数器（P2 待并轨） | `chromium/src/chrome/browser/chrome_content_browser_client.cc:6043,6634` |
 | CDP pipe 协议入口 | `chromium/src/content/browser/devtools/devtools_pipe_handler.cc:396` |
 | DevTools 构建与协议生成 | `chromium/src/content/browser/devtools/BUILD.gn:55`、`chromium/src/content/browser/devtools/protocol_config.json:206` |
 | Renderer 初始化契约 | `chromium/src/content/common/renderer.mojom:176` |
@@ -695,3 +742,8 @@ python3 chromium/src/out/XTraceD8Verify/validation/verify_tiers.py \
 `d8-cases/summary.json`、`d8-tiers/summary.json` 保存断言结果，旁边保留生成的 JS、stdout/stderr；`baseline-evidence.json` 包含源码/补丁/二进制摘要。运行脚本会覆盖自身上次实验输出，需比较历史结果时先保留相应目录。
 
 完整 patched Chromium 构建已在 `out/XTraceIntegration` 运行；不得在同一输出目录重复启动 Ninja。当前进度、运行进程、12 组浏览器矩阵、launcher 补验及架构 review 关卡统一见[实施交接文档](chromium-patched-build-implementation.md)。第 13.2 节仍需新实现才能验证的项目不因本次交接而视为完成。
+
+## 16. 修订记录
+
+- v0.4（2026-09-19）：登记指纹伪装层缓期与环境管理最小集（§1.1、§5）；新增既有缺陷收口表（§6.6）；补 producer 完整清单与采样计数约定（§7.1）；补 worklet 边界（§8.3）、code cache 路径（§9.2）、tier 校验双层（§9.4）、能力协商三态与非增强浏览器立场（§11.1）、证据索引存储决策（§11.2）；更新 P2/P4/P6 阶段交付与验收（§12）、测试宿主分配与基线采集（§12.2）、迭代成本预算（§12.3）、收敛决策表（§13.1）、源码索引（§14）。本轮为文档级补充，不改变任何已验证结论与实施状态。
+- v0.3（2026-09-19）：四补丁应用到固定工作树；P0 d8 验证完成；转入完整构建与浏览器集成。
