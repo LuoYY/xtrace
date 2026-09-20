@@ -18,19 +18,23 @@ DEPOT_TOOLS="$ROOT/depot_tools"
 SRC="$ROOT/chromium/src"
 OUT_DIR="${OUT_DIR:-out/XTrace-release}"
 NINJA_BIN="${NINJA_BIN:-$(command -v ninja || echo "$DEPOT_TOOLS/ninja")}"
+GN_BIN="${GN_BIN:-"$SRC/buildtools/mac/gn"}"
+# Prefer the tree-local ninja when present (same binary the debug build uses).
+[[ -x "$SRC/third_party/ninja/ninja" ]] && NINJA_BIN="$SRC/third_party/ninja/ninja"
 
 if [[ ! -d "$SRC" ]]; then
   echo "Chromium source not found at $SRC. Run scripts/bootstrap_chromium.sh first." >&2
   exit 1
 fi
 
-export PATH="$DEPOT_TOOLS/python-bin:$DEPOT_TOOLS:$PATH"
 unset GOROOT GOTOOLDIR
 
+# System python drives gn/ninja here (same interpreter selection as the
+# P1-P3 XTraceIntegration builds); depot_tools bootstrapping is not needed.
 python3 - <<'PY'
 import sys
 if sys.version_info < (3, 10):
-    raise SystemExit("Chromium build requires python3 >= 3.10; depot_tools/python-bin was not selected")
+    raise SystemExit("Chromium build requires python3 >= 3.10")
 PY
 
 if ! xcodebuild -version >/dev/null 2>&1 &&
@@ -43,7 +47,7 @@ cd "$SRC"
 # Release args. Only is_debug/is_component_build differ from gn_gen_xtrace.sh;
 # codecs are kept so media-heavy sites render realistically. Flip
 # is_component_build=true if you want faster incremental relinks.
-gn gen "$OUT_DIR" --args='
+"$GN_BIN" gen "$OUT_DIR" --args='
 is_debug=false
 is_component_build=false
 symbol_level=1
@@ -60,7 +64,9 @@ echo "==> gn gen done: $SRC/$OUT_DIR"
 echo "==> building (this takes a while on a first release build)…"
 "$NINJA_BIN" -C "$OUT_DIR" chrome
 
-APP="$SRC/$OUT_DIR/Chromium.app"
+# XTRACE P3-E9: the bundle directory is ChromiumX.app (executable inside
+# remains Contents/MacOS/Chromium).
+APP="$SRC/$OUT_DIR/ChromiumX.app"
 echo
 echo "==> Done. Release XTrace build: $APP"
 echo "    Run a real page with it, e.g.:"
