@@ -1,6 +1,6 @@
 # P3 设计文档：browser-only XTrace CDP 域 / 配置 generation / 身份映射
 
-- 版本：v1.0（P3-E1 产出，R1 审查对象）。依据：[P3 交接](chromium-p3-control-plane-handoff.md)、[迁移草稿](chromium-migration-enhancement-draft.md) §8/§13.1、[trace-schema-v3.md](trace-schema-v3.md) v1.2、[R1 决策](chromium-p2-r1-decisions.md)（DP4 脚手架移除约定）。
+- 版本：v1.1（P3-E1 产出；v1.0 R1 提交，v1.1 架构师裁决通过——五项全部接受，PDL 两处修订（optional 未知计数、generation 起点统一），见 §9）。依据：[P3 交接](chromium-p3-control-plane-handoff.md)、[迁移草稿](chromium-migration-enhancement-draft.md) §8/§13.1、[trace-schema-v3.md](trace-schema-v3.md) v1.2、[R1 决策](chromium-p2-r1-decisions.md)（DP4 脚手架移除约定）。
 - P3-E0（A.2 单测欠账）**已清零**：controller 5 例（`content_unittests`）+ producer 4 例（`blink_platform_unittests`）全绿，测试缝为 host 工厂替换/hub 复位/容量覆盖/解析导出。
 
 ## 1. CDP 域 PDL 草案（决策点 1）
@@ -100,7 +100,7 @@ experimental domain XTrace
 
 - **`attribution.document` 开填**：browser 侧在 frame 导航提交（`RenderFrameHostImpl::DidNavigate` 路径）维护 `frame_tree_node_id → document_id`（`DocumentToken` 字符串化）；writer 在写事件行时按事件的 frame 归属把 `document_id` 注入 `attribution.document`。renderer hook 点不可得时保持 unresolved（v3 §3.3 不破坏）。P3 范围：主 frame + 同进程子 frame；跨进程 OOPIF 归属经 frame_tree_node_id 可对应，document token 由 browser 掌握——统一在 browser 注入。
 - **crosswalk 落盘形式**：manifest 增设 `identity` 段（决策点推荐）：`{frameUrl→documentId, devtoolsRequestId→networkRequestId, workerScope→producerId}` 的带来源映射表，允许 `unresolved` 项；不内嵌到事件行（避免热路径膨胀）。事件行内的 `attribution` 保持轻量；深度关联由分析器查 manifest。
-- **网���映射**：优先 `devtools_request_id`（DevTools Network 域已启用时 browser 侧可取）；未启用时建立 crosswalk 记录底层 `GlobalRequestID` + 来源标记 `source: url_loader_throttle`；redirect hop 记录于 crosswalk（`redirect_from` 链）。禁止 method+URL 哈希合并（草稿 §8.4）。
+- **网络映射**：优先 `devtools_request_id`（DevTools Network 域已启用时 browser 侧可取）；未启用时建立 crosswalk 记录底层 `GlobalRequestID` + 来源标记 `source: url_loader_throttle`；redirect hop 记录于 crosswalk（`redirect_from` 链）。禁止 method+URL 哈希合并（草稿 §8.4）。
 - **分场景验证**：导航、普通 resource、Worker/SW、redirect、未启用 Network 域——browsertest 矩阵逐一断言。
 
 ## 5. 脚手架移除（决策点 4）
@@ -113,7 +113,7 @@ experimental domain XTrace
 
 - **Framing 定稿**：NUL 分隔（`\0`）JSON 消息，FD 3/4。不用 CBOR。断连=会话终止（capture 不受影响——capture 状态属于 browser 不属于连接）。
 - **重连**：新连接 `getCaptureStatus` 即得当前状态；进行中的 capture 不因断连中止（stop 只由显式命令或 browser 退出驱动）。
-- **请求取消**：CDP 每请求独立 id，无跨请求取消语��；长操作（stopCapture 结算等待）上限为内部 deadline（P2 的 2s），超时返回 stopping 状态而非挂起。
+- **请求取消**：CDP 每请求独立 id，无跨请求取消语义；长操作（stopCapture 结算等待）上限为内部 deadline（P2 的 2s），超时返回 stopping 状态而非挂起。
 - **P6 预留（只定约束不实现）**：Host（Node）以 `--remote-debugging-pipe` 持有 browser target；域方法名/参数将直接映射为工具面；`getCapabilities` 输出将作为能力协商的权威来源。
 
 ## 7. P3 测试矩阵新增行
@@ -140,3 +140,19 @@ experimental domain XTrace
 | 3 身份承载 | browser 注入 document_id；crosswalk 落 manifest.identity 段 | 事件内嵌（热路径膨胀） |
 | 4 脚手架 | stop-after 移除；test-capacity 改名保留 | 全移除（损失确定性溢出手段） |
 | 5 Host 语义 | NUL framing 定稿；断连不中止 capture；P6 约束如 §6 | CBOR（无必要） |
+
+---
+
+## 9. 架构师裁决（2026-09-20，R1 通过）
+
+P3-E0 已由架构师独立复核（`XTraceCaptureControllerTest` 5/5、`XTraceProducerTest` 4/4 亲跑全绿）。五项决策**全部接受推荐方案**，附修订与条件如下：
+
+1. **PDL：接受草案，两处修订。**
+   - `ProducerStatus` 的未知计数字段（`finalProducerSeq` 及 producer 侧三元组）用 PDL `optional`（缺省）表示未知，**不用 `""` 哨兵**——与 v3 manifest 的 null 规则（v1.2 §7）对齐，系统内不得出现第三种"未知"表示法。
+   - `startCapture` 的 generation 规则统一：**任何 capture（含运行期创建的）初始 generation 恒为 `"0"`**，`updateCapture` 自 "1" 起串行递增。删除草案中"首个运行期采集为 1"的双轨表述——否则 validator 与消费端要为两类起点分别特判。
+2. **generation 通道：接受。** 补充语义注释要求：`getCaptureStatus.pendingProducers` 必须在文档与 UI 文案中写明"已登记但尚无该代事件"≠ 故障——静默 producer 长期 pending 是正常状态。
+3. **身份承载：接受。** crosswalk 只落 `manifest.identity` 段；事件行 `attribution` 保持轻量，热路径不膨胀。
+4. **脚手架：接受。** `stop-after` 移除；`--xtrace-test-buffer-capacity` 改名保留且 `XTRACE_TEST_SCAFFOLDING` 标记延续、launcher 不透传；移除登记表随 P3-E6 回填（grep 计数 + diff 摘要）。
+5. **Host 语义：接受。** NUL framing 定稿；断连不中止 capture；无跨请求取消，长操作以内部 deadline 返回 stopping。
+
+另有一项用户直接指示的新增任务（应用命名 `ChromiumX`），已登记进 [P3 交接](chromium-p3-control-plane-handoff.md) §4 P3-E9。

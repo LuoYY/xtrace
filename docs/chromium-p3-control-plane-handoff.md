@@ -1,6 +1,6 @@
 # P3 交接：控制面（browser-only XTrace CDP 域 / 配置 generation / 身份映射）
 
-- 文档版本：v1.0（2026-09-20）。
+- 文档版本：v1.1（2026-09-20；P3-E0 单测欠账已清零（架构师亲跑 5/5 + 4/4）、P3-E1 设计文档经裁决通过（五项全部接受，PDL 两处修订，见 [chromium-p3-design.md](chromium-p3-design.md) §9）；新增 P3-E9 应用命名任务（用户指示）。实施从 P3-E2 开始，按 §7 长程块推进）。
 - 前置状态：**P2 已冻结**（`integration-progress.json` 状态 `accepted-p2`，终审记录见其 `p2_acceptance`）。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。执行模式沿用 P2 的**长程单次终审**（§7）。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §8（控制面）、§12（阶段表）、§13.1（已收敛决策）；[trace-schema-v3.md](trace-schema-v3.md) v1.2（现行数据契约）；[P2 交接](chromium-p2-capture-foundation-handoff.md)（已完成范式）。设计语义以草稿为准，本文件规定落地顺序与验收方式。
@@ -10,7 +10,7 @@
 1. 读本文件全文 + 草稿 §8、§13.1 的 P3 行、[R1 决策](chromium-p2-r1-decisions.md)（DP4 脚手架移除约定）。
 2. **先清 P3-E0 的硬性欠账**（A.2 裁决：C++ 单测），不清零不进入 CDP 域实施。
 3. 确认现场：两棵树仍为四补丁状态（0001/0003/0004 为 P2-E8 再生版，0002 未动）；`out/XTraceIntegration` 产物不重建、不清理。
-4. P3 设计文档（P3-E1）经架构师裁决后才写 C++；设计冻结后按 §7 长程块一次推进。
+4. ~~P3 设计文档（P3-E1）经架构师裁决后才写 C++~~ **P3-E0/E1 已完成并裁决（2026-09-20）**：单测 5/5 + 4/4 全绿（架构师复核）；设计五项决策全部接受、PDL 两处修订（`ProducerStatus` 未知计数用 optional、generation 起点统一为 "0"）。实施直接从 **P3-E2** 开始。
 
 ## 2. 冻结输入（不得变更的基线）
 
@@ -33,6 +33,7 @@
 4. browser 侧身份映射：target/frame/document/worker 分层关联；`attribution.document` 开填；网络优先 `devtools_request_id`、保留底层请求 ID 与 redirect hop；缺失时带来源的 crosswalk，允许 unresolved；禁止 method+URL 哈希合并。
 5. P2 测试脚手架移除：按 `XTRACE_TEST_SCAFFOLDING` 标记 grep 移除并登记；正式域接管停止触发。
 6. Host 通信规则落地：专用实例 CDP pipe（FD 3/4、NUL framing）、断连/重连/请求取消语义；不引入 HTTP 调试端口与 `--remote-allow-origins=*`。
+7. 应用命名 `ChromiumX`（用户指示；仅命名层面，站点可见面与 Chromium 完全一致，见 P3-E9）。
 
 ### 3.2 非目标（明确不做，越界即纠偏）
 
@@ -101,13 +102,25 @@
 
 沿用 P2 证据纪律与 §7.5 清单：补丁回写（改动集中 0001；v3 字段若涉 0003/0004 同步）+ 干净索引顺序复验 + 逐文件一致性核对（P2 终审方法：补丁清单逐文件 blob 比对）；回归 338/28/211 + 新增测试数；`integration-progress.json` 新增 P3 段（初始 `p3-in-progress`，终审前不得 accepted）；文档状态同步（草稿 §2.3/§12、本文件勾选）。
 
-## 5. 实施前需架构师裁决的决策点（P3-E1 提交，逐项给推荐与备选）
+### P3-E9：应用命名 ChromiumX（用户指示，2026-09-20 登记）
 
-1. **CDP 域 PDL 草案**：方法/参数/事件/错误语义；`getCapabilities` 的版本化形状；IO stream 的创建时机与生命周期。
-2. **generation 传播通道**：`XTraceControl` 增加 `UpdateConfig` vs 独立接口；renderer 初始快照传递点（启动期配置链路 vs 带内）。
-3. **身份映射承载位置**：`attribution.document` 开填的时机与条件；crosswalk 落盘形式（事件内嵌 vs manifest 映射段）。
-4. **脚手架移除口径**：`stop-after` 移除计划；`test-capacity` 保留为长期测试设施还是一并移除（若保留，改为何种形态）。
-5. **Host 连接语义**：NUL framing 定稿；断连/重连与请求取消的客户端契约；Host 进程模型对 P6 的预留（不实现，只定接口约束）。
+本机已安装 Chromium，为避免共存混淆，产物应用命名为 **ChromiumX**——仅应用命名层面改名；对访问的目标网站而言与 Chromium 完全一致。
+
+- 改动面：`.app` bundle 目录名与 `CFBundleDisplayName` 改为 `ChromiumX`。
+- **不变面（硬约束）**：可执行文件名（`Contents/MacOS/Chromium`，launcher/驱动现有路径解析不变）、`CFBundleIdentifier`、`Browser.getVersion` 的 product（`Chrome/151.0.7917.0`）、`navigator.userAgent` / UA-CH brands / WebGL 渲染串等全部站点可见身份。
+- 实现方式（已裁定）：走 branding/构建层的名称来源（GN 或 plist 生成处），以**新补丁 0005** 承载——命名是独立关注点，不并入 0001 的采集职责；`scripts/apply_patches.sh` 的 Chromium 序列登记为 `0001 → 0003 → 0004 → 0005`（V8 的 0002 位置不变）；补丁变更后重跑干净索引顺序复验。不用"构建后手工改名目录"的临时做法（会被后续构建覆盖）。
+- 验收：改名后的 `ChromiumX.app` 上 `getVersion.product` 不变；12 组矩阵与 launcher 路径通过；与本机已装 Chromium 共存无干扰；UA 等站点可见字段与改名前逐项一致（对照证据）。
+
+## 5. 决策点状态（v1.1：全部已裁决）
+
+| 决策点 | 状态 |
+| --- | --- |
+| 1. CDP 域 PDL | **已裁决（两处修订）**：[chromium-p3-design.md](chromium-p3-design.md) §9——五命令草案接受；`ProducerStatus` 未知计数用 `optional`（对齐 manifest null 规则）；任何 capture 的初始 generation 恒为 `"0"` |
+| 2. generation 通道 | **已裁决**：复用带内 `XTraceControl` 加 `UpdateConfig`；确认以事件的 `config_generation` 字段为证，不加 ACK 消息；`pendingProducers` 语义写明"静默≠故障" |
+| 3. 身份映射承载 | **已裁决**：browser 侧注入 `document_id`；crosswalk 只落 `manifest.identity` 段，事件行保持轻量 |
+| 4. 脚手架 | **已裁决**：`stop-after` 移除；`--xtrace-test-buffer-capacity` 改名保留（标记延续、launcher 不透传）；登记表随 P3-E6 回填 |
+| 5. Host 连接 | **已裁决**：NUL framing 定稿；断连不中止 capture；无跨请求取消，内部 deadline 返回 stopping |
+| 6. 应用命名（用户指示） | **已裁定**：`ChromiumX.app` + `CFBundleDisplayName`，站点可见面不变；新补丁 0005 承载，应用序列 `0001 → 0003 → 0004 → 0005`（0002 位置不变），见 §4 P3-E9 |
 
 ## 6. 纪律与纠偏事项（沿用 P1/P2，新增第 9 条）
 
@@ -117,7 +130,7 @@
 
 ## 7. 长程执行模式（沿用 P2 v1.1 §7）
 
-入口条件：P3-E0 清零 + P3-E1 设计文档经架构师裁决。此后 **P3-E2 → P3-E8 为一个连续执行块**，中间不设例行审查点；完成后一次提交，架构师终审（R2+R3 合并）。
+入口条件：P3-E0 清零 + P3-E1 设计文档经架构师裁决（**均已于 2026-09-20 满足**）。此后 **P3-E2 → P3-E9 为一个连续执行块**，中间不设例行审查点；完成后一次提交，架构师终审（R2+R3 合并）。
 
 - 自主权：实现细节、命名、测试组织、默认值调优、bug 修复全权；每完成一项在 §4 对应标题打勾并附一行证据指针。
 - 升级触发器：沿用 P2 §7.4 六条（基线变更/规范语义改动/计数等式不成立/新增对外能力/新二选一/设计层故障），另加第七条：**受信边界需要放宽的任何迹象**。
