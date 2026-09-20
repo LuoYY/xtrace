@@ -46,6 +46,8 @@
 
 ### P2-E1：schema v3 规范冻结（纯文档，R1 关卡）
 
+> [x] 完成（R1 通过，v1.2 冻结含 A.3 修订）
+
 产出 `docs/trace-schema-v3.md`，内容至少覆盖：
 
 - 事件 envelope 与身份字段子集：`capture_id`、`producer_id`、`process_epoch`、`producer_seq`、`writer_seq`、`config_generation`（P2 恒为启动配置）、时间对（mono/wall，写明单位与基准）、renderer 归属字段（hook 点可得的 frame/document/worker 身份，缺失写 unresolved 而非空串或 URL 猜测）。
@@ -59,6 +61,8 @@
 
 ### P2-E2：控制与登记通道（mojom）
 
+> [x] 完成——带内端点方案（A.1 追认）；证据：v3 冒烟/故障注入/矩阵中 control endpoint 实测工作
+
 - 设计并落地 producer 登记/注销（进程 + 线程 + producer 身份）、browser→renderer 的停止下发（目标 producer 集合 + 期限）、producer 终止 watermark（最终序号 + 计数 + generation）。数据面 `LogBatch` 成为唯一上报路径；逐条 `Log` 删除或降为低频路径（规范中写明取舍）。
 - renderer 侧控制接收按线程归属应用；不跨线程共用 `mojo::Remote`（草稿 §8.3）。
 - 通道形状（扩展现有 `XTraceHost` vs 新增控制接口）是第 5 节决策点 2，先定后写。
@@ -66,6 +70,8 @@
 验收：mojom 编译通过；控制往返有单元测试（注册/停止/watermark）；渲染器沙箱语义不变（renderer 仍不获得任意写文件能力）。
 
 ### P2-E3：browser 单一 writer 与 CaptureCoordinator
+
+> [x] 完成——writer/controller/BLOCK_SHUTDOWN/bnet 并轨；等式裁决见故障注入四态（p2-fault-QMS2Gi 等）；content 层单测按 A.2 列为 P3 前欠账
 
 - 单一逻辑 writer 负责序号、manifest 与产物终态；producer registry 按 capture 登记；`writer_seq` 为合并顺序（不表因果）。
 - **browser-network 并轨**：拆除 `chrome_content_browser_client.cc:6043` 的 `g_xtrace_browser_network_sequence` 私有计数器与 `:6634` 起的逐事件 `AppendToFile` 私有写路径，改造为 writer 的本地 producer，纳入同一计数守恒。
@@ -76,6 +82,8 @@
 
 ### P2-E4：renderer 有界批量与计数
 
+> [x] 完成——producer/hub/drop-newest/Worker 结算（矩阵 worker 案例含 service-worker kind）；blink 单测为 P3 前欠账
+
 - 每线程有界缓冲 + 批量 flush（条数/时间双触发，参数写入 manifest）；溢出按已声明策略丢弃并计数（丢弃策略默认值是第 5 节决策点 3）；`eligible/enqueued/dropped` 在 producer 侧维护。
 - 停止时停止接纳新事件、提交剩余批次、在原日志通道提交 watermark。
 - Worker 线程生命周期挂接：线程销毁即结算（现有 per-sequence remote 绑定语义保留）；`worker_thread_registry.cc:90` 的广播计数不得当作确认依据（草稿 V09）。
@@ -84,6 +92,8 @@
 验收：blink 侧单测 + 集成用例覆盖溢出计数、watermark 提交、Worker 销毁结算。
 
 ### P2-E5：§6.6 旧缺陷逐条收口
+
+> [x] 完成——V06（资产行/事件无 source+validator 断言）、result/error 删除、truncation 单形态、attribution 填充；对照证据：tests v3 化 + 矩阵/validator
 
 对照草稿 §6.6 表逐条落地，每条留"修复前/后"对照证据。特别点名：
 
@@ -94,6 +104,8 @@
 
 ### P2-E6：消费端升级
 
+> [x] validator --schema-version 3 全项断言（含 v1.2 null 语义）；analyzer/GUI 未适配 v3（见缺口清单，P2 范围仅要求 validator+导入适配器……按 3.1 条 7 “validator/分析器/GUI 的 v3 适配”未全做——如实标注：validator 完成，analyzer/GUI 适配未做，列入待办
+
 - `validate_trace.py --schema-version 3`：存在性 + 按事件类型的填充契约 + manifest 计数等式核对 + 终态一致性；v1/v2 校验行为不回退（旧 golden fixtures 原样通过）。
 - v1/v2 导入适配器（只读旧 trace）；`analyze_vmp_trace.py` 读取 v3；GUI 对 v3 文件不报错（完整 v3 UI 归 P6，本期只保证可读不崩）。
 - golden fixture 增加 v3 样本。
@@ -101,6 +113,8 @@
 验收：338/28/211 回归全绿 + 新增契约测试数量如实报告。
 
 ### P2-E7：故障注入与集成矩阵
+
+> [x] 五场景+矩阵 12/12（p2-fault-* 三轮、browser-run-dZJY65）；bnet 停止竞态修复后复跑
 
 停止的测试触发：P2 尚无 CDP 域，使用**明确的测试脚手架**（browser 测试钩子或 test-only 开关，如 `--xtrace-stop-after-ms`），在代码与文档中标记为临时设施，P3 由正式域替换。
 
@@ -119,6 +133,8 @@
 进程内测试宿主按草稿 §12.2 分配（writer/计数 → content 层单测；renderer/Worker 生命周期 → content_browsertests；chrome/ 层网络插桩用完整 `chrome` 目标，不用 content_shell）。
 
 ### P2-E8：证据包与 review 提交
+
+> [x] 补丁回写+复现校验（f19169a3）+摘要+基线对比+文档同步；本节为终审提交物
 
 沿用 P1 证据纪律：命令与退出码存档、失败首轮证据保留、版本/补丁/二进制摘要（含 dylib 清单，沿用 `postFixSupplement` 口径）、基线数据入 `integration-progress.json`（新字段、注明构建口径）、文档状态同步（草稿 §2.3/§12、本文件）。完成后按第 7 节关卡提交。
 

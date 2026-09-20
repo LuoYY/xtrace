@@ -1,7 +1,40 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 89eb629e19..5b5d4d7a8b 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
-@@ -6035,10 +6035,12 @@ constexpr char kXTraceMaxBodyBytesEnv[] = "XTRACE_MAX_BODY_BYTES";
+@@ -341,7 +341,7 @@
+ #include "components/version_info/version_info.h"
+ #include "components/webapps/common/web_app_id.h"
+ #include "components/webui/chrome_urls/pref_names.h"
+-#include "content/browser/xtrace/xtrace_host_impl.h"  // nogncheck
++#include "content/browser/xtrace/xtrace_capture_controller.h"  // nogncheck
+ #include "content/public/browser/attribution_data_model.h"
+ #include "content/public/browser/browser_accessibility_state.h"
+ #include "content/public/browser/browser_child_process_host.h"
+@@ -1772,6 +1772,11 @@ bool ChromeContentBrowserClient::IsShuttingDown() {
+ }
+ 
+ void ChromeContentBrowserClient::ThreadPoolWillTerminate() {
++  // DP5: settle an active XTrace capture before the pool tears down (the
++  // writer runner is BLOCK_SHUTDOWN, so its finalization drains).
++  if (auto* controller = content::XTraceCaptureController::Get()) {
++    controller->NotifyBrowserShuttingDown();
++  }
+   sampling_profiler_.reset();
+ }
+ 
+@@ -3144,6 +3149,9 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+         "xtrace-capture-assets",
+         "xtrace-categories",
+         "xtrace-causality",
++        // XTRACE_TEST_SCAFFOLDING: forwarded so the fault-injection capacity
++        // override reaches renderer producers; removed with the scaffolding.
++        "xtrace-test-capacity",
+         "xtrace-enable",
+         "xtrace-file",
+         "xtrace-max-body-bytes",
+@@ -6033,13 +6041,13 @@ constexpr char kXTraceFileEnv[] = "XTRACE_FILE";
+ constexpr char kXTraceMaxBodyBytesEnv[] = "XTRACE_MAX_BODY_BYTES";
  constexpr char kXTraceMaxHeaderValueBytesEnv[] =
      "XTRACE_MAX_HEADER_VALUE_BYTES";
 +constexpr char kXTraceCausalityEnv[] = "XTRACE_CAUSALITY";
@@ -10,11 +43,13 @@ diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/ch
  constexpr char kXTraceMaxBodyBytesSwitch[] = "xtrace-max-body-bytes";
  constexpr char kXTraceMaxHeaderValueBytesSwitch[] =
      "xtrace-max-header-value-bytes";
+-
+-base::AtomicSequenceNumber g_xtrace_browser_network_sequence;
 +constexpr char kXTraceCausalitySwitch[] = "xtrace-causality";
  
- base::AtomicSequenceNumber g_xtrace_browser_network_sequence;
- 
-@@ -6068,6 +6070,28 @@ bool IsXTraceBrowserNetworkEnabled() {
+ std::optional<base::FilePath> ReadXTraceBrowserNetworkTraceFilePath() {
+   const base::CommandLine* command_line =
+@@ -6069,6 +6077,32 @@ bool IsXTraceBrowserNetworkEnabled() {
    return ReadXTraceBrowserNetworkTraceFilePath().has_value();
  }
  
@@ -28,39 +63,250 @@ diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/ch
 +  return env->GetVar(kXTraceCausalityEnv).value_or("") == "sync";
 +}
 +
-+void AddXTraceExternalCausality(base::DictValue* event) {
-+  if (!IsXTraceCausalitySyncEnabled()) {
-+    return;
-+  }
-+  event->Set("schema_version", 2);
-+  event->Set("call_id", base::Value());
-+  event->Set("parent_id", base::Value());
-+  event->Set("depth", 0);
-+  event->Set("causality_kind", "external");
-+  event->Set("duration_us", base::Value());
++void AddXTraceV3ExternalCausality(base::DictValue* event) {
++  // Schema v3 §3.3/§3.4: browser-network observations are producer-local;
++  // attribution stays unresolved (request context materials live in args,
++  // never impersonating frame identity).
++  base::DictValue causality;
++  causality.Set("kind", "external");
++  causality.Set("call_id", base::Value());
++  causality.Set("parent_id", base::Value());
++  causality.Set("depth", 0);
++  causality.Set("duration_us", base::Value());
++  event->Set("causality", std::move(causality));
++  base::DictValue attribution;
++  attribution.Set("status", "unresolved");
++  event->Set("attribution", std::move(attribution));
 +}
 +
  uint64_t ReadXTraceBrowserNetworkUInt64(const char* switch_name,
                                          const char* env_name,
                                          uint64_t default_value) {
-@@ -6361,5 +6384,6 @@ std::string CreateXTraceBrowserNetworkEventJson(
+@@ -6307,9 +6341,9 @@ std::string CreateXTraceBrowserNetworkEventJson(
+     const network::ResourceRequest& request,
+     const GURL& url,
+     std::string_view method) {
+-  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
+   const base::ProcessId pid = base::GetCurrentProcId();
+-  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
++  const int64_t wall_time_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
+   const int64_t mono_time_us =
+       base::TimeTicks::Now().since_origin().InMicroseconds();
+   bool truncated = false;
+@@ -6361,35 +6395,27 @@ std::string CreateXTraceBrowserNetworkEventJson(
+   args.Append(std::move(arg));
  
    base::DictValue event;
-   event.Set("schema_version", 1);
-+  AddXTraceExternalCausality(&event);
-   event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-                                       ":", base::NumberToString(seq)}));
-@@ -6447,5 +6471,6 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+-  event.Set("schema_version", 1);
+-  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
+-                                      ":", base::NumberToString(seq)}));
+-  event.Set("session_id",
+-            base::StrCat({"browser-network:", base::NumberToString(pid)}));
+-  event.Set("seq", seq);
+-  event.Set("session_seq", seq);
+-  event.Set("t", api == "BrowserNetwork.redirect" ? "redirect" : "call");
+-  event.Set("ts", static_cast<double>(wall_time_us));
+-  event.Set("wall_time_us", static_cast<double>(wall_time_us));
+-  event.Set("mono_time_us", static_cast<double>(mono_time_us));
++  event.Set("schema_version", 3);
++  AddXTraceV3ExternalCausality(&event);
++  event.Set("wall_time_us", base::NumberToString(wall_time_us));
++  event.Set("mono_time_us", base::NumberToString(mono_time_us));
+   event.Set("category", "network");
+   event.Set("phase", api == "BrowserNetwork.redirect" ? "lifecycle" : "call");
+   event.Set("pid", pid);
+   event.Set("tid", 0);
+   event.Set("api", std::string(api));
+-  event.Set("args", std::move(args));
+   event.Set("stack", base::ListValue());
+-  event.Set("frame_url", request.referrer.spec());
+-  event.Set("origin", request.request_initiator
+-                          ? request.request_initiator->Serialize()
+-                          : std::string());
+-  event.Set("result", base::Value());
+-  event.Set("error", base::Value());
+-  event.Set("truncated", truncated);
++  // Schema v3 §5.1/§6.6: one truncation form. Truncated values are
++  // reported as quadruples on an args element; no top-level truncation
++  // object and no per-event "truncated" boolean.
+   if (has_top_level_truncation) {
+     top_level_truncation.Set("items", std::move(truncation_items));
+-    event.Set("truncation", std::move(top_level_truncation));
++    base::DictValue truncation_arg;
++    truncation_arg.Set("value_truncations",
++                       std::move(top_level_truncation));
++    args.Append(std::move(truncation_arg));
+   }
++  event.Set("args", std::move(args));
+ 
+   std::string json;
+   base::JSONWriter::Write(event, &json);
+@@ -6400,9 +6426,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+     const network::ResourceRequest& request,
+     const GURL& response_url,
+     const network::mojom::URLResponseHead& response_head) {
+-  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
+   const base::ProcessId pid = base::GetCurrentProcId();
+-  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
++  const int64_t wall_time_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
+   const int64_t mono_time_us =
+       base::TimeTicks::Now().since_origin().InMicroseconds();
+   bool truncated = false;
+@@ -6447,35 +6473,27 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+   args.Append(std::move(arg));
  
    base::DictValue event;
-   event.Set("schema_version", 1);
-+  AddXTraceExternalCausality(&event);
-   event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-                                       ":", base::NumberToString(seq)}));
-@@ -6556,5 +6581,6 @@ std::string CreateXTraceBrowserNetworkCompleteEventJson(
+-  event.Set("schema_version", 1);
+-  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
+-                                      ":", base::NumberToString(seq)}));
+-  event.Set("session_id",
+-            base::StrCat({"browser-network:", base::NumberToString(pid)}));
+-  event.Set("seq", seq);
+-  event.Set("session_seq", seq);
+-  event.Set("t", "return");
+-  event.Set("ts", static_cast<double>(wall_time_us));
+-  event.Set("wall_time_us", static_cast<double>(wall_time_us));
+-  event.Set("mono_time_us", static_cast<double>(mono_time_us));
++  event.Set("schema_version", 3);
++  AddXTraceV3ExternalCausality(&event);
++  event.Set("wall_time_us", base::NumberToString(wall_time_us));
++  event.Set("mono_time_us", base::NumberToString(mono_time_us));
+   event.Set("category", "network");
+   event.Set("phase", "return");
+   event.Set("pid", pid);
+   event.Set("tid", 0);
+   event.Set("api", "BrowserNetwork.response");
+-  event.Set("args", std::move(args));
+   event.Set("stack", base::ListValue());
+-  event.Set("frame_url", request.referrer.spec());
+-  event.Set("origin", request.request_initiator
+-                          ? request.request_initiator->Serialize()
+-                          : std::string());
+-  event.Set("result", base::Value());
+-  event.Set("error", base::Value());
+-  event.Set("truncated", truncated);
++  // Schema v3 §5.1/§6.6: one truncation form. Truncated values are
++  // reported as quadruples on an args element; no top-level truncation
++  // object and no per-event "truncated" boolean.
+   if (has_top_level_truncation) {
+     top_level_truncation.Set("items", std::move(truncation_items));
+-    event.Set("truncation", std::move(top_level_truncation));
++    base::DictValue truncation_arg;
++    truncation_arg.Set("value_truncations",
++                       std::move(top_level_truncation));
++    args.Append(std::move(truncation_arg));
+   }
++  event.Set("args", std::move(args));
+ 
+   std::string json;
+   base::JSONWriter::Write(event, &json);
+@@ -6485,9 +6503,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+ std::string CreateXTraceBrowserNetworkCompleteEventJson(
+     const network::ResourceRequest& request,
+     const network::URLLoaderCompletionStatus& completion_status) {
+-  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
+   const base::ProcessId pid = base::GetCurrentProcId();
+-  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
++  const int64_t wall_time_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
+   const int64_t mono_time_us =
+       base::TimeTicks::Now().since_origin().InMicroseconds();
+   const int64_t completion_time_us =
+@@ -6556,78 +6574,42 @@ std::string CreateXTraceBrowserNetworkCompleteEventJson(
+   args.Append(std::move(arg));
  
    base::DictValue event;
-   event.Set("schema_version", 1);
-+  AddXTraceExternalCausality(&event);
-   event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-                                       ":", base::NumberToString(seq)}));
+-  event.Set("schema_version", 1);
+-  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
+-                                      ":", base::NumberToString(seq)}));
+-  event.Set("session_id",
+-            base::StrCat({"browser-network:", base::NumberToString(pid)}));
+-  event.Set("seq", seq);
+-  event.Set("session_seq", seq);
+-  event.Set("t", "return");
+-  event.Set("ts", static_cast<double>(wall_time_us));
+-  event.Set("wall_time_us", static_cast<double>(wall_time_us));
+-  event.Set("mono_time_us", static_cast<double>(mono_time_us));
++  event.Set("schema_version", 3);
++  AddXTraceV3ExternalCausality(&event);
++  event.Set("wall_time_us", base::NumberToString(wall_time_us));
++  event.Set("mono_time_us", base::NumberToString(mono_time_us));
+   event.Set("category", "network");
+   event.Set("phase", "complete");
+   event.Set("pid", pid);
+   event.Set("tid", 0);
+   event.Set("api", "BrowserNetwork.complete");
+-  event.Set("args", std::move(args));
+   event.Set("stack", base::ListValue());
+-  event.Set("frame_url", request.referrer.spec());
+-  event.Set("origin", request.request_initiator
+-                          ? request.request_initiator->Serialize()
+-                          : std::string());
+-  event.Set("result", base::Value());
+   if (completion_status.error_code != 0 ||
+       completion_status.extended_error_code != 0 ||
+       completion_status.cors_error_status ||
+       completion_status.blocked_by_response_reason) {
+-    base::DictValue error;
+-    error.Set("code", completion_status.error_code);
+-    error.Set("extended_error_code",
+-              completion_status.extended_error_code);
+-    error.Set("resolve_error_info_error",
+-              completion_status.resolve_error_info.error);
+-    event.Set("error", std::move(error));
+-  } else {
+-    event.Set("error", base::Value());
++    base::DictValue completion;
++    completion.Set("error_code", completion_status.error_code);
++    completion.Set("extended_error_code",
++                   completion_status.extended_error_code);
++    completion.Set("resolve_error_info_error",
++                   completion_status.resolve_error_info.error);
++    args.Append(std::move(completion));
+   }
+-  event.Set("truncated", false);
++  event.Set("args", std::move(args));
+ 
+   std::string json;
+   base::JSONWriter::Write(event, &json);
+   return json;
+ }
+ 
+-scoped_refptr<base::SequencedTaskRunner>
+-GetXTraceBrowserNetworkTaskRunner() {
+-  return content::XTraceHostImpl::GetTaskRunner();
+-}
+-
+-void WriteXTraceBrowserNetworkEvent(std::string event_json) {
+-  std::optional<base::FilePath> trace_file =
+-      ReadXTraceBrowserNetworkTraceFilePath();
+-  if (!trace_file || event_json.empty()) {
+-    return;
+-  }
+-  if (!base::CreateDirectory(trace_file->DirName())) {
+-    return;
+-  }
+-  std::string stamped_event_json =
+-      content::XTraceHostImpl::StampGlobalSequenceForWrite(
+-          std::move(event_json));
+-  stamped_event_json.push_back('\n');
+-  base::AppendToFile(*trace_file, stamped_event_json);
+-}
+-
+ void LogXTraceBrowserNetworkEvent(std::string event_json) {
+-  if (event_json.empty()) {
+-    return;
++  // P2-E3: the private counter/direct-file-write path is gone. Events flow into
++  // the capture controller's single writer as the in-process browser
++  // network producer, under the same count conservation as renderers.
++  if (auto* controller = content::XTraceCaptureController::Get()) {
++    controller->AcceptBrowserNetworkEvent(std::move(event_json));
+   }
+-  GetXTraceBrowserNetworkTaskRunner()->PostTask(
+-      FROM_HERE, base::BindOnce(&WriteXTraceBrowserNetworkEvent,
+-                                std::move(event_json)));
+ }
+ 
+ class XTraceBrowserNetworkThrottle final : public blink::URLLoaderThrottle {

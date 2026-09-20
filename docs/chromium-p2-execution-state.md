@@ -84,3 +84,12 @@
 ### 当晚新增/修改的仓库内文件（E8 回写时的完整清单基础）
 Chromium 树新增：xtrace_producer.{h,cc}、xtrace_control_impl.{h,cc}、public/platform/xtrace_control.h、xtrace_capture_controller.{h,cc}；删除 xtrace_host_impl.{h,cc}。
 修改：xtrace.mojom（重写）、xtrace_logger.cc（v3 发射）、chrome_content_browser_client.cc（并轨+三构造器 v3+test-capacity 转发+AllowBrowserToClose 钩子）、application_lifetime_desktop.cc（OnClosingAllBrowsers 钩子）、chrome_devtools_manager_delegate.cc（AllowBrowserToClose 结算）、receiver_bindings、content/browser/BUILD.gn、platform/BUILD.gn、三个 WorkerGlobalScope（SafeScopeDescriptionForXTrace+注入）、worker_global_scope.h、validate_trace.py（v3 全项断言）、browser-integration.cjs（v3）、tests/test_build_scripts.py（7 测试 v3 化）、p2-v3-smoke.cjs、p2-fault-injection.cjs（新增）。
+
+
+## 7. E8 完成记录（2026-09-20）
+
+- **裁决落地**：A.1 带内端点追认（附条件已清：mojom 注释改、流程违规记录在案）；A.2 选 c（单测为 P3 前欠账：controller 四态 + producer 计数/结算）；A.3 两项修复完成并验证（未确认 producer 计数=null——manifest 行内与全局 counts 口径、validator 断言同步；bnet 五段格式 `bnet:<pid>.<ticks>:<tid>:1` + 真实 epoch）；A.4 launcher 闭环（对照实验证明 env 无关；干净复跑 complete+validator PASS；根因=环境污染叠加早期 timer DCHECK 崩溃，后者已修）。
+- **E8 补丁回写**：0001（105 文件，含全部 P2 写入路径/控制面/producer/controller/worker 注入/关停钩子+host_impl 删除）、0003（logger/v8sr→v3 发射与因果对象）、0004（ccbc→网络 v3 演进）——0001 仍承载 ccbc 的完整网络实现（HEAD→旧0001 态），0004 只含 v3 增量。**复现校验：干净 HEAD 顺序应用 0001→0003→0004 == 工作树（tree f19169a3，逐字节）**；V8 0002 在干净索引复验 CLEAN。
+- **复跑修复**：fingerprint-v1 复跑抓到 bnet 停止竞态（watermark 后仍写事件，validator 拒绝）——修复=stopping 后 bnet 不再接纳；修复后最终矩阵 **12/12**（browser-run-dZJY65）。
+- **基线对比（v1/v2 → v3，debug 口径）**：事件 +2.1%（57391→58619），trace 体积 +9.2%（85.3→93.2 MB）——v3 envelope 身份字段的开销，记录于 integration-progress.json。
+- **回归**：338/28/211 全绿（2 个 patch 内容断言随 E8 分层调整指向）；摘要（`p2E8Supplement`：补丁+6 dylib SHA-256）入 identity.json。

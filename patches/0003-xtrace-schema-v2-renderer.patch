@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index 8da7876994e36..05e5e99341133 100644
+index 8da7876994..05e5e99341 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 @@ -93,6 +93,19 @@ const char* XTraceScriptEvaluationResultType(
@@ -74,7 +74,7 @@ index 8da7876994e36..05e5e99341133 100644
    };
  
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b12b..c27c368e0cbe0 100644
+index b2a722741b..a1be1b8601 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -4,6 +4,7 @@
@@ -85,7 +85,15 @@ index b2a722741b12b..c27c368e0cbe0 100644
  #include <atomic>
  #include <cctype>
  #include <memory>
-@@ -39,17 +40,20 @@ constexpr char kFileEnv[] = "XTRACE_FILE";
+@@ -29,6 +30,7 @@
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/mojom/xtrace/xtrace.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
+ #include "v8/include/v8.h"
+ 
+ namespace blink {
+@@ -39,17 +41,20 @@ constexpr char kFileEnv[] = "XTRACE_FILE";
  constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
  constexpr char kCaptureValuesEnv[] = "XTRACE_CAPTURE_VALUES";
  constexpr char kCaptureAssetsEnv[] = "XTRACE_CAPTURE_ASSETS";
@@ -106,7 +114,7 @@ index b2a722741b12b..c27c368e0cbe0 100644
    std::string session_id;
    std::string trace_stem;
  };
-@@ -118,6 +122,8 @@ XTraceConfig ReadConfigFromRuntime() {
+@@ -118,6 +123,8 @@ XTraceConfig ReadConfigFromRuntime() {
    config.capture_assets =
        ReadRuntimeString(kCaptureAssetsSwitch, kCaptureAssetsEnv)
            .value_or("full");
@@ -115,15 +123,16 @@ index b2a722741b12b..c27c368e0cbe0 100644
    config.session_id = MakeSessionId();
    if (trace_file_path) {
      config.trace_stem =
-@@ -160,6 +166,51 @@ uint64_t NextSequenceNumber() {
+@@ -155,11 +162,51 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
+   return false;
+ }
+ 
+-uint64_t NextSequenceNumber() {
++uint64_t NextActivationSequenceNumber() {
+   static std::atomic<uint64_t> sequence{0};
    return ++sequence;
  }
  
-+uint64_t NextActivationSequenceNumber() {
-+  static std::atomic<uint64_t> sequence{0};
-+  return ++sequence;
-+}
-+
 +bool CausalitySyncEnabled(const XTraceConfig& config) {
 +  return config.enabled && config.causality == "sync";
 +}
@@ -167,10 +176,166 @@ index b2a722741b12b..c27c368e0cbe0 100644
  std::string Sha1Ref(std::string_view value) {
    return "sha1:" + base::HexEncode(base::SHA1HashString(value));
  }
-@@ -336,6 +387,63 @@ mojom::blink::XTraceHost* GetXTraceHost() {
-   return host.get();
+@@ -247,162 +294,253 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
+   return safe.empty() ? "asset" : safe;
  }
  
+-mojom::blink::XTraceHost* GetXTraceHost();
+-
+ bool AssetAlreadySent(std::string_view asset_id) {
+   thread_local auto* sent_assets = new std::unordered_set<std::string>();
+   auto [_, inserted] = sent_assets->insert(std::string(asset_id));
+   return !inserted;
+ }
+ 
+-std::string BuildScriptAssetFieldsAndSend(const XTraceConfig& config,
+-                                          const char* kind,
+-                                          const String& url,
+-                                          const String& source,
+-                                          uint64_t first_seq) {
+-  if (!CaptureAssetsEnabled(config) || source.empty()) {
+-    return std::string();
+-  }
++// Event-side asset references (schema v3 §5.3): the truncation quadruple
++// travels with the event so consumers can judge without table lookups.
++// The full source never appears in the event line (V06 closure).
++struct ScriptAssetRef {
++  std::string asset_id;
++  std::string sha1;
++  std::string content_path;  // empty for metadata-only
++  uint64_t original_size = 0;
++  bool captured = false;
++};
+ 
++ScriptAssetRef PrepareScriptAssetRef(const XTraceConfig& config,
++                                     const char* kind,
++                                     const String& url,
++                                     const String& source) {
++  ScriptAssetRef ref;
+   std::string source_utf8 = source.Utf8();
+   std::string url_utf8 = url.Utf8();
+   std::string kind_string(kind ? kind : "unknown");
+-  std::string source_hash = Sha1Ref(source_utf8);
+-  std::string asset_hash_input = kind_string + "\n" + url_utf8 + "\n" + source_utf8;
+-  std::string asset_id = Sha1Ref(asset_hash_input);
+-
+-  std::string content_path;
+-  std::string content;
+-  if (CaptureFullAssetsEnabled(config)) {
++  ref.sha1 = Sha1Ref(source_utf8);
++  ref.original_size = source_utf8.size();
++  std::string asset_hash_input =
++      kind_string + "\n" + url_utf8 + "\n" + source_utf8;
++  ref.asset_id = Sha1Ref(asset_hash_input);
++  ref.captured = CaptureFullAssetsEnabled(config);
++  if (ref.captured) {
+     std::string trace_stem =
+         config.trace_stem.empty() ? "trace_unknown" : config.trace_stem;
+-    content_path = "assets/" + trace_stem + "/" +
+-                   SanitizeAssetIdForPath(asset_id) + ".js";
+-    content = source_utf8;
+-  }
+-
+-  if (!AssetAlreadySent(asset_id)) {
+-    std::string manifest;
+-    manifest.append("{\"asset_id\":");
+-    manifest.append(QuoteJsonString(asset_id));
+-    manifest.append(",\"kind\":");
+-    manifest.append(QuoteJsonString(kind_string));
+-    manifest.append(",\"url\":");
+-    manifest.append(QuoteJsonString(url_utf8));
+-    manifest.append(",\"content_path\":");
+-    manifest.append(QuoteJsonString(content_path));
+-    manifest.append(",\"sha1\":");
+-    manifest.append(QuoteJsonString(source_hash));
+-    manifest.append(",\"size\":");
+-    manifest.append(base::NumberToString(source_utf8.size()));
+-    manifest.append(",\"truncated\":");
+-    manifest.append("false");
+-    manifest.append(",\"first_seq\":");
+-    manifest.append(base::NumberToString(first_seq));
+-    manifest.append(",\"frame_url\":\"\"");
+-    manifest.append(",\"origin\":\"\"");
+-    manifest.append(",\"original_size\":");
+-    manifest.append(base::NumberToString(source_utf8.size()));
+-    manifest.append(",\"source\":");
+-    manifest.append(QuoteJsonString(source_utf8));
+-    manifest.append(",\"retrieval_status\":");
+-    manifest.append(QuoteJsonString(CaptureFullAssetsEnabled(config)
+-                                        ? "captured"
+-                                        : "summary"));
+-    manifest.append("}");
+-    GetXTraceHost()->LogAsset(String::FromUtf8(content_path),
+-                              String::FromUtf8(manifest),
+-                              String::FromUtf8(content));
+-  }
+-
+-  std::string fields;
+-  fields.append("\"asset_id\":");
+-  fields.append(QuoteJsonString(asset_id));
+-  fields.append(",\"source_hash\":");
+-  fields.append(QuoteJsonString(source_hash));
+-  fields.append(",\"source\":");
+-  fields.append(QuoteJsonString(source_utf8));
+-  fields.append(",\"script_url\":");
+-  fields.append(QuoteJsonString(url_utf8));
+-  return fields;
++    ref.content_path = "assets/" + trace_stem + "/" +
++                       SanitizeAssetIdForPath(ref.asset_id) + ".js";
++  }
++  return ref;
++}
++
++void AppendAssetRefFields(std::string* fields, const ScriptAssetRef& ref) {
++  fields->append("\"asset_refs\":[{\"asset_id\":");
++  fields->append(QuoteJsonString(ref.asset_id));
++  fields->append(",\"sha1\":");
++  fields->append(QuoteJsonString(ref.sha1));
++  fields->append(",\"original_size\":");
++  fields->append("\"" + base::NumberToString(ref.original_size) + "\"");
++  fields->append(",\"saved_size\":");
++  fields->append("\"" + base::NumberToString(ref.original_size) + "\"");
++  fields->append(",\"truncated\":false");
++  fields->append("}]");
++}
++
++// Asset manifest row (schema v3 §5.3). The row body never embeds the
++// source: full mode ships the content through the asset channel, summary
++// mode is metadata-only and retrieval_status declares which (V06 closure).
++void SendScriptAssetRow(xtrace::XTraceThreadProducer* producer,
++                        const char* kind,
++                        const String& url,
++                        const String& source,
++                        const ScriptAssetRef& ref,
++                        uint64_t first_seq) {
++  std::string row;
++  row.append("{\"schema_version\":3");
++  row.append(",\"asset_id\":");
++  row.append(QuoteJsonString(ref.asset_id));
++  row.append(",\"kind\":");
++  row.append(QuoteJsonString(kind ? kind : "unknown"));
++  row.append(",\"url\":");
++  row.append(QuoteJsonString(url.Utf8()));
++  row.append(",\"original_size\":");
++  row.append("\"" + base::NumberToString(ref.original_size) + "\"");
++  row.append(",\"saved_size\":");
++  row.append("\"" + base::NumberToString(ref.original_size) + "\"");
++  row.append(",\"truncated\":false");
++  row.append(",\"sha1\":");
++  row.append(QuoteJsonString(ref.sha1));
++  row.append(",\"retrieval_status\":");
++  row.append(QuoteJsonString(ref.captured ? "captured" : "metadata-only"));
++  if (ref.captured) {
++    row.append(",\"content_path\":");
++    row.append(QuoteJsonString(ref.content_path));
++  }
++  row.append(",\"first_seq\":");
++  row.append("\"" + base::NumberToString(first_seq) + "\"");
++  row.append("}");
++  producer->SendAsset(std::move(row), ref.content_path,
++                      ref.captured ? source.Utf8() : std::string());
++}
++
 +bool IsActivationTerminal(const char* phase, const char* api) {
 +  if (!phase || !api ||
 +      (std::string_view(phase) != "return" &&
@@ -179,8 +344,13 @@ index b2a722741b12b..c27c368e0cbe0 100644
 +  }
 +  const std::vector<XTraceActivation>& stack = ActivationStack();
 +  return !stack.empty() && stack.back().api == api;
-+}
-+
+ }
+ 
+-mojom::blink::XTraceHost* GetXTraceHost() {
+-  thread_local mojo::Remote<mojom::blink::XTraceHost> host;
+-  if (!host.is_bound()) {
+-    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
+-        host.BindNewPipeAndPassReceiver());
 +CausalityFields CurrentCausalityFields(const XTraceConfig& config,
 +                                       const char* phase,
 +                                       const char* api,
@@ -204,13 +374,28 @@ index b2a722741b12b..c27c368e0cbe0 100644
 +    fields.parent_token = stack.back().token;
 +    fields.has_parent = true;
 +    fields.depth = stack.back().depth + 1;
-+  }
+   }
+-  return host.get();
 +  return fields;
-+}
-+
-+void AppendCausalityFields(std::string* line,
+ }
+ 
+-void LogEventWithSequence(const XTraceConfig& config,
+-                          const char* category,
+-                          const char* phase,
+-                          const char* api,
+-                          const String& args_json,
+-                          uint64_t seq,
+-                          std::string_view extra_fields,
+-                          bool capture_stack,
+-                          std::string_view frame_url,
+-                          std::string_view origin) {
++// Schema v3 §3.4: the causality object is always present. `duration_us`
++// is a decimal string on paired terminal events, otherwise null.
++void AppendCausalityObject(std::string* line,
 +                           const XTraceConfig& config,
 +                           const CausalityFields& fields) {
++  line->append("\"causality\":{\"kind\":");
++  line->append(QuoteJsonString(fields.kind));
 +  line->append(",\"call_id\":");
 +  AppendCallId(line, config, fields.call_token);
 +  line->append(",\"parent_id\":");
@@ -221,51 +406,145 @@ index b2a722741b12b..c27c368e0cbe0 100644
 +  }
 +  line->append(",\"depth\":");
 +  line->append(base::NumberToString(fields.depth));
-+  line->append(",\"causality_kind\":");
-+  line->append(QuoteJsonString(fields.kind));
 +  line->append(",\"duration_us\":");
-+  line->append(fields.has_duration ? base::NumberToString(fields.duration_us)
-+                                   : "null");
++  line->append(fields.has_duration
++                   ? "\"" + base::NumberToString(fields.duration_us) + "\""
++                   : "null");
++  line->append("}");
 +}
 +
- void LogEventWithSequence(const XTraceConfig& config,
-                           const char* category,
-                           const char* phase,
-@@ -345,7 +453,8 @@ void LogEventWithSequence(const XTraceConfig& config,
-                           std::string_view extra_fields,
-                           bool capture_stack,
-                           std::string_view frame_url,
--                          std::string_view origin) {
-+                          std::string_view origin,
-+                          const CausalityFields* causal_fields = nullptr) {
++// Core v3 emission. The producer assigns the logical sequence number and
++// appends the identity tail; the browser writer stamps capture_id and
++// writer_seq. Asset references travel with the event; the asset row (and
++// content in full mode) follows on the same thread pipe after the event's
++// sequence number is known.
++void EmitEvent(const XTraceConfig& config,
++               const char* category,
++               const char* phase,
++               const char* api,
++               const String& args_json,
++               bool capture_stack,
++               std::string_view frame_url,
++               std::string_view origin,
++               const CausalityFields* causal_fields,
++               const char* asset_kind = nullptr,
++               const String* asset_url = nullptr,
++               const String* asset_source = nullptr) {
++  xtrace::XTraceThreadProducer* producer =
++      xtrace::XTraceThreadProducer::Current();
++  if (!producer) {
++    return;
++  }
++
    const int64_t wall_time_us =
        (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
    const int64_t mono_time_us =
-@@ -356,7 +465,8 @@ void LogEventWithSequence(const XTraceConfig& config,
+       base::TimeTicks::Now().since_origin().InMicroseconds();
+-  std::string event_id = config.session_id + ":" + base::NumberToString(seq);
+ 
+   std::string args = args_json.Utf8();
    std::string stack_json = capture_stack ? CaptureJavaScriptStack() : "[]";
  
++  ScriptAssetRef asset_ref;
++  bool has_asset_ref = false;
++  std::string extra_fields;
++  if (asset_kind && asset_url && asset_source && CaptureAssetsEnabled(config) &&
++      !asset_source->empty() && !IsInternalScriptUrl(*asset_url)) {
++    asset_ref =
++        PrepareScriptAssetRef(config, asset_kind, *asset_url, *asset_source);
++    has_asset_ref = true;
++    AppendAssetRefFields(&extra_fields, asset_ref);
++  }
++
++  // In causality=off mode the activation stack is unmaintained and every
++  // renderer event renders as a singleton with a fresh token: call_id is
++  // null only for external producer-local observations (browser network),
++  // which never originate here.
++  CausalityFields fields =
++      causal_fields ? *causal_fields
++                    : CurrentCausalityFields(config, phase, api, mono_time_us);
++
    std::string line;
 -  line.append("{\"schema_version\":1");
-+  line.append(CausalitySyncEnabled(config) ? "{\"schema_version\":2"
-+                                           : "{\"schema_version\":1");
-   line.append(",\"event_id\":");
-   line.append(QuoteJsonString(event_id));
-   line.append(",\"session_id\":");
-@@ -394,6 +504,13 @@ void LogEventWithSequence(const XTraceConfig& config,
-   line.append(",\"result\":null");
-   line.append(",\"error\":null");
-   line.append(",\"truncated\":false");
-+  if (CausalitySyncEnabled(config)) {
-+    CausalityFields fields = causal_fields
-+                                 ? *causal_fields
-+                                 : CurrentCausalityFields(config, phase, api,
-+                                                          mono_time_us);
-+    AppendCausalityFields(&line, config, fields);
+-  line.append(",\"event_id\":");
+-  line.append(QuoteJsonString(event_id));
+-  line.append(",\"session_id\":");
+-  line.append(QuoteJsonString(config.session_id));
+-  line.append(",\"seq\":");
+-  line.append(base::NumberToString(seq));
+-  line.append(",\"session_seq\":");
+-  line.append(base::NumberToString(seq));
+-  line.append(",\"t\":");
+-  line.append(QuoteJsonString(phase));
+-  line.append(",\"ts\":");
+-  line.append(base::NumberToString(wall_time_us));
+-  line.append(",\"wall_time_us\":");
+-  line.append(base::NumberToString(wall_time_us));
+-  line.append(",\"mono_time_us\":");
++  line.append("{\"schema_version\":3");
++  line.append(",\"config_generation\":\"0\"");
++  line.append(",\"mono_time_us\":\"");
+   line.append(base::NumberToString(mono_time_us));
++  line.append("\",\"wall_time_us\":\"");
++  line.append(base::NumberToString(wall_time_us));
++  line.append("\",\"pid\":");
++  line.append(base::NumberToString(base::GetCurrentProcId()));
++  line.append(",\"tid\":");
++  line.append(base::NumberToString(base::PlatformThread::CurrentId().raw()));
+   line.append(",\"category\":");
+   line.append(QuoteJsonString(category));
+   line.append(",\"phase\":");
+   line.append(QuoteJsonString(phase));
+-  line.append(",\"pid\":");
+-  line.append(base::NumberToString(base::GetCurrentProcId()));
+-  line.append(",\"tid\":");
+-  line.append(base::NumberToString(base::PlatformThread::CurrentId().raw()));
+   line.append(",\"api\":");
+   line.append(QuoteJsonString(api));
+   line.append(",\"args\":");
+   line.append(args);
+   line.append(",\"stack\":");
+   line.append(stack_json);
+-  line.append(",\"frame_url\":");
+-  line.append(QuoteJsonString(frame_url));
+-  line.append(",\"origin\":");
+-  line.append(QuoteJsonString(origin));
+-  line.append(",\"result\":null");
+-  line.append(",\"error\":null");
+-  line.append(",\"truncated\":false");
++  line.append(",\"attribution\":");
++  if (frame_url.empty() && origin.empty()) {
++    // Schema v3 §3.3: absence is explicit; never empty-string placeholders
++    // (§6.6 frame_url/origin closure).
++    line.append("{\"status\":\"unresolved\"}");
++  } else {
++    line.append("{\"status\":\"resolved\",\"frame\":{\"frame_url\":");
++    line.append(QuoteJsonString(frame_url));
++    line.append(",\"origin\":");
++    line.append(QuoteJsonString(origin));
++    line.append("}}");
 +  }
++  line.append(",");
++  AppendCausalityObject(&line, config, fields);
    if (!extra_fields.empty()) {
      line.append(",");
      line.append(extra_fields);
-@@ -411,6 +528,63 @@ bool XTraceLogger::Enabled() {
+   }
+-  line.append("}\n");
++  line.append("}");
+ 
+-  // LogBatch is intentionally not used yet; per-event Log keeps current
+-  // ordering/compatibility until renderer-side buffering lands.
+-  GetXTraceHost()->Log(String::FromUtf8(line));
++  std::optional<uint64_t> seq = producer->AcceptEvent(std::move(line));
++  if (seq && has_asset_ref && !AssetAlreadySent(asset_ref.asset_id)) {
++    SendScriptAssetRow(producer, asset_kind, *asset_url, *asset_source,
++                       asset_ref, *seq);
++  }
+ }
+ 
+ }  // namespace
+@@ -411,6 +549,62 @@ bool XTraceLogger::Enabled() {
    return GetCachedConfig().enabled;
  }
  
@@ -301,10 +580,9 @@ index b2a722741b12b..c27c368e0cbe0 100644
 +  fields.depth = activation.depth;
 +  fields.kind = "paired";
 +  fields.has_parent = activation.parent_token != 0;
-+  const uint64_t seq = NextSequenceNumber();
-+  LogEventWithSequence(config, category, "call", api, args_json, seq,
-+                       std::string_view(), false, frame_url.Utf8(),
-+                       origin.Utf8(), &fields);
++  EmitEvent(config, category, "call", api, args_json,
++            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(),
++            &fields);
 +  stack.push_back(std::move(activation));
 +  return stack.back().token;
 +}
@@ -329,10 +607,133 @@ index b2a722741b12b..c27c368e0cbe0 100644
  String XTraceLogger::QuoteJson(const String& value) {
    return String::FromUtf8(QuoteJsonString(value.Utf8()));
  }
-@@ -577,4 +751,21 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
-                        extra_fields, false, frame_url_utf8, origin_utf8);
+@@ -448,11 +642,9 @@ void XTraceLogger::LogEvent(const char* category,
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  const uint64_t seq = NextSequenceNumber();
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       std::string_view(), true, std::string_view(),
+-                       std::string_view());
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/true, std::string_view(), std::string_view(),
++            nullptr);
  }
  
+ void XTraceLogger::LogEventWithContext(const char* category,
+@@ -465,12 +657,8 @@ void XTraceLogger::LogEventWithContext(const char* category,
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  std::string frame_url_utf8 = frame_url.Utf8();
+-  std::string origin_utf8 = origin.Utf8();
+-  const uint64_t seq = NextSequenceNumber();
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       std::string_view(), true, frame_url_utf8, origin_utf8);
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/true, frame_url.Utf8(), origin.Utf8(), nullptr);
+ }
+ 
+ void XTraceLogger::LogEventNoStack(const char* category,
+@@ -481,11 +669,9 @@ void XTraceLogger::LogEventNoStack(const char* category,
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  const uint64_t seq = NextSequenceNumber();
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       std::string_view(), false, std::string_view(),
+-                       std::string_view());
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/false, std::string_view(), std::string_view(),
++            nullptr);
+ }
+ 
+ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+@@ -498,12 +684,8 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  std::string frame_url_utf8 = frame_url.Utf8();
+-  std::string origin_utf8 = origin.Utf8();
+-  const uint64_t seq = NextSequenceNumber();
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       std::string_view(), false, frame_url_utf8, origin_utf8);
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr);
+ }
+ 
+ void XTraceLogger::LogAssetEvent(const char* category,
+@@ -520,13 +702,9 @@ void XTraceLogger::LogAssetEvent(const char* category,
+   if (IsInternalScriptUrl(url)) {
+     return;
+   }
+-
+-  const uint64_t seq = NextSequenceNumber();
+-  std::string extra_fields =
+-      BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       extra_fields, true, std::string_view(),
+-                       std::string_view());
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/true, std::string_view(), std::string_view(),
++            nullptr, kind, &url, &source);
+ }
+ 
+ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+@@ -540,15 +718,17 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  const uint64_t seq = NextSequenceNumber();
+-  std::string extra_fields;
++  const char* asset_kind = nullptr;
++  const String* asset_url = nullptr;
++  const String* asset_source = nullptr;
+   if (!IsInternalScriptUrl(url)) {
+-    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
++    asset_kind = kind;
++    asset_url = &url;
++    asset_source = &source;
+   }
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       extra_fields, false, std::string_view(),
+-                       std::string_view());
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/false, std::string_view(), std::string_view(),
++            nullptr, asset_kind, asset_url, asset_source);
+ }
+ 
+ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+@@ -565,16 +745,34 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+   if (!CategoryEnabled(config, category)) {
+     return;
+   }
+-
+-  std::string frame_url_utf8 = frame_url.Utf8();
+-  std::string origin_utf8 = origin.Utf8();
+-  const uint64_t seq = NextSequenceNumber();
+-  std::string extra_fields;
++  const char* asset_kind = nullptr;
++  const String* asset_url = nullptr;
++  const String* asset_source = nullptr;
+   if (!IsInternalScriptUrl(url)) {
+-    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
++    asset_kind = kind;
++    asset_url = &url;
++    asset_source = &source;
+   }
+-  LogEventWithSequence(config, category, phase, api, args_json, seq,
+-                       extra_fields, false, frame_url_utf8, origin_utf8);
++  EmitEvent(config, category, phase, api, args_json,
++            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr,
++            asset_kind, asset_url, asset_source);
++}
++
 +XTraceActivationScope::XTraceActivationScope(const char* category,
 +                                             const char* api,
 +                                             const String& args_json,
@@ -348,11 +749,11 @@ index b2a722741b12b..c27c368e0cbe0 100644
 +void XTraceActivationScope::Complete() {
 +  XTraceLogger::CompleteActivation(token_);
 +  token_ = 0;
-+}
-+
+ }
+ 
  }  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-index f621f4cc3f1db..c39f4f67b808a 100644
+index f621f4cc3f..c39f4f67b8 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 @@ -5,6 +5,8 @@

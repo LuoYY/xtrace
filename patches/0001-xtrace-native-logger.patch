@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index fee9425c5c488..6377858aa20fe 100644
+index fee9425c5c..89eb629e19 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -16,21 +16,27 @@
@@ -113,7 +113,7 @@ index fee9425c5c488..6377858aa20fe 100644
      };
  
      command_line->CopySwitchesFrom(browser_command_line, kSwitchNames);
-@@ -6001,6 +6025,795 @@ GetClientDataHeader(content::FrameTreeNodeId frame_tree_node_id) {
+@@ -6001,6 +6026,795 @@ GetClientDataHeader(content::FrameTreeNodeId frame_tree_node_id) {
  }
  #endif
  
@@ -909,7 +909,7 @@ index fee9425c5c488..6377858aa20fe 100644
  std::unique_ptr<blink::URLLoaderThrottle> CreateGoogleURLLoaderThrottle(
  #if BUILDFLAG(IS_ANDROID)
      const std::string& client_data_header,
-@@ -6059,6 +6872,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+@@ -6059,6 +6873,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
    Profile* profile = Profile::FromBrowserContext(browser_context);
    DCHECK(profile);
  
@@ -920,7 +920,7 @@ index fee9425c5c488..6377858aa20fe 100644
    ChromeNavigationUIData* chrome_navigation_ui_data =
        static_cast<ChromeNavigationUIData*>(navigation_ui_data);
  
-@@ -6151,6 +6968,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottlesForKeepAlive(
+@@ -6151,6 +6969,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottlesForKeepAlive(
    Profile* profile = Profile::FromBrowserContext(browser_context);
    DCHECK(profile);
  
@@ -931,7 +931,7 @@ index fee9425c5c488..6377858aa20fe 100644
  #if BUILDFLAG(IS_ANDROID)
    auto [client_data_header, unused_is_custom_tab] =
        GetClientDataHeader(frame_tree_node_id);
-@@ -6755,6 +7576,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+@@ -6755,6 +7577,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
  #endif  // BUILDFLAG (ENABLE_EXTENSIONS_CORE)
  #endif  // BUILDFLAG(ENABLE_GUEST_VIEW)
  
@@ -941,149 +941,175 @@ index fee9425c5c488..6377858aa20fe 100644
    // WARNING: This must be the last interceptor in the chain as the proxying
    // URLLoaderFactory installed by this needs to be the one actually sending
    // packets over the network (to effectively target `bound_network`).
+diff --git a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+index c9f49cd198..7b9feb305a 100644
+--- a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
++++ b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/logging.h"
++#include "content/browser/xtrace/xtrace_capture_controller.h"
+ #include "chrome/browser/devtools/chrome_devtools_manager_delegate.h"
+ 
+ #include <memory>
+@@ -582,6 +584,12 @@ void ChromeDevToolsManagerDelegate::CloseBrowserSoon() {
+ 
+ // static
+ void ChromeDevToolsManagerDelegate::AllowBrowserToClose() {
++  // DP5: settle an active XTrace capture synchronously BEFORE the exit
++  // chain continues on this thread; later paths may terminate the process
++  // immediately (no atexit, no teardown hooks).
++  if (auto* controller = content::XTraceCaptureController::Get()) {
++    controller->NotifyBrowserShuttingDown();
++  }
+   if (auto* instance = GetInstance()) {
+     instance->keep_alive_.reset();
+   }
+diff --git a/chrome/browser/devtools/protocol/browser_handler.cc b/chrome/browser/devtools/protocol/browser_handler.cc
+index ccf5dd29d8..a291e13b57 100644
+--- a/chrome/browser/devtools/protocol/browser_handler.cc
++++ b/chrome/browser/devtools/protocol/browser_handler.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/logging.h"
+ #include "chrome/browser/devtools/protocol/browser_handler.h"
+ 
+ #include <set>
+diff --git a/chrome/browser/lifetime/application_lifetime_desktop.cc b/chrome/browser/lifetime/application_lifetime_desktop.cc
+index 2cbba56c8c..9fe36e5529 100644
+--- a/chrome/browser/lifetime/application_lifetime_desktop.cc
++++ b/chrome/browser/lifetime/application_lifetime_desktop.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/logging.h"
++#include "content/browser/xtrace/xtrace_capture_controller.h"
+ #include "chrome/browser/lifetime/application_lifetime_desktop.h"
+ 
+ #include <optional>
+@@ -446,6 +448,13 @@ void OnAppExiting() {
+ }
+ 
+ void OnClosingAllBrowsers(bool closing) {
++  if (closing) {
++    // DP5: settle an active XTrace capture synchronously; later exit paths
++    // may terminate the process immediately (no atexit, no teardown hooks).
++    if (auto* controller = content::XTraceCaptureController::Get()) {
++      controller->NotifyBrowserShuttingDown();
++    }
++  }
+   GetClosingAllBrowsersCallbackList().Notify(closing);
+ }
+ 
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
-index 51383ee19e1ba..3604f30a179e9 100644
+index 51383ee19e..148fdac326 100644
 --- a/content/browser/BUILD.gn
 +++ b/content/browser/BUILD.gn
 @@ -2142,6 +2142,8 @@ source_set("browser") {
      "sandboxed_opaque_origin_creator.h",
      "scheduler/browser_io_thread_delegate.cc",
      "scheduler/browser_io_thread_delegate.h",
-+    "xtrace/xtrace_host_impl.cc",
-+    "xtrace/xtrace_host_impl.h",
++    "xtrace/xtrace_capture_controller.cc",
++    "xtrace/xtrace_capture_controller.h",
      "scheduler/browser_task_executor.cc",
      "scheduler/browser_task_executor.h",
      "scheduler/browser_task_priority.cc",
 diff --git a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc b/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
-index db280b0576c47..e9be87581f6a5 100644
+index db280b0576..cea936ae91 100644
 --- a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
 +++ b/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
 @@ -25,6 +25,7 @@
  #include "content/browser/renderer_host/media/media_stream_track_metrics_host.h"
  #include "content/browser/renderer_host/render_message_filter.h"
  #include "content/browser/renderer_host/render_widget_helper.h"
-+#include "content/browser/xtrace/xtrace_host_impl.h"
++#include "content/browser/xtrace/xtrace_capture_controller.h"
  #include "content/common/features.h"
  #include "content/common/render_message_filter.mojom.h"
  #include "content/public/browser/device_service.h"
-@@ -254,6 +255,9 @@ void RenderProcessHostImpl::RegisterMojoInterfaces() {
+@@ -254,6 +255,17 @@ void RenderProcessHostImpl::RegisterMojoInterfaces() {
        &MediaStreamTrackMetricsHost::BindReceiver,
        base::Unretained(media_stream_track_metrics_host_.get())));
  
-+  registry->AddInterface(base::BindRepeating(&XTraceHostImpl::Create),
-+                         XTraceHostImpl::GetTaskRunner());
++  registry->AddInterface(
++      base::BindRepeating(
++          [](mojo::PendingReceiver<blink::mojom::XTraceHost> receiver) {
++            // Capture disabled at startup => receiver is simply dropped.
++            if (XTraceCaptureController* controller =
++                    XTraceCaptureController::Get()) {
++              controller->BindXTraceHostReceiver(std::move(receiver));
++            }
++          }),
++      XTraceCaptureController::WriterRunner());
 +
    registry->AddInterface(
        base::BindRepeating(&metrics::CreateSingleSampleMetricsProvider));
  
-diff --git a/content/browser/xtrace/xtrace_host_impl.cc b/content/browser/xtrace/xtrace_host_impl.cc
+diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000000..db47da2d7389d
+index 0000000000..2ab4609222
 --- /dev/null
-+++ b/content/browser/xtrace/xtrace_host_impl.cc
-@@ -0,0 +1,300 @@
++++ b/content/browser/xtrace/xtrace_capture_controller.cc
+@@ -0,0 +1,894 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
-+#include "content/browser/xtrace/xtrace_host_impl.h"
++#include "content/browser/xtrace/xtrace_capture_controller.h"
 +
 +#include <atomic>
-+#include <cstdint>
-+#include <string_view>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <cstring>
++#include <optional>
 +#include <utility>
 +
 +#include "base/command_line.h"
-+#include "base/containers/span.h"
++#include "base/logging.h"
 +#include "base/environment.h"
 +#include "base/files/file_util.h"
-+#include "base/logging.h"
++#include "base/functional/bind.h"
++#include "base/json/string_escape.h"
++#include "base/at_exit.h"
 +#include "base/no_destructor.h"
-+#include "base/strings/strcat.h"
++#include "base/numerics/safe_conversions.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
 +#include "base/task/thread_pool.h"
++#include "base/threading/thread_restrictions.h"
++#include "base/time/time.h"
++#include "content/public/browser/content_browser_client.h"
++#include "content/public/common/content_client.h"
++#include "crypto/sha2.h"
 +#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
 +
 +namespace content {
++
 +namespace {
 +
-+constexpr char kEnableEnv[] = "XTRACE_ENABLE";
-+constexpr char kFileEnv[] = "XTRACE_FILE";
 +constexpr char kEnableSwitch[] = "xtrace-enable";
 +constexpr char kFileSwitch[] = "xtrace-file";
++constexpr char kCategoriesSwitch[] = "xtrace-categories";
++constexpr char kCaptureValuesSwitch[] = "xtrace-capture-values";
++constexpr char kCaptureAssetsSwitch[] = "xtrace-capture-assets";
++constexpr char kCausalitySwitch[] = "xtrace-causality";
++constexpr char kMaxBodyBytesSwitch[] = "xtrace-max-body-bytes";
++constexpr char kMaxHeaderValueBytesSwitch[] = "xtrace-max-header-value-bytes";
 +
-+std::atomic<uint64_t> g_xtrace_file_global_sequence{0};
++// XTRACE_TEST_SCAFFOLDING: --xtrace-stop-after-ms triggers the NORMAL stop
++// path on a timer so P2 fault-injection tests can drive settlement without
++// the (P3) CDP XTrace domain. Not exposed through the launcher; registered
++// for P3 removal together with --xtrace-test-capacity (renderer side).
++constexpr char kStopAfterMsSwitch[] = "xtrace-stop-after-ms";
 +
-+bool HasTopLevelJsonKey(std::string_view event_json, std::string_view key) {
-+  int depth = 0;
-+  bool in_string = false;
-+  bool escaped = false;
-+  size_t string_start = 0;
-+
-+  for (size_t i = 0; i < event_json.size(); ++i) {
-+    const char c = event_json[i];
-+    if (in_string) {
-+      if (escaped) {
-+        escaped = false;
-+        continue;
-+      }
-+      if (c == '\\') {
-+        escaped = true;
-+        continue;
-+      }
-+      if (c != '"') {
-+        continue;
-+      }
-+
-+      in_string = false;
-+      if (depth != 1 ||
-+          event_json.substr(string_start, i - string_start) != key) {
-+        continue;
-+      }
-+
-+      size_t next = i + 1;
-+      while (next < event_json.size() &&
-+             (event_json[next] == ' ' || event_json[next] == '\t' ||
-+              event_json[next] == '\r' || event_json[next] == '\n')) {
-+        ++next;
-+      }
-+      if (next < event_json.size() && event_json[next] == ':') {
-+        return true;
-+      }
-+      continue;
-+    }
-+
-+    if (c == '"') {
-+      in_string = true;
-+      escaped = false;
-+      string_start = i + 1;
-+    } else if (c == '{' || c == '[') {
-+      ++depth;
-+    } else if (c == '}' || c == ']') {
-+      --depth;
-+    }
-+  }
-+
-+  return false;
-+}
-+
-+std::string TraceStemFromPath(const base::FilePath& trace_file_path) {
-+  return trace_file_path.BaseName().RemoveExtension().AsUTF8Unsafe();
-+}
-+
-+base::FilePath AssetManifestPathFromTracePath(
-+    const base::FilePath& trace_file_path) {
-+  return trace_file_path.DirName()
-+      .AppendASCII("assets")
-+      .Append(base::FilePath::FromUTF8Unsafe(TraceStemFromPath(trace_file_path)))
-+      .AppendASCII("manifest.ndjson");
-+}
-+
-+bool IsSafeRelativeContentPath(const std::string& content_path) {
-+  return !content_path.empty() && content_path[0] != '/' &&
-+         content_path.find("..") == std::string::npos &&
-+         content_path.find('\\') == std::string::npos;
-+}
++std::atomic<XTraceCaptureController*> g_controller{nullptr};
++std::atomic<bool> g_controller_initialized{false};
 +
 +std::optional<base::FilePath> ReadTraceFilePathFromRuntime() {
 +  const base::CommandLine* command_line =
@@ -1094,257 +1120,1031 @@ index 0000000000000..db47da2d7389d
 +      return trace_file;
 +    }
 +  }
-+
 +  std::unique_ptr<base::Environment> env = base::Environment::Create();
-+  std::optional<std::string> enabled = env->GetVar(kEnableEnv);
++  std::optional<std::string> enabled = env->GetVar("XTRACE_ENABLE");
 +  if (!enabled || *enabled != "1") {
 +    return std::nullopt;
 +  }
-+
-+  std::optional<std::string> trace_file = env->GetVar(kFileEnv);
++  std::optional<std::string> trace_file = env->GetVar("XTRACE_FILE");
 +  if (!trace_file || trace_file->empty()) {
 +    return std::nullopt;
 +  }
-+
 +  return base::FilePath::FromUTF8Unsafe(*trace_file);
++}
++
++std::string MakeBrowserProcessEpoch() {
++  // Real creation time is not portably exposed; first-use monotonic tick
++  // is unique per process instance (schema v3 §3.1 epoch contract).
++  return base::NumberToString(base::GetCurrentProcId()) + "." +
++         base::NumberToString(
++             base::TimeTicks::Now().since_origin().InMicroseconds());
++}
++
++std::string SwitchValueOr(const char* name, const char* fallback) {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  std::string value = command_line->GetSwitchValueASCII(name);
++  return value.empty() ? fallback : value;
 +}
 +
 +}  // namespace
 +
-+XTraceHostImpl::XTraceHostImpl()
-+    : trace_file_path_(ReadTraceFilePathFromRuntime()) {}
-+
-+XTraceHostImpl::~XTraceHostImpl() = default;
-+
 +// static
-+void XTraceHostImpl::Create(
-+    mojo::PendingReceiver<blink::mojom::XTraceHost> receiver) {
-+  mojo::MakeSelfOwnedReceiver(std::make_unique<XTraceHostImpl>(),
-+                              std::move(receiver));
++XTraceCaptureController* XTraceCaptureController::Get() {
++  XTraceCaptureController* controller =
++      g_controller.load(std::memory_order_acquire);
++  if (controller != nullptr ||
++      g_controller_initialized.load(std::memory_order_acquire)) {
++    return controller;  // may be null when capture is disabled
++  }
++  g_controller_initialized.store(true, std::memory_order_release);
++  std::optional<base::FilePath> trace_file = ReadTraceFilePathFromRuntime();
++  if (!trace_file) {
++    return nullptr;
++  }
++  const int64_t wall_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
++  std::string nonce = base::HexEncode(crypto::SHA256HashString(
++      base::NumberToString(wall_us) + ":" +
++      base::NumberToString(base::GetCurrentProcId())));
++  nonce = nonce.substr(0, 8);
++  std::string capture_id = "c" + base::NumberToString(wall_us) + "-" +
++                           base::NumberToString(base::GetCurrentProcId()) +
++                           "-" + nonce;
++  // Startup config snapshot for the manifest (schema v3 §6).
++  std::string config_json =
++      "{\"generation\":\"0\",\"categories\":" +
++      base::GetQuotedJSONString(
++          SwitchValueOr(kCategoriesSwitch, "reverse,fingerprint")) +
++      ",\"capture_values\":" +
++      base::GetQuotedJSONString(SwitchValueOr(kCaptureValuesSwitch, "full")) +
++      ",\"capture_assets\":" +
++      base::GetQuotedJSONString(SwitchValueOr(kCaptureAssetsSwitch, "full")) +
++      ",\"causality\":" +
++      base::GetQuotedJSONString(SwitchValueOr(kCausalitySwitch, "off")) +
++      ",\"max_body_bytes\":\"" + SwitchValueOr(kMaxBodyBytesSwitch, "0") +
++      "\",\"max_header_value_bytes\":\"" +
++      SwitchValueOr(kMaxHeaderValueBytesSwitch, "0") + "\"}";
++  XTraceCaptureController* created =
++      new XTraceCaptureController(*trace_file, std::move(capture_id));
++  created->config_json_ = std::move(config_json);
++  g_controller.store(created, std::memory_order_release);
++  created->MaybeScheduleTestStop();
++  return created;
 +}
 +
 +// static
-+scoped_refptr<base::SequencedTaskRunner> XTraceHostImpl::GetTaskRunner() {
++scoped_refptr<base::SequencedTaskRunner>
++XTraceCaptureController::WriterRunner() {
++  // DP5: BLOCK_SHUTDOWN so a graceful browser exit drains queued writes
++  // and the manifest task; the finalizer never waits on remote processes,
++  // so these tasks are bounded and cannot hang shutdown.
 +  static base::NoDestructor<scoped_refptr<base::SequencedTaskRunner>> runner(
 +      base::ThreadPool::CreateSequencedTaskRunner(
-+          {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN,
++          {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN,
 +           base::TaskPriority::USER_VISIBLE}));
 +  return *runner;
 +}
 +
-+// static
-+std::string XTraceHostImpl::StampGlobalSequenceForWrite(
++XTraceCaptureController::XTraceCaptureController(
++    const base::FilePath& trace_file_path, std::string capture_id)
++    : trace_file_path_(trace_file_path),
++      capture_id_(std::move(capture_id)),
++      trace_stem_(trace_file_path.BaseName().RemoveExtension().AsUTF8Unsafe()) {
++  DETACH_FROM_SEQUENCE(writer_sequence_);
++  // stop_timer_ binds its runner at Start() time, which only happens in
++  // BeginStopOnWriter on the writer sequence (Get() may first run on any
++  // thread, and SetTaskRunner here would DCHECK).
++  // Guaranteed last-ditch settlement: exit callbacks run after the thread
++  // pool has joined, on any process exit that unwinds main() — including
++  // the mac NSApp-terminate path where browser teardown hooks are skipped.
++  base::AtExitManager::RegisterCallback(
++      [](void* controller) {
++        static_cast<XTraceCaptureController*>(controller)
++            ->FinalizeForProcessExit();
++      },
++      this);
++}
++
++void XTraceCaptureController::FinalizeForProcessExit() {
++  if (finalized_.load(std::memory_order_acquire)) {
++    return;
++  }
++  base::AutoLock lock(writer_lock_);
++  if (finalized_.load(std::memory_order_acquire)) {
++    return;
++  }
++  finalized_.store(true, std::memory_order_release);
++  // Do NOT touch stop_timer_ here: it belongs to the writer sequence and
++  // this path runs on the exiting thread; the finalized_ gate already
++  // neutralizes any later timer callback.
++  WriteManifestRaw("incomplete", "browser-shutdown");
++}
++
++void XTraceCaptureController::BindXTraceHostReceiver(
++    mojo::PendingReceiver<blink::mojom::XTraceHost> receiver) {
++  WriterRunner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<XTraceCaptureController> weak,
++             mojo::PendingReceiver<blink::mojom::XTraceHost> receiver) {
++            if (!weak) {
++              return;
++            }
++            // Thin per-pipe shim; forwards into the controller's
++            // writer-runner handlers. Self-owned until disconnect.
++            class HostImpl : public blink::mojom::XTraceHost {
++             public:
++              explicit HostImpl(base::WeakPtr<XTraceCaptureController> w)
++                  : weak_(std::move(w)) {}
++              void LogBatch(blink::mojom::XTraceBatchPtr batch) override {
++                if (weak_) {
++                  weak_->OnLogBatch(std::move(batch));
++                }
++              }
++              void LogAsset(blink::mojom::XTraceAssetPtr asset) override {
++                if (weak_) {
++                  weak_->OnLogAsset(std::move(asset));
++                }
++              }
++              void SubmitWatermark(
++                  blink::mojom::XTraceWatermarkPtr watermark) override {
++                if (weak_) {
++                  weak_->OnWatermark(std::move(watermark));
++                }
++              }
++              void ProvideControlEndpoint(
++                  blink::mojom::XTraceProducerDescriptorPtr producer,
++                  mojo::PendingRemote<blink::mojom::XTraceControl> control)
++                  override {
++                if (weak_) {
++                  weak_->OnProvideControlEndpoint(std::move(producer),
++                                                  std::move(control));
++                }
++              }
++
++             private:
++              base::WeakPtr<XTraceCaptureController> weak_;
++            };
++            mojo::MakeSelfOwnedReceiver(
++                std::make_unique<HostImpl>(weak), std::move(receiver));
++          },
++          weak_factory_.GetWeakPtr(), std::move(receiver)));
++}
++
++void XTraceCaptureController::AcceptBrowserNetworkEvent(
 +    std::string event_json) {
-+  if (event_json.empty() || HasTopLevelJsonKey(event_json, "global_seq")) {
-+    return event_json;
-+  }
-+
-+  const size_t object_end = event_json.find_last_not_of(" \t\r\n");
-+  if (object_end == std::string::npos || event_json[object_end] != '}') {
-+    return event_json;
-+  }
-+
-+  const uint64_t global_seq =
-+      g_xtrace_file_global_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
-+  event_json.insert(
-+      object_end,
-+      base::StrCat({",\"global_seq\":", base::NumberToString(global_seq)}));
-+  return event_json;
-+}
-+
-+void XTraceHostImpl::Log(const std::string& event_json) {
-+  if (event_json.empty() || !EnsureFile()) {
++  if (event_json.empty() || finalized_.load(std::memory_order_acquire)) {
 +    return;
 +  }
-+
-+  WriteJsonLine(trace_file_, StampGlobalSequenceForWrite(event_json),
-+                "write failed");
++  WriterRunner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<XTraceCaptureController> weak, std::string json) {
++            if (weak) {
++              weak->OnBrowserNetworkEventLocked(std::move(json));
++            }
++          },
++          weak_factory_.GetWeakPtr(), std::move(event_json)));
 +}
 +
-+void XTraceHostImpl::LogBatch(
-+    const std::vector<std::string>& event_json_lines) {
-+  if (event_json_lines.empty() || !EnsureFile()) {
-+    return;
-+  }
-+
-+  for (const std::string& event_json : event_json_lines) {
-+    if (event_json.empty()) {
-+      continue;
-+    }
-+    if (!WriteJsonLine(trace_file_, StampGlobalSequenceForWrite(event_json),
-+                       "batch write failed")) {
-+      return;
-+    }
++void XTraceCaptureController::MaybeScheduleTestStop() {
++  // XTRACE_TEST_SCAFFOLDING consumption point; see kStopAfterMsSwitch.
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  const std::string value =
++      command_line->GetSwitchValueASCII(kStopAfterMsSwitch);
++  unsigned ms = 0;
++  if (!value.empty() && base::StringToUint(value, &ms) && ms > 0) {
++    // Delay = when the normal stop path fires; the watermark deadline is a
++    // fixed 2s window for settlement.
++    WriterRunner()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](base::WeakPtr<XTraceCaptureController> weak) {
++              if (weak) {
++                weak->RequestStop(2000);
++              }
++            },
++            weak_factory_.GetWeakPtr()),
++        base::Milliseconds(ms));
 +  }
 +}
 +
-+void XTraceHostImpl::LogAsset(const std::string& content_path,
-+                              const std::string& manifest_json,
-+                              const std::string& content) {
-+  if (!trace_file_path_ || manifest_json.empty() || !EnsureAssetManifestFile()) {
-+    return;
-+  }
-+
-+  if (!content.empty() && IsSafeRelativeContentPath(content_path)) {
-+    base::FilePath asset_path =
-+        trace_file_path_->DirName().Append(base::FilePath::FromUTF8Unsafe(
-+            content_path));
-+    if (!base::CreateDirectory(asset_path.DirName())) {
-+      DLogWriteFailureOnce("asset directory create failed");
-+      return;
-+    }
-+    base::File asset_file(
-+        asset_path, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
-+    if (!asset_file.IsValid() ||
-+        !asset_file.WriteAtCurrentPosAndCheck(base::as_byte_span(content))) {
-+      DLogWriteFailureOnce("asset write failed");
-+      return;
-+    }
-+  }
-+
-+  WriteJsonLine(asset_manifest_file_, manifest_json, "asset manifest write failed");
++void XTraceCaptureController::RequestStop(uint32_t deadline_ms) {
++  WriterRunner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<XTraceCaptureController> weak, uint32_t deadline) {
++            if (weak) {
++              weak->BeginStopOnWriter(deadline);
++            }
++          },
++          weak_factory_.GetWeakPtr(), deadline_ms));
 +}
 +
-+bool XTraceHostImpl::EnsureFile() {
-+  if (!trace_file_path_) {
-+    return false;
++void XTraceCaptureController::NotifyBrowserShuttingDown() {
++  // Synchronous: the caller sits on an exit path that may bypass message
++  // loops and atexit entirely (immediate exit). FinalizeForProcessExit is
++  // idempotent and mutex-guarded for exactly this cross-thread call.
++  FinalizeForProcessExit();
++}
++
++void XTraceCaptureController::RegisterProducer(
++    const blink::mojom::XTraceProducerDescriptor& d) {
++  if (!producers_.count(d.producer_id)) {
++    auto state = std::make_unique<ProducerState>();
++    state->producer_id = d.producer_id;
++    state->process_epoch = d.process_epoch;
++    state->pkind = d.pkind;
++    if (d.worker) {
++      state->worker = true;
++      state->worker_kind = d.worker->kind;
++      state->worker_scope = d.worker->scope_url;
++    }
++    producers_[d.producer_id] = std::move(state);
 +  }
++}
++
++ProducerState* XTraceCaptureController::FindProducer(
++    const std::string& producer_id) {
++  auto it = producers_.find(producer_id);
++  return it == producers_.end() ? nullptr : it->second.get();
++}
++
++std::string XTraceCaptureController::StampWriterFields(std::string json) {
++  const size_t object_end = json.find_last_not_of(" \t\r\n");
++  if (object_end == std::string::npos || json[object_end] != '}') {
++    return std::string();
++  }
++  std::string tail = ",\"writer_seq\":\"" +
++                     base::NumberToString(next_writer_seq_++) +
++                     "\",\"capture_id\":" +
++                     base::GetQuotedJSONString(capture_id_);
++  json.insert(object_end, tail);
++  return json;
++}
++
++bool XTraceCaptureController::EnsureTraceFile() {
 +  if (trace_file_.IsValid()) {
 +    return true;
 +  }
-+
-+  if (!base::CreateDirectory(trace_file_path_->DirName())) {
-+    DLogWriteFailureOnce("create directory failed");
++  if (!base::CreateDirectory(trace_file_path_.DirName())) {
 +    return false;
 +  }
-+
-+  trace_file_.Initialize(*trace_file_path_, base::File::FLAG_OPEN_ALWAYS |
-+                                                base::File::FLAG_APPEND);
-+  if (!trace_file_.IsValid()) {
-+    std::string error_details =
-+        base::File::ErrorToString(trace_file_.error_details());
-+    DLogWriteFailureOnce(error_details.c_str());
-+    return false;
-+  }
-+  return true;
++  trace_file_.Initialize(trace_file_path_,
++                         base::File::FLAG_OPEN_ALWAYS | base::File::FLAG_APPEND);
++  return trace_file_.IsValid();
 +}
 +
-+bool XTraceHostImpl::EnsureAssetManifestFile() {
-+  if (!trace_file_path_) {
-+    return false;
-+  }
++bool XTraceCaptureController::EnsureAssetManifestFile() {
 +  if (asset_manifest_file_.IsValid()) {
 +    return true;
 +  }
-+
-+  base::FilePath manifest_path = AssetManifestPathFromTracePath(*trace_file_path_);
++  base::FilePath manifest_path =
++      trace_file_path_.DirName().AppendASCII("assets")
++          .Append(base::FilePath::FromUTF8Unsafe(trace_stem_))
++          .AppendASCII("manifest.ndjson");
 +  if (!base::CreateDirectory(manifest_path.DirName())) {
-+    DLogWriteFailureOnce("asset manifest directory create failed");
 +    return false;
 +  }
-+
 +  asset_manifest_file_.Initialize(
 +      manifest_path, base::File::FLAG_OPEN_ALWAYS | base::File::FLAG_APPEND);
-+  if (!asset_manifest_file_.IsValid()) {
-+    std::string error_details =
-+        base::File::ErrorToString(asset_manifest_file_.error_details());
-+    DLogWriteFailureOnce(error_details.c_str());
-+    return false;
-+  }
-+  return true;
++  return asset_manifest_file_.IsValid();
 +}
 +
-+bool XTraceHostImpl::WriteJsonLine(base::File& file,
-+                                   const std::string& json,
-+                                   const char* failure_reason) {
++bool XTraceCaptureController::WriteLine(base::File& file,
++                                        const std::string& json) {
 +  if (!file.WriteAtCurrentPosAndCheck(base::as_byte_span(json))) {
-+    DLogWriteFailureOnce(failure_reason);
 +    return false;
 +  }
++  static constexpr char kNewline[] = "\n";
++  return json.empty() || json.back() == '\n' ||
++         file.WriteAtCurrentPosAndCheck(base::byte_span_from_cstring(kNewline));
++}
 +
-+  if (!json.empty() && json.back() != '\n') {
-+    static constexpr char kNewline[] = "\n";
-+    if (!file.WriteAtCurrentPosAndCheck(base::byte_span_from_cstring(kNewline))) {
-+      DLogWriteFailureOnce("newline write failed");
-+      return false;
++void XTraceCaptureController::OnLogBatch(blink::mojom::XTraceBatchPtr batch) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    if (finalized_.load(std::memory_order_acquire)) {
++      return;
++    }
++    RegisterProducer(*batch->producer);
++    ProducerState* state = FindProducer(batch->producer->producer_id);
++    if (!state || batch->event_json_lines.size() != batch->count) {
++      return;  // malformed batch: rejected before acceptance accounting
++    }
++    if (!EnsureTraceFile()) {
++      trace_write_failed_ = true;
++      state->accepted += batch->count;
++      state->failed += batch->count;
++      return;
++    }
++    for (const std::string& raw : batch->event_json_lines) {
++      std::string line = StampWriterFields(raw);
++      if (line.empty() || !WriteLine(trace_file_, line)) {
++        trace_write_failed_ = true;
++        ++state->failed;
++      } else {
++        ++state->written;
++      }
++      ++state->accepted;
 +    }
 +  }
-+  return true;
 +}
 +
-+void XTraceHostImpl::DLogWriteFailureOnce(const char* reason) {
-+  if (logged_write_failure_ || !trace_file_path_) {
++void XTraceCaptureController::OnLogAsset(blink::mojom::XTraceAssetPtr asset) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    if (finalized_.load(std::memory_order_acquire) || asset->asset_json.empty()) {
++      return;
++    }
++    RegisterProducer(*asset->producer);
++    ProducerState* state = FindProducer(asset->producer->producer_id);
++    if (!state) {
++      return;
++    }
++    // Schema v3 §5.3: asset rows carry the producer identity; stamp it along
++    // with the writer fields (rows arrive without either).
++    const size_t row_open = asset->asset_json.find('{');
++    if (row_open != std::string::npos) {
++      asset->asset_json.insert(
++          row_open + 1, "\"producer_id\":" +
++                           base::GetQuotedJSONString(
++                               asset->producer->producer_id) +
++                           ",");
++    }
++    std::string row = StampWriterFields(std::move(asset->asset_json));
++    if (row.empty()) {
++      ++state->assets_failed;
++      return;
++    }
++    if (!asset->content_path.empty() && !asset->content.empty() &&
++        asset->content_path[0] != '/' &&
++        asset->content_path.find("..") == std::string::npos) {
++      base::FilePath asset_path = trace_file_path_.DirName().Append(
++          base::FilePath::FromUTF8Unsafe(asset->content_path));
++      if (!base::CreateDirectory(asset_path.DirName())) {
++        ++state->assets_failed;
++      } else {
++        base::File content_file(
++            asset_path, base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_WRITE);
++        if (!content_file.IsValid() ||
++            !content_file.WriteAtCurrentPosAndCheck(
++                base::as_byte_span(asset->content))) {
++          ++state->assets_failed;
++        }
++      }
++    }
++    if (!EnsureAssetManifestFile() || !WriteLine(asset_manifest_file_, row)) {
++      ++state->assets_failed;
++      return;
++    }
++    ++state->assets_written;
++    ++asset_rows_written_;
++  }
++}
++
++void XTraceCaptureController::OnWatermark(
++    blink::mojom::XTraceWatermarkPtr watermark) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    if (finalized_.load(std::memory_order_acquire)) {
++      return;
++    }
++    RegisterProducer(*watermark->producer);
++    ProducerState* state = FindProducer(watermark->producer->producer_id);
++    if (!state) {
++      return;
++    }
++    uint64_t final_seq = 0, eligible = 0, enqueued = 0, dropped = 0;
++    base::StringToUint64(watermark->final_producer_seq, &final_seq);
++    base::StringToUint64(watermark->eligible, &eligible);
++    base::StringToUint64(watermark->enqueued, &enqueued);
++    base::StringToUint64(watermark->dropped, &dropped);
++    state->final_producer_seq = final_seq;
++    state->eligible = eligible;
++    state->enqueued = enqueued;
++    state->dropped = dropped;
++    state->assets_out = watermark->assets_out;
++    state->watermark_received = true;
++    state->pipe_alive = false;  // watermark is the pipe's last word
++    MaybeFinalizeForStopSettled();
++  }
++}
++
++void XTraceCaptureController::OnProvideControlEndpoint(
++    blink::mojom::XTraceProducerDescriptorPtr producer,
++    mojo::PendingRemote<blink::mojom::XTraceControl> control) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    if (finalized_.load(std::memory_order_acquire) || !control.is_valid()) {
++      return;
++    }
++    RegisterProducer(*producer);
++    const std::string epoch = producer->process_epoch;
++    if (control_remotes_by_epoch_.count(epoch)) {
++      return;  // one endpoint per process; first wins
++    }
++    mojo::Remote<blink::mojom::XTraceControl> remote(std::move(control));
++    remote.set_disconnect_handler(base::BindOnce(
++        [](base::WeakPtr<XTraceCaptureController> weak,
++           const std::string& process_epoch) {
++          if (weak) {
++            weak->OnControlDisconnected(process_epoch);
++          }
++        },
++        weak_factory_.GetWeakPtr(), epoch));
++    control_remotes_by_epoch_[epoch] = std::move(remote);
++  }
++}
++
++void XTraceCaptureController::OnControlDisconnected(
++    const std::string& process_epoch) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    control_remotes_by_epoch_.erase(process_epoch);
++    if (finalized_.load(std::memory_order_acquire) || producers_.empty()) {
++      return;
++    }
++    if (!control_remotes_by_epoch_.empty()) {
++      return;  // other renderer processes still live
++    }
++    // Every renderer endpoint is gone. Whole-browser quit settles what
++    // already reached the writer (DP5 shutdown path); renderer loss without
++    // a quit leaves settlement to the normal stop path or its deadline.
++    const bool quitting = GetContentClient()->browser()->IsShuttingDown();
++    if (quitting) {
++      FinalizeLocked("browser-shutdown");
++    }
++  }
++}
++
++void XTraceCaptureController::OnBrowserNetworkEventLocked(std::string json) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    // Outside the capture window once stopping begins: the synthesized bnet
++    // watermark in BeginStopOnWriter is final, and later events would write
++    // sequence numbers beyond it (observed by the validator as a real race).
++    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
++      return;
++    }
++    // The browser-network producer is local: one synthetic producer identity,
++    // counted through the same conservation accounting. In-process
++    // submission means eligible/enqueued equal accepted here.
++    if (!bnet_state_) {
++      // Schema v3 §4.2 (v1.2): bnet follows the five-segment format —
++      // real browser process epoch, writer-thread tid, lseq fixed at 1.
++      const std::string epoch = MakeBrowserProcessEpoch();
++      const std::string producer_id =
++          "bnet:" + epoch + ":" +
++          base::NumberToString(base::PlatformThread::CurrentId().raw()) + ":1";
++      auto state = std::make_unique<ProducerState>();
++      state->producer_id = producer_id;
++      state->process_epoch = epoch;
++      state->pkind = "bnet";
++      bnet_state_ = state.get();
++      producers_[producer_id] = std::move(state);
++    }
++    ProducerState* state = bnet_state_;
++    const uint64_t seq = state->accepted + 1;
++    ++state->eligible;
++    ++state->enqueued;
++    ++state->accepted;
++    // Stamp the local producer identity (single producer: producer_seq ==
++    // accepted count) plus the writer fields.
++    const size_t close = json.find_last_of('}');
++    if (close != std::string::npos) {
++      json.insert(close,
++                  ",\"producer_seq\":\"" + base::NumberToString(seq) +
++                      "\",\"producer_id\":\"" + state->producer_id +
++                      "\",\"process_epoch\":\"local\""
++                      ",\"config_generation\":\"0\"");
++    }
++    std::string line = StampWriterFields(std::move(json));
++    if (line.empty() || !EnsureTraceFile() || !WriteLine(trace_file_, line)) {
++      trace_write_failed_ = true;
++      ++state->failed;
++    } else {
++      ++state->written;
++    }
++  }
++}
++
++void XTraceCaptureController::BeginStopOnWriter(uint32_t deadline_ms) {
++  {
++    base::AutoLock lock(writer_lock_);
++    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
++      return;
++    }
++    stopping_ = true;
++    stop_deadline_ms_ = deadline_ms;
++    // The local browser-network producer settles immediately (in-process;
++    // nothing to wait for).
++    if (bnet_state_) {
++      bnet_state_->final_producer_seq = bnet_state_->accepted;
++      bnet_state_->dropped = 0;
++      bnet_state_->watermark_received = true;
++      bnet_state_->pipe_alive = false;
++    }
++    // Distribute the stop through each renderer's in-band control endpoint.
++    // Delivery is distribution, never acknowledgement (draft V09): settlement
++    // counts watermarks on the data pipes.
++    for (auto& [epoch, remote] : control_remotes_by_epoch_) {
++      remote->StopCapture(
++          capture_id_, deadline_ms,
++          base::BindOnce([](bool accepted) {
++            // Distribution ack only; ignored for settlement.
++          }));
++    }
++    MaybeFinalizeForStopSettled();
++    if (!finalized_) {
++      stop_timer_.Start(
++          FROM_HERE, base::Milliseconds(deadline_ms),
++          base::BindOnce(&XTraceCaptureController::OnStopDeadline,
++                         base::Unretained(this)));
++    }
++  }
++}
++
++void XTraceCaptureController::MaybeFinalizeForStopSettled() {
++  // Internal: caller holds writer_lock_.
++  DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
++  if (!stopping_ || finalized_.load(std::memory_order_acquire)) {
 +    return;
 +  }
-+  logged_write_failure_ = true;
-+  DLOG(WARNING) << "XTrace failed to write trace in browser process: " << reason
-+                << ": " << trace_file_path_->AsUTF8Unsafe();
++  for (const auto& [id, state] : producers_) {
++    if (!state->watermark_received) {
++      return;  // still waiting on renderer watermarks (or the deadline)
++    }
++  }
++  stop_timer_.Stop();
++  FinalizeLocked(std::string());
++
++}
++
++void XTraceCaptureController::OnStopDeadline() {
++  // Stop timeout: report the unconfirmed producers; the timeout itself
++  // does not authorize killing any process (draft §7.4).
++  std::string unconfirmed;
++  {
++    base::AutoLock lock(writer_lock_);
++    if (finalized_.load(std::memory_order_acquire)) {
++      return;
++    }
++    for (const auto& [id, state] : producers_) {
++      if (!state->watermark_received) {
++        unconfirmed += (unconfirmed.empty() ? "" : ",") + id;
++      }
++    }
++    FinalizeLocked(unconfirmed.empty() ? std::string("stop-timeout")
++                                       : "stop-timeout:" + unconfirmed);
++  }
++}
++
++void XTraceCaptureController::Finalize(const std::string& reason) {
++  // Writer-sequence entry; the exit path uses FinalizeForProcessExit.
++  base::AutoLock lock(writer_lock_);
++  FinalizeLocked(reason);
++}
++
++void XTraceCaptureController::FinalizeLocked(const std::string& reason) {
++  if (finalized_.load(std::memory_order_acquire)) {
++    return;
++  }
++  finalized_.store(true, std::memory_order_release);
++  stop_timer_.Stop();
++
++  bool all_confirmed = true;
++  bool equations_hold = true;
++  bool dropped_zero = true;
++  bool failed_zero = true;
++  for (const auto& [id, state] : producers_) {
++    if (!state->watermark_received) {
++      all_confirmed = false;
++      continue;
++    }
++    if (state->eligible != state->enqueued + state->dropped ||
++        state->enqueued != state->accepted ||
++        state->accepted != state->written + state->failed ||
++        state->assets_out !=
++            state->assets_written + state->assets_failed) {
++      equations_hold = false;
++    }
++    if (state->dropped > 0) {
++      dropped_zero = false;
++    }
++    if (state->failed > 0 || state->assets_failed > 0) {
++      failed_zero = false;
++    }
++  }
++
++  // Count equations are the sole terminal judge (handoff §6.7): no
++  // "looks complete" shortcuts.
++  std::string terminal_state;
++  std::string terminal_reason = reason;
++  if (producers_.empty()) {
++    // No producer ever registered: the capture observed nothing; this is a
++    // coverage gap, never a successful settlement.
++    terminal_state = "incomplete";
++    if (terminal_reason.empty()) {
++      terminal_reason = "no-producers-observed";
++    }
++  } else if (!all_confirmed) {
++    terminal_state = "incomplete";
++    if (terminal_reason.empty()) {
++      terminal_reason = "producer-unconfirmed";
++    }
++  } else if (!equations_hold) {
++    terminal_state = "incomplete";
++    if (terminal_reason.empty()) {
++      terminal_reason = "inconsistent-counts";
++    }
++  } else if (dropped_zero && failed_zero && !trace_write_failed_) {
++    terminal_state = "complete";
++    terminal_reason.clear();
++  } else {
++    terminal_state = "incomplete";
++    if (terminal_reason.empty()) {
++      terminal_reason = trace_write_failed_ ? "disk-write-failure"
++                                            : (dropped_zero ? "write-failures"
++                                                            : "dropped>0");
++    }
++  }
++
++  WriteManifest(terminal_state, terminal_reason);
++  trace_file_.Close();
++  asset_manifest_file_.Close();
++}
++
++std::string XTraceCaptureController::BuildManifestJson(
++    const std::string& terminal_state, const std::string& reason) {
++  // Pure builder: state read under writer_lock_ by both callers (writer
++  // sequence via Finalize; the exiting thread via FinalizeForProcessExit).
++  std::string json;
++  json.append("{\"manifest_version\":3");
++  json.append(",\"schema_version\":3");
++  json.append(",\"capture_id\":" + base::GetQuotedJSONString(capture_id_));
++  json.append(",\"config\":" + config_json_);
++  json.append(",\"artifacts\":{");
++  json.append("\"trace\":" + base::GetQuotedJSONString(
++                                 trace_file_path_.BaseName().AsUTF8Unsafe()));
++  json.append(",\"asset_manifest\":\"assets/" + trace_stem_ +
++              "/manifest.ndjson\"");
++  json.append(",\"asset_dir\":\"assets/" + trace_stem_ + "/\"");
++  json.append(",\"asset_count\":\"" +
++              base::NumberToString(asset_rows_written_) + "\"}");
++  json.append(",\"batching\":{\"max_batch_events\":\"200\""
++              ",\"flush_interval_ms\":\"50\""
++              ",\"producer_buffer_events\":\"4096\""
++              ",\"overflow_policy\":\"drop-newest\"}");
++  json.append(",\"producers\":[");
++  bool first = true;
++  for (const auto& [id, state] : producers_) {
++    if (!first) {
++      json.append(",");
++    }
++    first = false;
++    json.append("{\"producer_id\":" + base::GetQuotedJSONString(id));
++    json.append(",\"process_epoch\":" +
++                base::GetQuotedJSONString(state->process_epoch));
++    json.append(",\"kind\":" +
++                base::GetQuotedJSONString(
++                    state->pkind == "bnet"
++                        ? std::string("browser-network")
++                        : (state->worker ? state->worker_kind + "-worker"
++                                         : std::string("main-thread"))));
++    // Schema v3 §7 (v1.2): producer-side counters of an unconfirmed
++    // producer are UNKNOWN — emit JSON null, never zero-filled.
++    auto null_or = [](bool confirmed, uint64_t value) -> std::string {
++      return confirmed ? ("\"" + base::NumberToString(value) + "\"")
++                       : std::string("null");
++    };
++    json.append(",\"final_producer_seq\":" +
++                null_or(state->watermark_received,
++                        state->final_producer_seq));
++    json.append(",\"eligible\":" +
++                null_or(state->watermark_received, state->eligible) +
++                ",\"enqueued\":" +
++                null_or(state->watermark_received, state->enqueued) +
++                ",\"dropped\":" +
++                null_or(state->watermark_received, state->dropped) +
++                ",\"assets_out\":" +
++                null_or(state->watermark_received, state->assets_out) +
++                // Writer-side counters are measured for every producer.
++                ",\"accepted\":\"" + base::NumberToString(state->accepted) +
++                "\",\"written\":\"" + base::NumberToString(state->written) +
++                "\",\"failed\":\"" + base::NumberToString(state->failed) +
++                "\",\"assets_written\":\"" +
++                base::NumberToString(state->assets_written) +
++                "\",\"assets_failed\":\"" +
++                base::NumberToString(state->assets_failed) + "\"");
++    json.append(",\"watermark\":{\"received\":" +
++                std::string(state->watermark_received ? "true" : "false") +
++                "}");
++    json.append(",\"confirmed\":" +
++                std::string(state->watermark_received ? "true" : "false"));
++    json.append("}");
++  }
++  json.append("]");
++  // Global counts: producer-side sums cover CONFIRMED producers only
++  // (unknown values are not zero-filled); writer-side sums cover all.
++  // The visible equation gap under loss is itself the evidence (§7).
++  uint64_t total_eligible = 0, total_enqueued = 0, total_dropped = 0,
++           total_accepted = 0, total_written = 0, total_failed = 0;
++  for (const auto& [id, state] : producers_) {
++    if (state->watermark_received) {
++      total_eligible += state->eligible;
++      total_enqueued += state->enqueued;
++      total_dropped += state->dropped;
++    }
++    total_accepted += state->accepted;
++    total_written += state->written;
++    total_failed += state->failed;
++  }
++  json.append(",\"counts\":{" +
++              std::string("\"eligible\":\"") +
++              base::NumberToString(total_eligible) + "\",\"enqueued\":\"" +
++              base::NumberToString(total_enqueued) + "\",\"dropped\":\"" +
++              base::NumberToString(total_dropped) + "\",\"accepted\":\"" +
++              base::NumberToString(total_accepted) + "\",\"written\":\"" +
++              base::NumberToString(total_written) + "\",\"failed\":\"" +
++              base::NumberToString(total_failed) +
++              "\",\"sampled_out\":\"0\"}");
++  json.append(",\"overflow_intervals\":[]");
++  json.append(",\"terminal\":{\"state\":" +
++              base::GetQuotedJSONString(terminal_state) + ",\"reason\":" +
++              (reason.empty() ? std::string("null")
++                              : base::GetQuotedJSONString(reason)) +
++              ",\"unconfirmed_producers\":[");
++  bool first_unconfirmed = true;
++  for (const auto& [id, state] : producers_) {
++    if (state->watermark_received) {
++      continue;
++    }
++    if (!first_unconfirmed) {
++      json.append(",");
++    }
++    first_unconfirmed = false;
++    json.append(base::GetQuotedJSONString(id));
++  }
++  json.append("]}}");
++
++  return json;
++}
++
++void XTraceCaptureController::WriteManifest(
++    const std::string& terminal_state, const std::string& reason) {
++  base::FilePath manifest_path = trace_file_path_.DirName().Append(
++      trace_file_path_.BaseName().RemoveExtension().AddExtension(
++          ".manifest.json"));
++  if (!base::CreateDirectory(manifest_path.DirName())) {
++    return;
++  }
++  const std::string json = BuildManifestJson(terminal_state, reason);
++  base::File manifest_file(manifest_path,
++                           base::File::FLAG_CREATE_ALWAYS |
++                               base::File::FLAG_WRITE);
++  if (manifest_file.IsValid()) {
++    manifest_file.WriteAtCurrentPosAndCheck(base::as_byte_span(json));
++  } else {
++    // Diagnostics stay queryable even when the manifest itself cannot be
++    // written (e.g. read-only capture directory).
++    LOG(ERROR) << "XTrace manifest write failed (" << manifest_path.value()
++               << "); terminal state: " << json;
++  }
++}
++
++void XTraceCaptureController::WriteManifestRaw(
++    const std::string& terminal_state, const std::string& reason) {
++  // Raw POSIX IO: the process-exit path runs on a thread without blocking
++  // allowances, and base::File would trip thread-restriction checks (or
++  // need friend-list edits). Raw syscalls are bounded and uninstrumented.
++  const std::string path =
++      trace_file_path_.value().substr(0, trace_file_path_.value().size() -
++                                            strlen(".ndjson")) +
++      ".manifest.json";
++  ::mkdir(trace_file_path_.DirName().value().c_str(), 0755);  // EEXIST ok
++  const std::string json = BuildManifestJson(terminal_state, reason);
++  int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
++  if (fd < 0) {
++    return;
++  }
++  size_t written = 0;
++  while (written < json.size()) {
++    const ssize_t n = ::write(fd, json.data() + written, json.size() - written);
++    if (n <= 0) {
++      break;
++    }
++    written += static_cast<size_t>(n);
++  }
++  ::close(fd);
 +}
 +
 +}  // namespace content
-diff --git a/content/browser/xtrace/xtrace_host_impl.h b/content/browser/xtrace/xtrace_host_impl.h
+diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000000..d3211a577e0b6
+index 0000000000..1c685b1667
 --- /dev/null
-+++ b/content/browser/xtrace/xtrace_host_impl.h
-@@ -0,0 +1,55 @@
++++ b/content/browser/xtrace/xtrace_capture_controller.h
+@@ -0,0 +1,188 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
-+#ifndef CONTENT_BROWSER_XTRACE_XTRACE_HOST_IMPL_H_
-+#define CONTENT_BROWSER_XTRACE_XTRACE_HOST_IMPL_H_
++#ifndef CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
++#define CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 +
-+#include <optional>
++#include <atomic>
++#include <map>
++#include <memory>
 +#include <string>
-+#include <vector>
 +
 +#include "base/files/file.h"
-+#include "base/files/file_path.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/sequence_checker.h"
++#include "base/synchronization/lock.h"
 +#include "base/task/sequenced_task_runner.h"
++#include "base/timer/timer.h"
 +#include "content/common/content_export.h"
 +#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "mojo/public/cpp/bindings/remote.h"
 +#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
 +
 +namespace content {
 +
-+class CONTENT_EXPORT XTraceHostImpl final : public blink::mojom::XTraceHost {
-+ public:
-+  XTraceHostImpl();
-+  XTraceHostImpl(const XTraceHostImpl&) = delete;
-+  XTraceHostImpl& operator=(const XTraceHostImpl&) = delete;
-+  ~XTraceHostImpl() override;
++struct ProducerState;
 +
-+  static void Create(mojo::PendingReceiver<blink::mojom::XTraceHost> receiver);
-+  static scoped_refptr<base::SequencedTaskRunner> GetTaskRunner();
-+  static std::string StampGlobalSequenceForWrite(std::string event_json);
++// Single logical writer + capture coordinator for schema v3 (P2-E3, draft
++// §7). One capture per browser process in P2. All file IO, counting and
++// settlement run on a dedicated BLOCK_SHUTDOWN sequenced runner (DP5):
++// shutdown only drains what is already queued locally and never waits on
++// remote processes; a mid-capture teardown finalizes as incomplete with
++// reason "browser-shutdown".
++//
++// Stop distribution uses the in-band control endpoints delivered by
++// renderer processes over their first XTraceHost pipe
++// (XTraceHost.ProvideControlEndpoint); the endpoint disconnect doubles as
++// the renderer-death signal. Delivery counts are never acknowledgements
++// (draft V09) — settlement counts watermarks only.
++class CONTENT_EXPORT XTraceCaptureController {
++ public:
++  // Returns null when capture is disabled at startup (no --xtrace-enable /
++  // XTRACE_ENABLE with a trace file).
++  static XTraceCaptureController* Get();
++
++  // Writer runner (broker registration hands receivers to it).
++  static scoped_refptr<base::SequencedTaskRunner> WriterRunner();
++
++  // Bound per producer pipe (each renderer thread binds its own XTraceHost
++  // receiver through the browser interface broker).
++  void BindXTraceHostReceiver(
++      mojo::PendingReceiver<blink::mojom::XTraceHost> receiver);
++
++  // In-process browser-network producer (chrome/ layer): the private
++  // AppendToFile path is gone; events flow into the same writer and count
++  // conservation as every other producer (P2-E3 merge).
++  void AcceptBrowserNetworkEvent(std::string event_json);
++
++  // XTRACE_TEST_SCAFFOLDING consumption point (definition: the
++  // --xtrace-stop-after-ms parsing in the .cc): schedules the normal stop
++  // path; P3 replaces the timer trigger with XTrace.stopCapture.
++  void MaybeScheduleTestStop();
++
++  // Normal stop path trigger (deadline in ms for watermark collection).
++  void RequestStop(uint32_t deadline_ms);
++
++  // DP5 shutdown evidence: synchronous, idempotent finalization as
++  // incomplete/browser-shutdown using only data already at the writer (no
++  // cross-process waits). Called from chrome's OnClosingAllBrowsers (every
++  // exit path passes it before any immediate-exit) and the thread-pool
++  // teardown hook; the AtExit callback is the last-ditch belt.
++  void NotifyBrowserShuttingDown();
 +
 + private:
-+  // blink::mojom::XTraceHost:
-+  void Log(const std::string& event_json) override;
-+  void LogBatch(const std::vector<std::string>& event_json_lines) override;
-+  void LogAsset(const std::string& content_path,
-+                const std::string& manifest_json,
-+                const std::string& content) override;
++  // Runs on the writer runner at teardown; the controller has process
++  // lifetime (destructor deleted), so the binding is Unretained-safe.
++  // Process-exit path (base::RegisterExitCallback): runs after the thread
++  // pool has been joined, so touching writer state from the exiting thread
++  // is race-free; idempotent via the finalized_ gate.
++  void FinalizeForProcessExit();
 +
-+  bool EnsureFile();
++ private:
++  friend class XTraceCaptureControllerTest;
++
++
++  XTraceCaptureController(const base::FilePath& trace_file_path,
++                          std::string capture_id);
++  ~XTraceCaptureController() = delete;
++
++  // XTraceHost message handlers (writer runner).
++  void OnLogBatch(blink::mojom::XTraceBatchPtr batch);
++  void OnLogAsset(blink::mojom::XTraceAssetPtr asset);
++  void OnWatermark(blink::mojom::XTraceWatermarkPtr watermark);
++  void OnProvideControlEndpoint(
++      blink::mojom::XTraceProducerDescriptorPtr producer,
++      mojo::PendingRemote<blink::mojom::XTraceControl> control);
++  void OnControlDisconnected(const std::string& process_epoch);
++
++  void RegisterProducer(const blink::mojom::XTraceProducerDescriptor& d);
++  ProducerState* FindProducer(const std::string& producer_id);  // struct below
++
++  bool EnsureTraceFile();
 +  bool EnsureAssetManifestFile();
-+  bool WriteJsonLine(base::File& file,
-+                     const std::string& json,
-+                     const char* failure_reason);
-+  void DLogWriteFailureOnce(const char* reason);
++  bool WriteLine(base::File& file, const std::string& json);
++  std::string StampWriterFields(std::string json);  // writer_seq + capture_id
 +
-+  std::optional<base::FilePath> trace_file_path_;
++  // Stop orchestration, entirely on the writer runner: distribution via the
++  // in-band control endpoints, settlement by watermark or deadline.
++  // Finalization only consumes data already received — no cross-process
++  // waits anywhere in the stop or shutdown paths (DP5).
++  void BeginStopOnWriter(uint32_t deadline_ms);
++  void MaybeFinalizeForStopSettled();
++  void OnStopDeadline();
++  void OnBrowserNetworkEventLocked(std::string json);
++  void Finalize(const std::string& reason);
++  // Requires writer_lock_ held.
++  void FinalizeLocked(const std::string& reason);
++  std::string BuildManifestJson(const std::string& terminal_state,
++                                 const std::string& reason);
++  void WriteManifest(const std::string& terminal_state,
++                     const std::string& reason);
++  // Raw-IO sink for the process-exit path (no thread allowances there).
++  void WriteManifestRaw(const std::string& terminal_state,
++                        const std::string& reason);
++
++  const base::FilePath trace_file_path_;
++  const std::string capture_id_;
++  const std::string trace_stem_;
++  std::string config_json_;  // startup config snapshot for manifest
++
 +  base::File trace_file_;
 +  base::File asset_manifest_file_;
-+  bool logged_write_failure_ = false;
++  uint64_t next_writer_seq_ = 1;
++  bool trace_write_failed_ = false;
++
++  std::map<std::string, std::unique_ptr<ProducerState>> producers_;
++  size_t asset_rows_written_ = 0;
++  size_t asset_rows_failed_ = 0;
++
++  // Control endpoints per renderer process (key: process_epoch). Writer
++  // runner; disconnects drive renderer-gone accounting.
++  std::map<std::string, mojo::Remote<blink::mojom::XTraceControl>>
++      control_remotes_by_epoch_;
++
++  bool stopping_ = false;
++  std::atomic<bool> finalized_{false};
++  // Guards writer state for the process-exit finalize path.
++  base::Lock writer_lock_;
++  uint32_t stop_deadline_ms_ = 0;
++  base::OneShotTimer stop_timer_;  // writer runner
++  raw_ptr<ProducerState> bnet_state_ = nullptr;  // writer runner (owned by map)
++  uint64_t browser_network_lseq_ = 0;
++
++  base::WeakPtrFactory<XTraceCaptureController> weak_factory_{this};
++
++  SEQUENCE_CHECKER(writer_sequence_);
++};
++
++// Per-producer accounting (writer runner only).
++struct ProducerState {
++  std::string producer_id;
++  std::string process_epoch;
++  std::string pkind;
++  bool worker = false;
++  std::string worker_kind;
++  std::string worker_scope;
++  bool pipe_alive = true;
++  // Watermark (producer side).
++  uint64_t final_producer_seq = 0;
++  uint64_t eligible = 0;
++  uint64_t enqueued = 0;
++  uint64_t dropped = 0;
++  uint32_t assets_out = 0;
++  bool watermark_received = false;
++  // Writer side.
++  uint64_t accepted = 0;
++  uint64_t written = 0;
++  uint64_t failed = 0;
++  uint32_t assets_written = 0;
++  uint32_t assets_failed = 0;
 +};
 +
 +}  // namespace content
 +
-+#endif  // CONTENT_BROWSER_XTRACE_XTRACE_HOST_IMPL_H_
++#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/third_party/blink/public/mojom/BUILD.gn b/third_party/blink/public/mojom/BUILD.gn
-index 71be079d2c950..5d0bf99d0d9fc 100644
+index 71be079d2c..5d0bf99d0d 100644
 --- a/third_party/blink/public/mojom/BUILD.gn
 +++ b/third_party/blink/public/mojom/BUILD.gn
 @@ -275,6 +275,7 @@ mojom("mojom_platform") {
@@ -1357,26 +2157,126 @@ index 71be079d2c950..5d0bf99d0d9fc 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000000..59ebd580928ad
+index 0000000000..b38b984246
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,86 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +module blink.mojom;
 +
-+// Process-scoped trace sink used by native Blink XTrace instrumentation.
-+// Renderer code sends already serialized NDJSON event lines; the browser
-+// process owns the file handle so renderer sandboxing can remain enabled.
-+interface XTraceHost {
-+  Log(string event_json);
-+  LogBatch(array<string> event_json_lines);
-+  LogAsset(string content_path, string manifest_json, string content);
++// Schema v3 capture plumbing (docs/trace-schema-v3.md, DP2 in
++// docs/chromium-p2-r1-decisions.md). The browser process owns the trace
++// files and the capture state machine; renderer sandboxing stays enabled.
++
++// Worker provenance for renderer worker-thread producers; "unresolved" is
++// the declared value when the scope is not (yet) known.
++struct XTraceWorkerDescriptor {
++  string kind;       // "dedicated" | "shared" | "service" | "unresolved"
++  string scope_url;  // scope URL or "unresolved"
 +};
++
++// Producer identity, carried on every data message (registration is
++// piggybacked on the first message; no separate Register round trip).
++struct XTraceProducerDescriptor {
++  // "<pkind>:<pid>.<epoch>:<tid>:<lseq>"; lseq makes ids unique across
++  // operating-system tid reuse within one capture.
++  string producer_id;
++  string process_epoch;
++  string pkind;
++  string config_generation;  // P2: always the startup generation "0"
++  XTraceWorkerDescriptor? worker;
++};
++
++// Bounded batch of pre-serialized v3 event lines. `first_producer_seq` plus
++// `count` must match the lines' embedded producer_seq values; the writer
++// verifies this before accepting.
++struct XTraceBatch {
++  XTraceProducerDescriptor producer;
++  string first_producer_seq;  // decimal string (uint64 as text)
++  uint32 count;
++  array<string> event_json_lines;
++};
++
++// One asset manifest row plus its optional content payload. `asset_json` is
++// the v3 asset row; content_path/content are empty for metadata-only rows.
++struct XTraceAsset {
++  XTraceProducerDescriptor producer;
++  string asset_json;
++  string content_path;
++  string content;
++};
++
++// Terminal watermark: the producer's last message on its pipe. Pipe
++// ordering makes "no further events after the watermark" a transport
++// guarantee.
++struct XTraceWatermark {
++  XTraceProducerDescriptor producer;
++  string final_producer_seq;
++  string eligible;
++  string enqueued;
++  string dropped;
++  uint32 assets_out;
++};
++
++// Data plane: one pipe per producer thread. Batch is the only event path
++// (per-event Log was removed with the v1/v2 writers). The control endpoint
++// is delivered in-band on this pipe (once per renderer process): in the
++// ASG era process-level associated interfaces are frame-routed, so an
++// in-band endpoint avoids frame dependence and gives the browser a
++// renderer-death signal for free (remote disconnect).
++interface XTraceHost {
++  LogBatch(XTraceBatch batch);
++  LogAsset(XTraceAsset asset);
++  SubmitWatermark(XTraceWatermark watermark);
++  // Sent once per renderer process by whichever producer binds first.
++  // `control` is bound to this process's XTraceControl implementation.
++  ProvideControlEndpoint(XTraceProducerDescriptor producer,
++                         pending_remote<XTraceControl> control);
++};
++
++// Control plane: one instance per renderer process; the endpoint is
++// delivered in-band via XTraceHost.ProvideControlEndpoint (see the data
++// plane comment above for why).
++interface XTraceControl {
++  // Distributes a stop to this process's producer threads. `accepted` only
++  // means "distributed", never "settled": settlement evidence is each
++  // producer's watermark on its own XTraceHost pipe (draft V09: forwarding
++  // delivery counts are not acknowledgements).
++  StopCapture(string capture_id, uint32 deadline_ms) => (bool accepted);
++};
+diff --git a/third_party/blink/public/platform/xtrace_control.h b/third_party/blink/public/platform/xtrace_control.h
+new file mode 100644
+index 0000000000..44c0aab923
+--- /dev/null
++++ b/third_party/blink/public/platform/xtrace_control.h
+@@ -0,0 +1,22 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
++#define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
++
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++#include "third_party/blink/public/platform/web_common.h"
++
++namespace blink {
++
++// Binds the renderer-side XTraceControl implementation on the calling
++// thread (the endpoint is sent to the browser in-band by the first producer
++// pipe; see XTraceHost.ProvideControlEndpoint).
++BLINK_PLATFORM_EXPORT void BindXTraceControlReceiver(
++    mojo::PendingReceiver<mojom::XTraceControl> receiver);
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
-index 473f01ca4008a..58c21e35f19dc 100644
+index 473f01ca40..58c21e35f1 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 @@ -26,13 +26,17 @@
@@ -1536,7 +2436,7 @@ index 473f01ca4008a..58c21e35f19dc 100644
    isolate->SetExceptionPropagationCallback(ExceptionPropagationCallback);
    isolate->SetModifyCodeGenerationFromStringsCallback(
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index ecb68ce4e23d7..8da7876994e36 100644
+index ecb68ce4e2..8da7876994 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 @@ -68,6 +68,7 @@
@@ -1806,7 +2706,7 @@ index ecb68ce4e23d7..8da7876994e36 100644
  
  void V8ScriptRunner::ReportException(v8::Isolate* isolate,
 diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink/renderer/core/dom/document.cc
-index 3e0ab533963ee..a6698aede2cc6 100644
+index 3e0ab53396..a6698aede2 100644
 --- a/third_party/blink/renderer/core/dom/document.cc
 +++ b/third_party/blink/renderer/core/dom/document.cc
 @@ -415,6 +415,7 @@
@@ -1902,7 +2802,7 @@ index 3e0ab533963ee..a6698aede2cc6 100644
  
  String Document::domain() const {
 diff --git a/third_party/blink/renderer/core/dom/events/event_target.cc b/third_party/blink/renderer/core/dom/events/event_target.cc
-index 963d3134e477f..234254d20e920 100644
+index 963d3134e4..234254d20e 100644
 --- a/third_party/blink/renderer/core/dom/events/event_target.cc
 +++ b/third_party/blink/renderer/core/dom/events/event_target.cc
 @@ -80,6 +80,8 @@
@@ -2133,7 +3033,7 @@ index 963d3134e477f..234254d20e920 100644
      fired_listener = true;
  
 diff --git a/third_party/blink/renderer/core/dom/node.cc b/third_party/blink/renderer/core/dom/node.cc
-index 6936978b34ca0..0a580f3c3a129 100644
+index 6936978b34..0a580f3c3a 100644
 --- a/third_party/blink/renderer/core/dom/node.cc
 +++ b/third_party/blink/renderer/core/dom/node.cc
 @@ -159,6 +159,7 @@
@@ -2181,7 +3081,7 @@ index 6936978b34ca0..0a580f3c3a129 100644
  
  bool Node::isEqualNode(Node* other) const {
 diff --git a/third_party/blink/renderer/core/fetch/body.cc b/third_party/blink/renderer/core/fetch/body.cc
-index 3e304d9601381..ba462593a3235 100644
+index 3e304d9601..ba462593a3 100644
 --- a/third_party/blink/renderer/core/fetch/body.cc
 +++ b/third_party/blink/renderer/core/fetch/body.cc
 @@ -4,10 +4,16 @@
@@ -2375,7 +3275,7 @@ index 3e304d9601381..ba462593a3235 100644
 +
  }  // namespace blink
 diff --git a/third_party/blink/renderer/core/fetch/body.h b/third_party/blink/renderer/core/fetch/body.h
-index ba769af4170e5..d0c989c1cf5da 100644
+index ba769af417..d0c989c1cf 100644
 --- a/third_party/blink/renderer/core/fetch/body.h
 +++ b/third_party/blink/renderer/core/fetch/body.h
 @@ -69,6 +69,7 @@ class CORE_EXPORT Body : public ExecutionContextClient {
@@ -2387,7 +3287,7 @@ index ba769af4170e5..d0c989c1cf5da 100644
    // The parts of LoadAndConvertBody() that do not depend on the template
    // parameters are split into this method to reduce binary size.
 diff --git a/third_party/blink/renderer/core/fetch/global_fetch.cc b/third_party/blink/renderer/core/fetch/global_fetch.cc
-index 35ca03c2eeb6f..b496e69b9d5c0 100644
+index 35ca03c2ee..b496e69b9d 100644
 --- a/third_party/blink/renderer/core/fetch/global_fetch.cc
 +++ b/third_party/blink/renderer/core/fetch/global_fetch.cc
 @@ -18,11 +18,24 @@
@@ -2455,7 +3355,7 @@ index 35ca03c2eeb6f..b496e69b9d5c0 100644
  
    // Even if this was checked at the beginning of the function, it might
 diff --git a/third_party/blink/renderer/core/fetch/headers.cc b/third_party/blink/renderer/core/fetch/headers.cc
-index 78134ecad96f0..cff6992b90d34 100644
+index 78134ecad9..cff6992b90 100644
 --- a/third_party/blink/renderer/core/fetch/headers.cc
 +++ b/third_party/blink/renderer/core/fetch/headers.cc
 @@ -4,6 +4,8 @@
@@ -2730,7 +3630,7 @@ index 78134ecad96f0..cff6992b90d34 100644
  void Headers::Trace(Visitor* visitor) const {
    visitor->Trace(header_list_);
 diff --git a/third_party/blink/renderer/core/fetch/headers.h b/third_party/blink/renderer/core/fetch/headers.h
-index 02595585b36b5..e2293714d6f79 100644
+index 02595585b3..e2293714d6 100644
 --- a/third_party/blink/renderer/core/fetch/headers.h
 +++ b/third_party/blink/renderer/core/fetch/headers.h
 @@ -5,6 +5,8 @@
@@ -2759,7 +3659,7 @@ index 02595585b36b5..e2293714d6f79 100644
    bool bypass_request_forbidden_header_check_ = false;
  
 diff --git a/third_party/blink/renderer/core/fetch/request.cc b/third_party/blink/renderer/core/fetch/request.cc
-index 765c3eaca6034..7338f7015076a 100644
+index 765c3eaca6..7338f70150 100644
 --- a/third_party/blink/renderer/core/fetch/request.cc
 +++ b/third_party/blink/renderer/core/fetch/request.cc
 @@ -4,8 +4,15 @@
@@ -3114,7 +4014,7 @@ index 765c3eaca6034..7338f7015076a 100644
  
  RetryOptions* Request::getRetryOptions() const {
 diff --git a/third_party/blink/renderer/core/fetch/request.h b/third_party/blink/renderer/core/fetch/request.h
-index 9a55003292963..477a3895cff39 100644
+index 9a55003292..477a3895cf 100644
 --- a/third_party/blink/renderer/core/fetch/request.h
 +++ b/third_party/blink/renderer/core/fetch/request.h
 @@ -78,7 +78,7 @@ class CORE_EXPORT Request final : public ScriptWrappable, public Body {
@@ -3127,7 +4027,7 @@ index 9a55003292963..477a3895cff39 100644
    String referrer() const;
    V8ReferrerPolicy getReferrerPolicy() const;
 diff --git a/third_party/blink/renderer/core/fetch/response.cc b/third_party/blink/renderer/core/fetch/response.cc
-index aa3d08ee6cf5e..e232941ad06ae 100644
+index aa3d08ee6c..e232941ad0 100644
 --- a/third_party/blink/renderer/core/fetch/response.cc
 +++ b/third_party/blink/renderer/core/fetch/response.cc
 @@ -39,6 +39,7 @@
@@ -3335,7 +4235,7 @@ index aa3d08ee6cf5e..e232941ad06ae 100644
  
  mojom::blink::FetchAPIResponsePtr Response::PopulateFetchAPIResponse(
 diff --git a/third_party/blink/renderer/core/frame/dom_window.cc b/third_party/blink/renderer/core/frame/dom_window.cc
-index 9eb9855567eda..c258a3569c4d6 100644
+index 9eb9855567..c258a3569c 100644
 --- a/third_party/blink/renderer/core/frame/dom_window.cc
 +++ b/third_party/blink/renderer/core/frame/dom_window.cc
 @@ -11,6 +11,7 @@
@@ -3525,7 +4425,7 @@ index 9eb9855567eda..c258a3569c4d6 100644
                  options, incumbent_window, exception_state);
  }
 diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
-index 08db1e862097b..955454768ab32 100644
+index 08db1e8620..955454768a 100644
 --- a/third_party/blink/renderer/core/frame/local_dom_window.cc
 +++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
 @@ -172,6 +172,7 @@
@@ -3609,7 +4509,7 @@ index 08db1e862097b..955454768ab32 100644
  
  ScriptPromise<ScrollResult> LocalDOMWindow::scrollBy(ScriptState* script_state,
 diff --git a/third_party/blink/renderer/core/frame/location.cc b/third_party/blink/renderer/core/frame/location.cc
-index 7586fc4250461..01a8b793757e6 100644
+index 7586fc4250..01a8b79375 100644
 --- a/third_party/blink/renderer/core/frame/location.cc
 +++ b/third_party/blink/renderer/core/frame/location.cc
 @@ -47,9 +47,63 @@
@@ -3736,7 +4636,7 @@ index 7586fc4250461..01a8b793757e6 100644
                SetLocationPolicy::kReplaceThisFrame);
  }
 diff --git a/third_party/blink/renderer/core/frame/navigator.cc b/third_party/blink/renderer/core/frame/navigator.cc
-index 583f05f8dd5fb..b33c700239c28 100644
+index 583f05f8dd..b33c700239 100644
 --- a/third_party/blink/renderer/core/frame/navigator.cc
 +++ b/third_party/blink/renderer/core/frame/navigator.cc
 @@ -34,6 +34,7 @@
@@ -3812,7 +4712,7 @@ index 583f05f8dd5fb..b33c700239c28 100644
  }
  
 diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
-index f5c0db2d1b58d..1d735f230857f 100644
+index f5c0db2d1b..1d735f2308 100644
 --- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
 +++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
 @@ -5,11 +5,15 @@
@@ -3833,7 +4733,7 @@ index f5c0db2d1b58d..1d735f230857f 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-index 05fa33e4568e8..7e8cac109f954 100644
+index 05fa33e456..7e8cac109f 100644
 --- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
 +++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
 @@ -8,11 +8,16 @@
@@ -3855,7 +4755,7 @@ index 05fa33e4568e8..7e8cac109f954 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
-index 75cd3461317b7..b695383dd29d1 100644
+index 75cd346131..b695383dd2 100644
 --- a/third_party/blink/renderer/core/frame/navigator_language.cc
 +++ b/third_party/blink/renderer/core/frame/navigator_language.cc
 @@ -10,9 +10,27 @@
@@ -3907,7 +4807,7 @@ index 75cd3461317b7..b695383dd29d1 100644
  }
  
 diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
-index 73ad371b3237a..cb8693e06e585 100644
+index 73ad371b32..cb8693e06e 100644
 --- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
 +++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
 @@ -3,6 +3,7 @@
@@ -3930,7 +4830,7 @@ index 73ad371b3237a..cb8693e06e585 100644
        MakeGarbageCollected<ScriptPromiseResolver<UADataValues>>(script_state);
    auto promise = resolver->Promise();
 diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
-index 69ffc2b05f75d..603b15d65f462 100644
+index 69ffc2b05f..603b15d65f 100644
 --- a/third_party/blink/renderer/core/frame/screen.cc
 +++ b/third_party/blink/renderer/core/frame/screen.cc
 @@ -35,6 +35,7 @@
@@ -4036,7 +4936,7 @@ index 69ffc2b05f75d..603b15d65f462 100644
  
  void Screen::Trace(Visitor* visitor) const {
 diff --git a/third_party/blink/renderer/core/frame/universal_global_scope.cc b/third_party/blink/renderer/core/frame/universal_global_scope.cc
-index 884a2853ad8d1..09f7b9e59d276 100644
+index 884a2853ad..09f7b9e59d 100644
 --- a/third_party/blink/renderer/core/frame/universal_global_scope.cc
 +++ b/third_party/blink/renderer/core/frame/universal_global_scope.cc
 @@ -4,7 +4,11 @@
@@ -4164,7 +5064,7 @@ index 884a2853ad8d1..09f7b9e59d276 100644
                 WrapPersistent(callback), nullptr));
  }
 diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-index 4c784e3285328..f1d3f824420bc 100644
+index 4c784e3285..f1d3f82442 100644
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -128,6 +128,7 @@
@@ -4593,7 +5493,7 @@ index 4c784e3285328..f1d3f824420bc 100644
  }
  
 diff --git a/third_party/blink/renderer/core/html/forms/form_data.cc b/third_party/blink/renderer/core/html/forms/form_data.cc
-index 55a3a18e24154..25118684b39a8 100644
+index 55a3a18e24..25118684b3 100644
 --- a/third_party/blink/renderer/core/html/forms/form_data.cc
 +++ b/third_party/blink/renderer/core/html/forms/form_data.cc
 @@ -30,6 +30,8 @@
@@ -5209,7 +6109,7 @@ index 55a3a18e24154..25118684b39a8 100644
  
  std::string FormData::Encode(const String& string) const {
 diff --git a/third_party/blink/renderer/core/html/forms/form_data.h b/third_party/blink/renderer/core/html/forms/form_data.h
-index c7f8e903ee492..154cd21d09063 100644
+index c7f8e903ee..154cd21d09 100644
 --- a/third_party/blink/renderer/core/html/forms/form_data.h
 +++ b/third_party/blink/renderer/core/html/forms/form_data.h
 @@ -31,6 +31,8 @@
@@ -5238,7 +6138,7 @@ index c7f8e903ee492..154cd21d09063 100644
    // Entry pointers in entries_ never be nullptr.
    HeapVector<Member<const Entry>> entries_;
 diff --git a/third_party/blink/renderer/core/html/html_script_element.cc b/third_party/blink/renderer/core/html/html_script_element.cc
-index 40d83a82f115e..331b1049ff76f 100644
+index 40d83a82f1..331b1049ff 100644
 --- a/third_party/blink/renderer/core/html/html_script_element.cc
 +++ b/third_party/blink/renderer/core/html/html_script_element.cc
 @@ -51,6 +51,7 @@
@@ -5285,7 +6185,7 @@ index 40d83a82f115e..331b1049ff76f 100644
                                  AtomicString(compliant_value));
  }
 diff --git a/third_party/blink/renderer/core/messaging/message_channel.cc b/third_party/blink/renderer/core/messaging/message_channel.cc
-index 02444b8c80272..663b834cf1d2f 100644
+index 02444b8c80..663b834cf1 100644
 --- a/third_party/blink/renderer/core/messaging/message_channel.cc
 +++ b/third_party/blink/renderer/core/messaging/message_channel.cc
 @@ -28,9 +28,27 @@
@@ -5334,7 +6234,7 @@ index 02444b8c80272..663b834cf1d2f 100644
  
  void MessageChannel::Trace(Visitor* visitor) const {
 diff --git a/third_party/blink/renderer/core/messaging/message_port.cc b/third_party/blink/renderer/core/messaging/message_port.cc
-index c9fd4c68a467b..50cb4c1319a89 100644
+index c9fd4c68a4..50cb4c1319 100644
 --- a/third_party/blink/renderer/core/messaging/message_port.cc
 +++ b/third_party/blink/renderer/core/messaging/message_port.cc
 @@ -32,6 +32,7 @@
@@ -5605,7 +6505,7 @@ index c9fd4c68a467b..50cb4c1319a89 100644
    std::optional<scheduler::TaskAttributionTracker::TaskScope>
        task_attribution_scope;
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index a9757ec02f659..227dc6c43b93c 100644
+index a9757ec02f..227dc6c43b 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
 @@ -48,6 +48,7 @@
@@ -5641,7 +6541,7 @@ index a9757ec02f659..227dc6c43b93c 100644
        MakeGarbageCollected<ScheduledAction>(script_state, context, handler);
    return MakeGarbageCollected<DOMTimer>(
 diff --git a/third_party/blink/renderer/core/script/classic_script.cc b/third_party/blink/renderer/core/script/classic_script.cc
-index c718ebbf01e15..4aeb730a80e4c 100644
+index c718ebbf01..4aeb730a80 100644
 --- a/third_party/blink/renderer/core/script/classic_script.cc
 +++ b/third_party/blink/renderer/core/script/classic_script.cc
 @@ -13,6 +13,7 @@
@@ -5688,7 +6588,7 @@ index c718ebbf01e15..4aeb730a80e4c 100644
    // The base URL for external classic script is
    //
 diff --git a/third_party/blink/renderer/core/script/dynamic_module_resolver.cc b/third_party/blink/renderer/core/script/dynamic_module_resolver.cc
-index c1791697650fc..e59e5c8f3f4f6 100644
+index c179169765..e59e5c8f3f 100644
 --- a/third_party/blink/renderer/core/script/dynamic_module_resolver.cc
 +++ b/third_party/blink/renderer/core/script/dynamic_module_resolver.cc
 @@ -19,12 +19,118 @@
@@ -5893,7 +6793,7 @@ index c1791697650fc..e59e5c8f3f4f6 100644
    // <spec label="fetch-an-import()-module-script-graph" step="2">If url is
    // failure, then asynchronously complete this algorithm with null, and abort
 diff --git a/third_party/blink/renderer/core/script/js_module_script.cc b/third_party/blink/renderer/core/script/js_module_script.cc
-index aaba133de0a87..d0684c9955396 100644
+index aaba133de0..d0684c9955 100644
 --- a/third_party/blink/renderer/core/script/js_module_script.cc
 +++ b/third_party/blink/renderer/core/script/js_module_script.cc
 @@ -13,6 +13,7 @@
@@ -5922,7 +6822,7 @@ index aaba133de0a87..d0684c9955396 100644
    // <spec step="2">Let script be a new module script that this algorithm will
    // subsequently initialize.</spec>
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index c3daf3259596b..d1082d288ae62 100644
+index c3daf32595..d1082d288a 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -101,6 +101,7 @@
@@ -5949,7 +6849,7 @@ index c3daf3259596b..d1082d288ae62 100644
  
  // static
 diff --git a/third_party/blink/renderer/core/url/dom_url.cc b/third_party/blink/renderer/core/url/dom_url.cc
-index 7e7e800ffca8a..d9138835a3090 100644
+index 7e7e800ffc..d9138835a3 100644
 --- a/third_party/blink/renderer/core/url/dom_url.cc
 +++ b/third_party/blink/renderer/core/url/dom_url.cc
 @@ -26,6 +26,8 @@
@@ -6109,7 +7009,7 @@ index 7e7e800ffca8a..d9138835a3090 100644
  
  String DOMURL::CreatePublicURL(ExecutionContext* execution_context,
 diff --git a/third_party/blink/renderer/core/url/dom_url.h b/third_party/blink/renderer/core/url/dom_url.h
-index 1d40d9ecedbb5..15d57911acf5a 100644
+index 1d40d9eced..15d57911ac 100644
 --- a/third_party/blink/renderer/core/url/dom_url.h
 +++ b/third_party/blink/renderer/core/url/dom_url.h
 @@ -27,6 +27,8 @@
@@ -6147,7 +7047,7 @@ index 1d40d9ecedbb5..15d57911acf5a 100644
    WeakMember<URLSearchParams> search_params_;
  };
 diff --git a/third_party/blink/renderer/core/url/url_search_params.cc b/third_party/blink/renderer/core/url/url_search_params.cc
-index 8f438dda3bd36..c432e98f6f8f3 100644
+index 8f438dda3b..c432e98f6f 100644
 --- a/third_party/blink/renderer/core/url/url_search_params.cc
 +++ b/third_party/blink/renderer/core/url/url_search_params.cc
 @@ -5,6 +5,7 @@
@@ -6616,7 +7516,7 @@ index 8f438dda3bd36..c432e98f6f8f3 100644
  
  void URLSearchParams::EncodeAsFormData(Vector<char>& encoded_data) const {
 diff --git a/third_party/blink/renderer/core/url/url_search_params.h b/third_party/blink/renderer/core/url/url_search_params.h
-index 1e88f43048162..c6dcef11bc028 100644
+index 1e88f43048..c6dcef11bc 100644
 --- a/third_party/blink/renderer/core/url/url_search_params.h
 +++ b/third_party/blink/renderer/core/url/url_search_params.h
 @@ -67,6 +67,8 @@ class CORE_EXPORT URLSearchParams final
@@ -6647,7 +7547,7 @@ index 1e88f43048162..c6dcef11bc028 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
-index bc8726d68af80..e39eb187a23e2 100644
+index bc8726d68a..e39eb187a2 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
 @@ -10,6 +10,7 @@
@@ -6842,10 +7742,18 @@ index bc8726d68af80..e39eb187a23e2 100644
        std::move(transferable_message));
    TRACE_EVENT_INSTANT(
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
-index d69f66ae6a7b5..4d4506bc3ab96 100644
+index d69f66ae6a..5dfd87885e 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_global_scope.cc
-@@ -35,6 +35,7 @@
+@@ -28,6 +28,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
+ 
+ #include <memory>
+@@ -35,6 +36,7 @@
  #include "base/check_is_test.h"
  #include "base/metrics/histogram_functions.h"
  #include "base/metrics/histogram_macros.h"
@@ -6853,7 +7761,7 @@ index d69f66ae6a7b5..4d4506bc3ab96 100644
  #include "base/trace_event/trace_id_helper.h"
  #include "base/trace_event/typed_macros.h"
  #include "base/types/pass_key.h"
-@@ -44,6 +45,7 @@
+@@ -44,6 +46,7 @@
  #include "third_party/blink/public/mojom/frame/back_forward_cache_controller.mojom-blink.h"
  #include "third_party/blink/renderer/bindings/core/v8/serialization/post_message_helper.h"
  #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
@@ -6861,7 +7769,7 @@ index d69f66ae6a7b5..4d4506bc3ab96 100644
  #include "third_party/blink/renderer/bindings/core/v8/v8_post_message_options.h"
  #include "third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.h"
  #include "third_party/blink/renderer/core/event_target_names.h"
-@@ -71,9 +73,143 @@
+@@ -71,9 +74,143 @@
  #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object_snapshot.h"
  #include "third_party/blink/renderer/platform/runtime_feature_state/runtime_feature_state_override_context.h"
  #include "third_party/blink/renderer/platform/weborigin/security_policy.h"
@@ -7005,7 +7913,19 @@ index d69f66ae6a7b5..4d4506bc3ab96 100644
  
  // static
  DedicatedWorkerGlobalScope* DedicatedWorkerGlobalScope::Create(
-@@ -447,6 +583,11 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
+@@ -201,7 +338,10 @@ DedicatedWorkerGlobalScope::DedicatedWorkerGlobalScope(
+       storage_access_api_status_(
+           parsed_creation_params.parent_storage_access_api_status),
+       dedicated_worker_start_time_(dedicated_worker_start_time) {
+-  // TODO(mkwst): This needs a specification.
++    // P2-E4: worker provenance for the v3 producer descriptor.
++  xtrace::XTraceThreadProducer::SetCurrentThreadWorkerDescriptor(
++        "dedicated", SafeScopeDescriptionForXTrace());
++// TODO(mkwst): This needs a specification.
+   if (!parsed_creation_params.parent_is_isolated_context) {
+     is_isolated_context_ = false;
+   }
+@@ -447,6 +587,11 @@ void DedicatedWorkerGlobalScope::postMessage(ScriptState* script_state,
    }
    uint64_t trace_id = base::trace_event::GetNextGlobalTraceId();
    transferable_message.trace_id = trace_id;
@@ -7018,7 +7938,7 @@ index d69f66ae6a7b5..4d4506bc3ab96 100644
        WorkerThreadDebugger::From(script_state->GetIsolate());
    transferable_message.sender_stack_trace_id =
 diff --git a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
-index 4255301e2a337..33d8cfe94d179 100644
+index 4255301e2a..33d8cfe94d 100644
 --- a/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 +++ b/third_party/blink/renderer/core/workers/dedicated_worker_messaging_proxy.cc
 @@ -38,6 +38,7 @@
@@ -7050,7 +7970,7 @@ index 4255301e2a337..33d8cfe94d179 100644
          ports, std::move(message.message), /* origin=*/nullptr,
          MessageEvent::kMessageIsSameOrigin,
 diff --git a/third_party/blink/renderer/core/workers/shared_worker.cc b/third_party/blink/renderer/core/workers/shared_worker.cc
-index 4bad2ba8beb48..3b16244d5a09a 100644
+index 4bad2ba8be..3b16244d5a 100644
 --- a/third_party/blink/renderer/core/workers/shared_worker.cc
 +++ b/third_party/blink/renderer/core/workers/shared_worker.cc
 @@ -57,6 +57,7 @@
@@ -7079,8 +7999,33 @@ index 4bad2ba8beb48..3b16244d5a09a 100644
    if (!worker->CheckAllowedByCSPForNoThrow(script_url)) {
      // Return the unconnected worker. The port_ will be closed when remote_port
      // goes out of scope after returning from this function.
+diff --git a/third_party/blink/renderer/core/workers/shared_worker_global_scope.cc b/third_party/blink/renderer/core/workers/shared_worker_global_scope.cc
+index a458d2a79a..1e6fbb7ecb 100644
+--- a/third_party/blink/renderer/core/workers/shared_worker_global_scope.cc
++++ b/third_party/blink/renderer/core/workers/shared_worker_global_scope.cc
+@@ -28,6 +28,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
+ #include "third_party/blink/renderer/core/workers/shared_worker_global_scope.h"
+ 
+ #include <memory>
+@@ -70,7 +71,11 @@ SharedWorkerGlobalScope::SharedWorkerGlobalScope(
+                         /*is_service_worker_global_scope=*/false),
+       token_(token),
+       require_cross_site_request_for_cookies_(
+-          require_cross_site_request_for_cookies) {}
++          require_cross_site_request_for_cookies) {
++  // P2-E4: worker provenance for the v3 producer descriptor.
++  xtrace::XTraceThreadProducer::SetCurrentThreadWorkerDescriptor(
++        "shared", SafeScopeDescriptionForXTrace());
++}
+ 
+ SharedWorkerGlobalScope::~SharedWorkerGlobalScope() = default;
+ 
 diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.cc b/third_party/blink/renderer/core/workers/worker_global_scope.cc
-index d7453149e4ac0..e6ab7f5b4d2bd 100644
+index d7453149e4..e6ab7f5b4d 100644
 --- a/third_party/blink/renderer/core/workers/worker_global_scope.cc
 +++ b/third_party/blink/renderer/core/workers/worker_global_scope.cc
 @@ -98,6 +98,8 @@
@@ -7192,8 +8137,25 @@ index d7453149e4ac0..e6ab7f5b4d2bd 100644
      UserActivation* user_activation = nullptr;
      if (message.user_activation) {
        user_activation = MakeGarbageCollected<UserActivation>(
+diff --git a/third_party/blink/renderer/core/workers/worker_global_scope.h b/third_party/blink/renderer/core/workers/worker_global_scope.h
+index 563dc0d547..e3ab0834d6 100644
+--- a/third_party/blink/renderer/core/workers/worker_global_scope.h
++++ b/third_party/blink/renderer/core/workers/worker_global_scope.h
+@@ -136,6 +136,12 @@ class CORE_EXPORT WorkerGlobalScope
+ 
+   // ExecutionContext
+   const KURL& Url() const final;
++
++  // P2-E4: scope description for the xtrace v3 producer descriptor; empty
++  // (declared "unresolved" downstream) when the URL is not valid yet.
++  String SafeScopeDescriptionForXTrace() const {
++    return url_.IsValid() ? url_.GetString() : String();
++  }
+   KURL CompleteURL(const String&) const final;
+   bool IsWorkerGlobalScope() const final { return true; }
+   bool IsContextThread() const final;
 diff --git a/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.cc b/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.cc
-index b345c249ecc28..e49d0b5289660 100644
+index b345c249ec..e49d0b5289 100644
 --- a/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.cc
 +++ b/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.cc
 @@ -23,14 +23,21 @@
@@ -7538,7 +8500,7 @@ index b345c249ecc28..e49d0b5289660 100644
  }
  
 diff --git a/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.h b/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.h
-index 7e926c05b1d89..1632cfcac41d3 100644
+index 7e926c05b1..1632cfcac4 100644
 --- a/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.h
 +++ b/third_party/blink/renderer/core/xmlhttprequest/xml_http_request.h
 @@ -234,7 +234,12 @@ class CORE_EXPORT XMLHttpRequest final
@@ -7575,7 +8537,7 @@ index 7e926c05b1d89..1632cfcac41d3 100644
    // Dispatches a response ProgressEvent.
    void DispatchProgressEvent(const AtomicString&, int64_t, int64_t);
 diff --git a/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc b/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
-index 2df31544c5e70..034c7f531f0bb 100644
+index 2df31544c5..034c7f531f 100644
 --- a/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
 +++ b/third_party/blink/renderer/modules/broadcastchannel/broadcast_channel.cc
 @@ -6,6 +6,7 @@
@@ -7860,7 +8822,7 @@ index 2df31544c5e70..034c7f531f0bb 100644
                                   context->GetSecurityOrigin(),
                                   MessageEvent::kMessageIsSameOrigin,
 diff --git a/third_party/blink/renderer/modules/cache_storage/cache.cc b/third_party/blink/renderer/modules/cache_storage/cache.cc
-index 391d0f4d90426..27ebb1376f6c3 100644
+index 391d0f4d90..27ebb1376f 100644
 --- a/third_party/blink/renderer/modules/cache_storage/cache.cc
 +++ b/third_party/blink/renderer/modules/cache_storage/cache.cc
 @@ -6,6 +6,7 @@
@@ -8047,7 +9009,7 @@ index 391d0f4d90426..27ebb1376f6c3 100644
  
    return promise;
 diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
-index 4551d5457fc84..bb09ab0346b2a 100644
+index 4551d5457f..bb09ab0346 100644
 --- a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
 +++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
 @@ -4,6 +4,7 @@
@@ -8272,7 +9234,7 @@ index 4551d5457fc84..bb09ab0346b2a 100644
  
  CacheStorage::CacheStorage(ExecutionContext* context,
 diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.h b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
-index 1ff4512e335e4..d4adab3e7c609 100644
+index 1ff4512e33..d4adab3e7c 100644
 --- a/third_party/blink/renderer/modules/cache_storage/cache_storage.h
 +++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
 @@ -92,6 +92,8 @@ class CacheStorage final : public ScriptWrappable,
@@ -8285,7 +9247,7 @@ index 1ff4512e335e4..d4adab3e7c609 100644
                         bool in_range_fetch_event,
                         int64_t trace_id,
 diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
-index fd13b9751061e..0edc1f66c0df4 100644
+index fd13b97510..0edc1f66c0 100644
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 @@ -21,6 +21,7 @@
@@ -8432,7 +9394,7 @@ index fd13b9751061e..0edc1f66c0df4 100644
    // documents.
    HTMLCanvasElement* canvas = HostAsHTMLCanvasElement();
 diff --git a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
-index 6c87fff9e51b6..a3bdc77e0458a 100644
+index 6c87fff9e5..a3bdc77e04 100644
 --- a/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
 +++ b/third_party/blink/renderer/modules/cookie_store/cookie_store.cc
 @@ -43,6 +43,7 @@
@@ -8751,7 +9713,7 @@ index 6c87fff9e51b6..a3bdc77e0458a 100644
      resolver->RejectWithTypeError(
          "Cookie was malformed and could not be stored, due to problem(s) while "
 diff --git a/third_party/blink/renderer/modules/cookie_store/cookie_store.h b/third_party/blink/renderer/modules/cookie_store/cookie_store.h
-index 477acff4c32ed..1151ca46c7a7b 100644
+index 477acff4c3..1151ca46c7 100644
 --- a/third_party/blink/renderer/modules/cookie_store/cookie_store.h
 +++ b/third_party/blink/renderer/modules/cookie_store/cookie_store.h
 @@ -102,6 +102,7 @@ class MODULES_EXPORT CookieStore final
@@ -8792,7 +9754,7 @@ index 477acff4c32ed..1151ca46c7a7b 100644
  
    // Called when a change event listener is added.
 diff --git a/third_party/blink/renderer/modules/crypto/crypto.cc b/third_party/blink/renderer/modules/crypto/crypto.cc
-index a93dc96f12b43..ac512febf5cef 100644
+index a93dc96f12..ac512febf5 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto.cc
 +++ b/third_party/blink/renderer/modules/crypto/crypto.cc
 @@ -28,16 +28,28 @@
@@ -8917,7 +9879,7 @@ index a93dc96f12b43..ac512febf5cef 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/crypto/crypto_result_impl.cc b/third_party/blink/renderer/modules/crypto/crypto_result_impl.cc
-index ce2284bf7b8a2..a5f39f9593c5c 100644
+index ce2284bf7b..a5f39f9593 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto_result_impl.cc
 +++ b/third_party/blink/renderer/modules/crypto/crypto_result_impl.cc
 @@ -30,10 +30,17 @@
@@ -9205,7 +10167,7 @@ index ce2284bf7b8a2..a5f39f9593c5c 100644
    ClearResolver();
  }
 diff --git a/third_party/blink/renderer/modules/crypto/crypto_result_impl.h b/third_party/blink/renderer/modules/crypto/crypto_result_impl.h
-index 1e943b78ff514..1c77e3166b50e 100644
+index 1e943b78ff..1c77e3166b 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto_result_impl.h
 +++ b/third_party/blink/renderer/modules/crypto/crypto_result_impl.h
 @@ -107,6 +107,7 @@ class MODULES_EXPORT CryptoResultImpl final
@@ -9225,7 +10187,7 @@ index 1e943b78ff514..1c77e3166b50e 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
-index b456ecca04601..3884a0bf12317 100644
+index b456ecca04..3884a0bf12 100644
 --- a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
 +++ b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
 @@ -30,7 +30,11 @@
@@ -9924,7 +10886,7 @@ index b456ecca04601..3884a0bf12317 100644
  
    // 14.3.7.11: If the name member of normalizedAlgorithm is not equal to the
 diff --git a/third_party/blink/renderer/modules/encoding/text_decoder.cc b/third_party/blink/renderer/modules/encoding/text_decoder.cc
-index 833f4346db7c6..8f281169dcb41 100644
+index 833f4346db..8f281169dc 100644
 --- a/third_party/blink/renderer/modules/encoding/text_decoder.cc
 +++ b/third_party/blink/renderer/modules/encoding/text_decoder.cc
 @@ -30,6 +30,11 @@
@@ -10016,7 +10978,7 @@ index 833f4346db7c6..8f281169dcb41 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/encoding/text_encoder.cc b/third_party/blink/renderer/modules/encoding/text_encoder.cc
-index 8582a298ef3e5..98a6cd2324155 100644
+index 8582a298ef..98a6cd2324 100644
 --- a/third_party/blink/renderer/modules/encoding/text_encoder.cc
 +++ b/third_party/blink/renderer/modules/encoding/text_encoder.cc
 @@ -30,16 +30,41 @@
@@ -10170,7 +11132,7 @@ index 8582a298ef3e5..98a6cd2324155 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_cursor.cc b/third_party/blink/renderer/modules/indexeddb/idb_cursor.cc
-index 18a1bdf02f136..80a53d86510ea 100644
+index 18a1bdf02f..80a53d8651 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_cursor.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_cursor.cc
 @@ -55,11 +55,53 @@
@@ -10319,7 +11281,7 @@ index 18a1bdf02f136..80a53d86510ea 100644
  #if DCHECK_IS_ON()
    DCHECK(value_has_injected_primary_key_);
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_database.cc b/third_party/blink/renderer/modules/indexeddb/idb_database.cc
-index a43634ad9aa95..b6c1921b879fb 100644
+index a43634ad9a..b6c1921b87 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_database.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_database.cc
 @@ -65,6 +65,7 @@
@@ -10371,7 +11333,7 @@ index a43634ad9aa95..b6c1921b879fb 100644
    int64_t transaction_id = NextTransactionId();
    auto* execution_context = ExecutionContext::From(script_state);
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_factory.cc b/third_party/blink/renderer/modules/indexeddb/idb_factory.cc
-index 13c9057192367..ad6454e2cd3af 100644
+index 13c9057192..ad6454e2cd 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_factory.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_factory.cc
 @@ -66,12 +66,28 @@
@@ -10460,7 +11422,7 @@ index 13c9057192367..ad6454e2cd3af 100644
    if (!second->IsValid()) {
      exception_state.ThrowDOMException(DOMExceptionCode::kDataError,
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_index.cc b/third_party/blink/renderer/modules/indexeddb/idb_index.cc
-index 05fcd24c16bab..80138b474751b 100644
+index 05fcd24c16..80138b4747 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_index.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_index.cc
 @@ -45,9 +45,62 @@
@@ -10629,7 +11591,7 @@ index 05fcd24c16bab..80138b474751b 100644
    IDBRequest* request = IDBRequest::Create(
        script_state, this, transaction_.Get(), std::move(metrics));
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_object_store.cc b/third_party/blink/renderer/modules/indexeddb/idb_object_store.cc
-index 304d8eb8dacbc..b181d7ddd3b46 100644
+index 304d8eb8da..b181d7ddd3 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_object_store.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_object_store.cc
 @@ -59,10 +59,77 @@
@@ -11009,7 +11971,7 @@ index 304d8eb8dacbc..b181d7ddd3b46 100644
    IDBRequest* request = IDBRequest::Create(
        script_state, this, transaction_.Get(), std::move(metrics));
 diff --git a/third_party/blink/renderer/modules/indexeddb/idb_request.cc b/third_party/blink/renderer/modules/indexeddb/idb_request.cc
-index 9f85647f8fac8..baa77b1211a51 100644
+index 9f85647f8f..baa77b1211 100644
 --- a/third_party/blink/renderer/modules/indexeddb/idb_request.cc
 +++ b/third_party/blink/renderer/modules/indexeddb/idb_request.cc
 @@ -57,6 +57,7 @@
@@ -11294,7 +12256,7 @@ index 9f85647f8fac8..baa77b1211a51 100644
    ready_state_ = PENDING;
  }
 diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
-index 79675aaa98973..ab51c410eecea 100644
+index 79675aaa98..ab51c410ee 100644
 --- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
 +++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
 @@ -70,6 +70,7 @@
@@ -11314,7 +12276,7 @@ index 79675aaa98973..ab51c410eecea 100644
    if (!script_state->ContextIsValid()) {
      SendLogMessage("enumerateDevices() => (ERROR: Current frame is detached)");
 diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
-index 976a3c8c36dbf..3588bddcd7512 100644
+index 976a3c8c36..3588bddcd7 100644
 --- a/third_party/blink/renderer/modules/netinfo/network_information.cc
 +++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
 @@ -3,6 +3,7 @@
@@ -11350,7 +12312,7 @@ index 976a3c8c36dbf..3588bddcd7512 100644
    std::optional<double> override_downlink_mbps =
        GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
 diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
-index 989c2a9de5e2f..4c3617d206c9f 100644
+index 989c2a9de5..4c3617d206 100644
 --- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
 +++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
 @@ -138,6 +138,7 @@
@@ -11392,7 +12354,7 @@ index 989c2a9de5e2f..4c3617d206c9f 100644
      return nullptr;
  
 diff --git a/third_party/blink/renderer/modules/permissions/permissions.cc b/third_party/blink/renderer/modules/permissions/permissions.cc
-index e36c344035c00..2654da234ee0a 100644
+index e36c344035..2654da234e 100644
 --- a/third_party/blink/renderer/modules/permissions/permissions.cc
 +++ b/third_party/blink/renderer/modules/permissions/permissions.cc
 @@ -29,6 +29,7 @@
@@ -11419,7 +12381,7 @@ index e36c344035c00..2654da234ee0a 100644
        descriptor->name == PermissionName::TOP_LEVEL_STORAGE_ACCESS);
  
 diff --git a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
-index 534277a85ae07..213fec6afaa23 100644
+index 534277a85a..213fec6afa 100644
 --- a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
 +++ b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
 @@ -19,6 +19,7 @@
@@ -11448,7 +12410,7 @@ index 534277a85ae07..213fec6afaa23 100644
      return nullptr;
    }
 diff --git a/third_party/blink/renderer/modules/service_worker/fetch_event.cc b/third_party/blink/renderer/modules/service_worker/fetch_event.cc
-index 419157e81de1c..ec28ad1f47a65 100644
+index 419157e81d..ec28ad1f47 100644
 --- a/third_party/blink/renderer/modules/service_worker/fetch_event.cc
 +++ b/third_party/blink/renderer/modules/service_worker/fetch_event.cc
 @@ -30,6 +30,7 @@
@@ -11477,7 +12439,7 @@ index 419157e81de1c..ec28ad1f47a65 100644
      observer_->RespondWith(
          script_state, script_promise,
 diff --git a/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.cc b/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.cc
-index 8ea6e4d978456..3190d1376e606 100644
+index 8ea6e4d978..3190d1376e 100644
 --- a/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.cc
 +++ b/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.cc
 @@ -34,6 +34,7 @@
@@ -11557,7 +12519,7 @@ index 8ea6e4d978456..3190d1376e606 100644
        (original_request_body_stream_->IsLocked() ||
         original_request_body_stream_->IsDisturbed())) {
 diff --git a/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.h b/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.h
-index dd37c0e2e06bf..3a27a4e1e559d 100644
+index dd37c0e2e0..3a27a4e1e5 100644
 --- a/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.h
 +++ b/third_party/blink/renderer/modules/service_worker/fetch_respond_with_observer.h
 @@ -46,6 +46,7 @@ class MODULES_EXPORT FetchRespondWithObserver : public RespondWithObserver {
@@ -11569,7 +12531,7 @@ index dd37c0e2e06bf..3a27a4e1e559d 100644
    void Trace(Visitor*) const override;
  
 diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_client.cc b/third_party/blink/renderer/modules/service_worker/service_worker_client.cc
-index 217b9c719f5a4..a040d6c8c0525 100644
+index 217b9c719f..a040d6c8c0 100644
 --- a/third_party/blink/renderer/modules/service_worker/service_worker_client.cc
 +++ b/third_party/blink/renderer/modules/service_worker/service_worker_client.cc
 @@ -7,9 +7,12 @@
@@ -11765,7 +12727,7 @@ index 217b9c719f5a4..a040d6c8c0525 100644
    msg.sender_agent_cluster_id = context->GetAgentClusterID();
    msg.locked_to_sender_agent_cluster = msg.message->IsLockedToAgentCluster();
 diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_clients.cc b/third_party/blink/renderer/modules/service_worker/service_worker_clients.cc
-index 2bbb1e7f46857..ef20bb8a4cf65 100644
+index 2bbb1e7f46..ef20bb8a4c 100644
 --- a/third_party/blink/renderer/modules/service_worker/service_worker_clients.cc
 +++ b/third_party/blink/renderer/modules/service_worker/service_worker_clients.cc
 @@ -20,6 +20,7 @@
@@ -11841,7 +12803,7 @@ index 2bbb1e7f46857..ef20bb8a4cf65 100644
      resolver->Reject(V8ThrowException::CreateTypeError(
          script_state->GetIsolate(),
 diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_container.cc b/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
-index 3e04dd82e7a39..b984482124164 100644
+index 3e04dd82e7..b984482124 100644
 --- a/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
 +++ b/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
 @@ -76,6 +76,7 @@
@@ -11914,10 +12876,18 @@ index 3e04dd82e7a39..b984482124164 100644
        execution_context->Fetcher()
            ->GetProperties()
 diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
-index 55abfb86d3c82..00b14e04b712b 100644
+index 55abfb86d3..aef7e51eaa 100644
 --- a/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
 +++ b/third_party/blink/renderer/modules/service_worker/service_worker_global_scope.cc
-@@ -150,6 +150,7 @@
+@@ -28,6 +28,7 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
+ #include "third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h"
+ 
+ #include <stdint.h>
+@@ -150,6 +151,7 @@
  #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
  #include "third_party/blink/renderer/platform/wtf/hash_map.h"
  #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
@@ -11925,7 +12895,7 @@ index 55abfb86d3c82..00b14e04b712b 100644
  #include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
  
  namespace blink {
-@@ -159,6 +160,34 @@ namespace {
+@@ -159,6 +161,34 @@ namespace {
  constexpr char kServiceWorkerGlobalScopeTraceScope[] =
      "ServiceWorkerGlobalScope";
  
@@ -11960,7 +12930,18 @@ index 55abfb86d3c82..00b14e04b712b 100644
  void DidSkipWaiting(ScriptPromiseResolver<IDLUndefined>* resolver,
                      bool success) {
    // Per spec the promise returned by skipWaiting() can never reject.
-@@ -576,6 +605,15 @@ void ServiceWorkerGlobalScope::RunClassicScript(
+@@ -254,6 +284,10 @@ ServiceWorkerGlobalScope::ServiceWorkerGlobalScope(
+       installed_scripts_manager_(std::move(installed_scripts_manager)),
+       cache_storage_remote_(std::move(cache_storage_remote)),
+       token_(service_worker_token) {
++
++  // P2-E4: worker provenance for the v3 producer descriptor.
++  xtrace::XTraceThreadProducer::SetCurrentThreadWorkerDescriptor(
++      "service", SafeScopeDescriptionForXTrace());
+   // Create the event queue. At this point its timer is not started. It will be
+   // started by DidEvaluateScript().
+   //
+@@ -576,6 +610,15 @@ void ServiceWorkerGlobalScope::RunClassicScript(
      const String& source_code,
      std::unique_ptr<Vector<uint8_t>> cached_meta_data,
      const v8_inspector::V8StackTraceId& stack_id) {
@@ -11976,7 +12957,7 @@ index 55abfb86d3c82..00b14e04b712b 100644
    // Step 4.5-4.11 are implemented in Initialize().
    Initialize(response_url, response_referrer_policy, std::move(response_csp),
               std::move(response_document_policy), response_origin_trial_tokens);
-@@ -750,13 +788,42 @@ bool ServiceWorkerGlobalScope::FetchClassicImportedScript(
+@@ -750,13 +793,42 @@ bool ServiceWorkerGlobalScope::FetchClassicImportedScript(
      *out_response_url = script_url;
      *out_source_code = script_data->TakeSourceText();
      *out_cached_meta_data = script_data->TakeMetaData();
@@ -12020,7 +13001,7 @@ index 55abfb86d3c82..00b14e04b712b 100644
  }
  
  ResourceLoadScheduler::ThrottleOptionOverride
-@@ -861,6 +928,11 @@ void ServiceWorkerGlobalScope::importScripts(
+@@ -861,6 +933,11 @@ void ServiceWorkerGlobalScope::importScripts(
      }
    }
  
@@ -12032,7 +13013,7 @@ index 55abfb86d3c82..00b14e04b712b 100644
    for (const String& string_url : url_strings) {
      KURL completed_url = CompleteURL(string_url);
      if (installed_scripts_manager_ &&
-@@ -1561,6 +1633,13 @@ void ServiceWorkerGlobalScope::StartFetchEvent(
+@@ -1561,6 +1638,13 @@ void ServiceWorkerGlobalScope::StartFetchEvent(
    auto stack_string = fetch_request.devtools_stack_id;
  
    NoteNewFetchEvent(fetch_request);
@@ -12047,7 +13028,7 @@ index 55abfb86d3c82..00b14e04b712b 100644
    if (params->race_network_request_loader_factory &&
        params->request->service_worker_race_network_request_token) {
 diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
-index 891a81543becd..852fcd2cca96f 100644
+index 891a81543b..852fcd2cca 100644
 --- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
 +++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
 @@ -24,6 +24,7 @@
@@ -12070,7 +13051,7 @@ index 891a81543becd..852fcd2cca96f 100644
    std::ignore = TryEnsureMojomSynthesis();
    return voice_list_;
 diff --git a/third_party/blink/renderer/modules/storage/storage_area.cc b/third_party/blink/renderer/modules/storage/storage_area.cc
-index 131a62a60d767..01fc87556ad2d 100644
+index 131a62a60d..01fc87556a 100644
 --- a/third_party/blink/renderer/modules/storage/storage_area.cc
 +++ b/third_party/blink/renderer/modules/storage/storage_area.cc
 @@ -44,9 +44,37 @@
@@ -12205,7 +13186,7 @@ index 131a62a60d767..01fc87556ad2d 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.cc b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
-index 688a2fec77ee2..c390790cb6865 100644
+index 688a2fec77..c390790cb6 100644
 --- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
 +++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
 @@ -24,6 +24,7 @@
@@ -12231,7 +13212,7 @@ index 688a2fec77ee2..c390790cb6865 100644
                                              context()->currentTime());
  }
 diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
-index bc4c0c6ca00c1..59f0c04d76bfb 100644
+index bc4c0c6ca0..59f0c04d76 100644
 --- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
 +++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
 @@ -27,6 +27,7 @@
@@ -12252,7 +13233,7 @@ index bc4c0c6ca00c1..59f0c04d76bfb 100644
      exception_state.ThrowDOMException(
          DOMExceptionCode::kIndexSizeError,
 diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.cc b/third_party/blink/renderer/modules/webaudio/audio_context.cc
-index d428cf179ab73..dc9ac18672996 100644
+index d428cf179a..dc9ac18672 100644
 --- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
 +++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
 @@ -62,6 +62,7 @@
@@ -12277,7 +13258,7 @@ index d428cf179ab73..dc9ac18672996 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
-index b846e6d903cc3..84a26613f4e15 100644
+index b846e6d903..84a26613f4 100644
 --- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
 +++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
 @@ -85,6 +85,7 @@
@@ -12309,7 +13290,7 @@ index b846e6d903cc3..84a26613f4e15 100644
  }
  
 diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
-index fcac660801216..96eb9907745bc 100644
+index fcac660801..96eb990774 100644
 --- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 +++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 @@ -48,6 +48,7 @@
@@ -12342,7 +13323,7 @@ index fcac660801216..96eb9907745bc 100644
  
    // Calling close() on an OfflineAudioContext is not supported/allowed,
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-index dd36dd0ce05a1..c15663bc19e40 100644
+index dd36dd0ce0..c15663bc19 100644
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -162,6 +162,7 @@
@@ -12422,7 +13403,7 @@ index dd36dd0ce05a1..c15663bc19e40 100644
  
  void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
 diff --git a/third_party/blink/renderer/modules/websockets/dom_websocket.cc b/third_party/blink/renderer/modules/websockets/dom_websocket.cc
-index dda4e09728fe9..a5c0f2978d55b 100644
+index dda4e09728..a5c0f2978d 100644
 --- a/third_party/blink/renderer/modules/websockets/dom_websocket.cc
 +++ b/third_party/blink/renderer/modules/websockets/dom_websocket.cc
 @@ -30,6 +30,8 @@
@@ -12554,21 +13535,127 @@ index dda4e09728fe9..a5c0f2978d55b 100644
    if (!channel_)
      return;
 diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
-index 0f8b2defe618d..dfed88b7b319a 100644
+index 0f8b2defe6..f84fac3b9d 100644
 --- a/third_party/blink/renderer/platform/BUILD.gn
 +++ b/third_party/blink/renderer/platform/BUILD.gn
-@@ -1681,6 +1681,8 @@ component("platform") {
+@@ -1681,6 +1681,12 @@ component("platform") {
      "widget/widget_base.h",
      "widget/widget_base_client.h",
      "windows_keyboard_codes.h",
++    "xtrace/xtrace_control_impl.cc",
++    "xtrace/xtrace_control_impl.h",
 +    "xtrace/xtrace_logger.cc",
 +    "xtrace/xtrace_logger.h",
++    "xtrace/xtrace_producer.cc",
++    "xtrace/xtrace_producer.h",
    ]
  
    sources -= blink_platform_avx_files
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
+new file mode 100644
+index 0000000000..190199ff77
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
+@@ -0,0 +1,50 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h"
++
++#include "base/functional/bind.h"
++#include "base/task/sequenced_task_runner.h"
++#include "third_party/blink/public/platform/xtrace_control.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++namespace blink {
++
++void BindXTraceControlReceiver(
++    mojo::PendingReceiver<mojom::XTraceControl> receiver) {
++  xtrace::XTraceControlImpl::Bind(std::move(receiver));
++}
++
++}  // namespace blink
++
++namespace blink::xtrace {
++
++// static
++void XTraceControlImpl::Bind(
++    mojo::PendingReceiver<blink::mojom::XTraceControl> receiver) {
++  // Serviced on the binding thread's default runner; settle fan-out to
++  // worker threads happens through the producer hub's per-thread task
++  // runners, never through a shared mojo::Remote (draft §8.3).
++  new XTraceControlImpl(std::move(receiver));
++}
++
++XTraceControlImpl::XTraceControlImpl(
++    mojo::PendingReceiver<blink::mojom::XTraceControl> receiver)
++    : receiver_(this, std::move(receiver)) {
++  receiver_.set_disconnect_handler(
++      base::BindOnce([](XTraceControlImpl* self) { delete self; },
++                     base::Unretained(this)));
++}
++
++void XTraceControlImpl::StopCapture(const std::string& capture_id,
++                                    uint32_t deadline_ms,
++                                    StopCaptureCallback callback) {
++  // accepted == "distributed", never "settled" (mojom contract). The hub
++  // fans settlement out to each producer thread; the browser may only
++  // treat watermarks as acknowledgement (draft V09).
++  XTraceProducerHub::Get()->BeginStop();
++  std::move(callback).Run(true);
++}
++
++}  // namespace blink::xtrace
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
+new file mode 100644
+index 0000000000..2b738cce2a
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
++
++#include <string>
++
++#include "mojo/public/cpp/bindings/pending_receiver.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++#include "third_party/blink/renderer/platform/platform_export.h"
++
++namespace blink::xtrace {
++
++// Renderer-side XTraceControl implementation. One instance per renderer
++// process; the endpoint is delivered to the browser in-band on the first
++// producer data pipe (see XTraceHost.ProvideControlEndpoint), so no
++// content-side associated-interface registration is needed (binding-path
++// evidence per DP2 ruling condition ①: XTraceControlImplTest + P2-E7).
++class XTraceControlImpl : public blink::mojom::XTraceControl {
++ public:
++  static void Bind(mojo::PendingReceiver<blink::mojom::XTraceControl> receiver);
++
++  explicit XTraceControlImpl(
++      mojo::PendingReceiver<blink::mojom::XTraceControl> receiver);
++
++  void StopCapture(const std::string& capture_id,
++                   uint32_t deadline_ms,
++                   StopCaptureCallback callback) override;
++
++ private:
++  // Self-owned: deleted when the associated pipe disconnects.
++  mojo::Receiver<blink::mojom::XTraceControl> receiver_;
++};
++
++}  // namespace blink::xtrace
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 new file mode 100644
-index 0000000000000..b2a722741b12b
+index 0000000000..b2a722741b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -0,0 +1,580 @@
@@ -13154,7 +14241,7 @@ index 0000000000000..b2a722741b12b
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 new file mode 100644
-index 0000000000000..f621f4cc3f1db
+index 0000000000..f621f4cc3f
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 @@ -0,0 +1,70 @@
@@ -13228,3 +14315,532 @@ index 0000000000000..f621f4cc3f1db
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
+new file mode 100644
+index 0000000000..56a8b40ce7
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
+@@ -0,0 +1,362 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++#include <optional>
++#include <utility>
++
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/environment.h"
++#include "base/functional/bind.h"
++#include "mojo/public/cpp/bindings/pending_remote.h"
++#include "base/no_destructor.h"
++#include "base/numerics/safe_conversions.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/task/sequenced_task_runner.h"
++#include "base/time/time.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
++#include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/public/platform/xtrace_control.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/blink/renderer/platform/wtf/wtf.h"
++
++namespace blink::xtrace {
++
++namespace {
++
++constexpr char kEnableSwitch[] = "xtrace-enable";
++constexpr char kFileSwitch[] = "xtrace-file";
++constexpr char kEnableEnv[] = "XTRACE_ENABLE";
++constexpr char kFileEnv[] = "XTRACE_FILE";
++
++// XTRACE_TEST_SCAFFOLDING: --xtrace-test-capacity shrinks producer buffers
++// so fault-injection tests trigger deterministic overflow (DP4). It only
++// changes buffer capacity; overflow still flows through the real
++// drop-newest accounting path. Registered for P3 removal together with the
++// browser-side --xtrace-stop-after-ms; not exposed through the launcher.
++constexpr char kTestCapacitySwitch[] = "xtrace-test-capacity";
++
++bool CaptureRuntimeEnabled() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(kEnableSwitch) &&
++      !command_line->GetSwitchValueNative(kFileSwitch).empty()) {
++    return true;
++  }
++  std::unique_ptr<base::Environment> env = base::Environment::Create();
++  std::optional<std::string> enabled = env->GetVar(kEnableEnv);
++  std::optional<std::string> file = env->GetVar(kFileEnv);
++  return enabled && *enabled == "1" && file && !file->empty();
++}
++
++std::string MakeProcessEpoch() {
++  // True process creation time is not portably exposed; the first-use
++  // monotonic tick is unique per process instance (two processes reusing
++  // one pid necessarily start at different ticks), which is all the
++  // epoch field promises (schema v3 §3.1).
++  return base::NumberToString(base::GetCurrentProcId()) + "." +
++         base::NumberToString(
++             base::TimeTicks::Now().since_origin().InMicroseconds());
++}
++
++}  // namespace
++
++//
++// XTraceProducerHub
++//
++
++XTraceProducerHub::XTraceProducerHub()
++    : process_epoch_(MakeProcessEpoch()) {
++  // XTRACE_TEST_SCAFFOLDING consumption point (definition: kTestCapacitySwitch
++  // above). See the comment there; P3 removes switch parsing and this block.
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  const std::string capacity =
++      command_line->GetSwitchValueASCII(kTestCapacitySwitch);
++  unsigned value = 0;
++  if (!capacity.empty() && base::StringToUint(capacity, &value) &&
++      value > 0) {
++    config_.buffer_capacity = base::saturated_cast<uint32_t>(value);
++  }
++}
++
++XTraceProducerHub* XTraceProducerHub::Get() {
++  static base::NoDestructor<XTraceProducerHub> hub;
++  return hub.get();
++}
++
++uint64_t XTraceProducerHub::NextLseq() {
++  return next_lseq_.fetch_add(1, std::memory_order_relaxed) + 1;
++}
++
++uint64_t XTraceProducerHub::Register(
++    std::shared_ptr<RegistryEntry> entry) {
++  base::AutoLock lock(lock_);
++  const uint64_t id = next_registry_id_++;
++  registry_[id] = std::move(entry);
++  return id;
++}
++
++void XTraceProducerHub::Unregister(uint64_t registry_id) {
++  base::AutoLock lock(lock_);
++  registry_.erase(registry_id);
++}
++
++void XTraceProducerHub::BeginStop() {
++  stopping_.store(true, std::memory_order_release);
++  // Draft V09: the number of forwarded settle tasks is NOT an
++  // acknowledgement. Settlement evidence is each producer's watermark on
++  // its own XTraceHost pipe; the browser side counts only watermarks.
++  std::vector<std::shared_ptr<RegistryEntry>> entries;
++  {
++    base::AutoLock lock(lock_);
++    entries.reserve(registry_.size());
++    for (const auto& [id, entry] : registry_) {
++      entries.push_back(entry);
++    }
++  }
++  for (const auto& entry : entries) {
++    if (!entry->alive.load(std::memory_order_acquire)) {
++      continue;
++    }
++    if (entry->runner->RunsTasksInCurrentSequence()) {
++      // Same-sequence producer (the renderer main thread when the stop
++      // arrives): settle inline.
++      entry->producer->Settle();
++      continue;
++    }
++    std::shared_ptr<RegistryEntry> pinned = entry;
++    entry->runner->PostTask(
++        FROM_HERE,
++        base::BindOnce(
++            [](std::shared_ptr<RegistryEntry> e) {
++              if (e->alive.load(std::memory_order_acquire)) {
++                e->producer->Settle();
++              }
++            },
++            std::move(pinned)));
++  }
++}
++
++//
++// XTraceThreadProducer
++//
++
++// static
++XTraceThreadProducer* XTraceThreadProducer::Current() {
++  if (!CaptureRuntimeEnabled()) {
++    return nullptr;
++  }
++  // Stack-allocated thread local: the destructor runs at thread teardown
++  // and settles an active capture (P2-E4 worker lifecycle hook).
++  thread_local XTraceThreadProducer producer;
++  return &producer;
++}
++
++// static
++void XTraceThreadProducer::SetCurrentThreadWorkerDescriptor(
++    const char* kind,
++    const String& scope_url) {
++  XTraceThreadProducer* producer = Current();
++  if (!producer || producer->descriptor_built_) {
++    return;
++  }
++  producer->worker_kind_ = kind ? kind : "unresolved";
++  std::string scope = scope_url.Utf8();
++  producer->worker_scope_ = scope.empty() ? "unresolved" : scope;
++}
++
++XTraceThreadProducer::XTraceThreadProducer() {
++  auto entry = std::make_shared<XTraceProducerHub::RegistryEntry>();
++  entry->producer = this;
++  entry->runner = base::SequencedTaskRunner::GetCurrentDefault();
++  registry_id_ = XTraceProducerHub::Get()->Register(std::move(entry));
++}
++
++XTraceThreadProducer::~XTraceThreadProducer() {
++  // Worker-thread teardown settles an active capture (P2-E4): the
++  // watermark is submitted on this thread's pipe while it still lives.
++  if (!settled_) {
++    Settle();
++  }
++  XTraceProducerHub::Get()->Unregister(registry_id_);
++}
++
++void XTraceThreadProducer::BuildDescriptor() {
++  descriptor_built_ = true;
++  process_epoch_ = XTraceProducerHub::Get()->process_epoch();
++  is_worker_ = !IsMainThread();  // blink::IsMainThread (wtf.h)
++  pkind_ = is_worker_ ? "rtw" : "rtx";
++  producer_id_ =
++      pkind_ + ":" + base::NumberToString(base::GetCurrentProcId()) + "." +
++      process_epoch_ + ":" +
++      base::NumberToString(base::PlatformThread::CurrentId().raw()) + ":" +
++      base::NumberToString(XTraceProducerHub::Get()->NextLseq());
++}
++
++blink::mojom::XTraceProducerDescriptorPtr
++XTraceThreadProducer::MakeDescriptor() {
++  auto descriptor = blink::mojom::XTraceProducerDescriptor::New();
++  descriptor->producer_id = producer_id_;
++  descriptor->process_epoch = process_epoch_;
++  descriptor->pkind = pkind_;
++  descriptor->config_generation = "0";
++  if (is_worker_) {
++    auto worker = blink::mojom::XTraceWorkerDescriptor::New();
++    worker->kind = worker_kind_;
++    worker->scope_url = worker_scope_;
++    descriptor->worker = std::move(worker);
++  }
++  return descriptor;
++}
++
++blink::mojom::XTraceHost* XTraceThreadProducer::host() {
++  if (!host_bound_) {
++    host_bound_ = true;
++    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++        host_.BindNewPipeAndPassReceiver());
++    if (descriptor_built_) {
++      // Once per renderer process: hand the browser a control endpoint for
++      // stop distribution (in-band delivery, see XTraceHost.mojom).
++      static std::atomic<bool> control_endpoint_sent{false};
++      if (!control_endpoint_sent.exchange(true)) {
++        mojo::PendingRemote<blink::mojom::XTraceControl> control;
++        blink::BindXTraceControlReceiver(
++            control.InitWithNewPipeAndPassReceiver());
++        host_->ProvideControlEndpoint(MakeDescriptor(), std::move(control));
++      }
++    }
++  }
++  return host_.get();
++}
++
++std::optional<uint64_t> XTraceThreadProducer::AcceptEvent(std::string line) {
++  if (settled_ || XTraceProducerHub::Get()->stopping()) {
++    return std::nullopt;  // outside the capture window; not counted
++  }
++  const size_t close = line.find_last_of('}');
++  if (close == std::string::npos) {
++    return std::nullopt;  // malformed line never entered the capture
++  }
++  if (!descriptor_built_) {
++    BuildDescriptor();
++  }
++  // The sequence number is assigned before enqueue (draft §7.1), so
++  // overflow drops leave a tail-only gap accounted for by the counters.
++  const uint64_t seq = next_seq_++;
++  ++eligible_;
++  const uint32_t capacity = XTraceProducerHub::Get()->config().buffer_capacity;
++  if (overflowed_ || buffer_.size() >= capacity) {
++    // drop-newest (DP3 ruling): only tail gaps are allowed. Under sustained
++    // pressure a bounded buffer would otherwise punch holes between flushes
++    // (accepted/dropped/accepted), so the first overflow makes this
++    // producer stop accepting: everything after the buffered prefix is
++    // counted as dropped, and the written set stays a contiguous prefix.
++    overflowed_ = true;
++    ++dropped_;
++    return seq;
++  }
++  // Identity tail is appended here so hot hook sites build lines once.
++  line.insert(close,
++              ",\"producer_seq\":\"" + base::NumberToString(seq) +
++                  "\",\"producer_id\":\"" + producer_id_ +
++                  "\",\"process_epoch\":\"" + process_epoch_ +
++                  "\",\"config_generation\":\"0\"");
++  buffer_.push_back(std::move(line));
++  ++enqueued_;
++  if (buffer_.size() >= XTraceProducerHub::Get()->config().max_batch_events) {
++    Flush();
++  } else {
++    MaybeScheduleFlushTimer();
++  }
++  return seq;
++}
++
++void XTraceThreadProducer::SendAsset(std::string asset_json,
++                                      std::string content_path,
++                                      std::string content) {
++  if (settled_ || asset_json.empty()) {
++    return;
++  }
++  if (!descriptor_built_) {
++    BuildDescriptor();
++  }
++  blink::mojom::XTraceAssetPtr message =
++      blink::mojom::XTraceAsset::New();
++  message->producer = MakeDescriptor();
++  message->asset_json = std::move(asset_json);
++  message->content_path = std::move(content_path);
++  message->content = std::move(content);
++  host()->LogAsset(std::move(message));
++  ++assets_out_;
++}
++
++void XTraceThreadProducer::MaybeScheduleFlushTimer() {
++  if (flush_timer_posted_ || buffer_.empty()) {
++    return;
++  }
++  flush_timer_posted_ = true;
++  base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce([]() {
++        XTraceThreadProducer* producer = Current();
++        if (producer) {
++          producer->flush_timer_posted_ = false;
++          producer->Flush();
++        }
++      }),
++      base::Milliseconds(
++          XTraceProducerHub::Get()->config().flush_interval_ms));
++}
++
++void XTraceThreadProducer::SendBatchLocked() {
++  if (buffer_.empty()) {
++    return;
++  }
++  const uint64_t first_seq = next_seq_ - 1 - buffer_.size() + 1;
++  blink::mojom::XTraceBatchPtr batch =
++      blink::mojom::XTraceBatch::New();
++  batch->producer = MakeDescriptor();
++  batch->first_producer_seq = base::NumberToString(first_seq);
++  batch->count = base::saturated_cast<uint32_t>(buffer_.size());
++  batch->event_json_lines.reserve(buffer_.size());
++  while (!buffer_.empty()) {
++    batch->event_json_lines.push_back(std::move(buffer_.front()));
++    buffer_.pop_front();
++  }
++  host()->LogBatch(std::move(batch));
++}
++
++void XTraceThreadProducer::Flush() {
++  if (!descriptor_built_) {
++    return;
++  }
++  SendBatchLocked();
++}
++
++void XTraceThreadProducer::Settle() {
++  if (settled_) {
++    return;
++  }
++  settled_ = true;
++  if (!descriptor_built_) {
++    return;  // nothing was ever produced on this thread
++  }
++  SendBatchLocked();
++  blink::mojom::XTraceWatermarkPtr watermark =
++      blink::mojom::XTraceWatermark::New();
++  watermark->producer = MakeDescriptor();
++  watermark->final_producer_seq = base::NumberToString(next_seq_ - 1);
++  watermark->eligible = base::NumberToString(eligible_);
++  watermark->enqueued = base::NumberToString(enqueued_);
++  watermark->dropped = base::NumberToString(dropped_);
++  watermark->assets_out = assets_out_;
++  host()->SubmitWatermark(std::move(watermark));
++}
++
++}  // namespace blink::xtrace
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
+new file mode 100644
+index 0000000000..98fc727c07
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
+@@ -0,0 +1,155 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_
++
++#include <atomic>
++#include <cstdint>
++#include <deque>
++#include <map>
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/synchronization/lock.h"
++#include "base/task/sequenced_task_runner.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++#include "third_party/blink/renderer/platform/platform_export.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++
++namespace base {
++template <typename T>
++class NoDestructor;
++}  // namespace base
++
++namespace blink::xtrace {
++
++class XTraceThreadProducer;
++
++// Producer-side configuration snapshot (startup only; P2 has no hot
++// update). Values are exported for the browser-side manifest.
++struct ProducerRuntimeConfig {
++  uint32_t buffer_capacity = 4096;   // bounded per-thread buffer, events
++  uint32_t max_batch_events = 200;   // count flush trigger
++  uint32_t flush_interval_ms = 50;   // time flush trigger
++  // P2 implements drop-newest only (DP3 default); drop-oldest support would
++  // add interval bookkeeping and is not switchable in this phase.
++  const char* overflow_policy = "drop-newest";
++};
++
++// Process-wide producer hub: the stop flag, the producer-id sequence, and
++// the registry used to distribute a stop to every live producer thread.
++class PLATFORM_EXPORT XTraceProducerHub {
++ public:
++  template <typename T>
++  friend class base::NoDestructor;
++  struct RegistryEntry {
++    std::atomic<bool> alive{true};
++    // Only dereferenced on the entry's own sequence (inline when the stop
++    // arrives there, otherwise via a task posted to entry->runner): the
++    // owner thread clears `alive` under the hub lock before destruction.
++    raw_ptr<XTraceThreadProducer> producer = nullptr;
++    scoped_refptr<base::SequencedTaskRunner> runner;
++  };
++
++  static XTraceProducerHub* Get();
++
++  bool stopping() const { return stopping_.load(std::memory_order_acquire); }
++  // Sets the stop flag and distributes settlement to every live producer
++  // thread. See the V09 note in the .cc: delivery count is not an ack.
++  void BeginStop();
++  uint64_t NextLseq();
++  uint64_t Register(std::shared_ptr<RegistryEntry> entry);
++  void Unregister(uint64_t registry_id);
++
++  const std::string& process_epoch() const { return process_epoch_; }
++  const ProducerRuntimeConfig& config() const { return config_; }
++
++ private:
++  XTraceProducerHub();
++
++  std::atomic<bool> stopping_{false};
++  std::atomic<uint64_t> next_lseq_{0};
++  mutable base::Lock lock_;
++  std::map<uint64_t, std::shared_ptr<RegistryEntry>> registry_;
++  uint64_t next_registry_id_ = 0;
++  const std::string process_epoch_;
++  ProducerRuntimeConfig config_;
++};
++
++// Per-thread bounded producer (schema v3, draft §7.1): assigns logical
++// sequence numbers before filtering/dropping, buffers bounded, flushes by
++// count/time, and settles with a watermark on stop or thread exit.
++class PLATFORM_EXPORT XTraceThreadProducer {
++ public:
++  // Lazily created on the current thread; null while capture is disabled.
++  static XTraceThreadProducer* Current();
++
++  // Called by core worker code on the worker thread before first use.
++  static void SetCurrentThreadWorkerDescriptor(const char* kind,
++                                               const String& scope_url);
++
++  // Accepts one serialized v3 event line (closing brace included). The
++  // producer appends the identity tail (producer_seq/producer_id/
++  // process_epoch/config_generation) and buffers it. Returns the assigned
++  // logical sequence number: absent when the event was not counted
++  // (capture stopping or malformed line); present when the number was
++  // consumed, including drop-newest overflow (counted eligible+dropped,
++  // leaving a tail-only gap).
++  std::optional<uint64_t> AcceptEvent(std::string line);
++
++  // Sends one asset row (and content when present) on this thread's pipe.
++  void SendAsset(std::string asset_json,
++                 std::string content_path,
++                 std::string content);
++
++  // Terminal settlement: flush remaining events, submit the watermark on
++  // this thread's pipe, deactivate. Idempotent; runs on the owning thread.
++  void Settle();
++
++  bool settled() const { return settled_; }
++
++  blink::mojom::XTraceHost* host();
++
++ private:
++  XTraceThreadProducer();
++  ~XTraceThreadProducer();  // settles when a capture is still active
++
++  void Flush();
++  void MaybeScheduleFlushTimer();
++  void BuildDescriptor();
++  void SendBatchLocked();
++  blink::mojom::XTraceProducerDescriptorPtr MakeDescriptor();
++
++  // Identity (built lazily at first use so worker descriptors are visible).
++  bool descriptor_built_ = false;
++  bool is_worker_ = false;
++  std::string worker_kind_ = "unresolved";
++  std::string worker_scope_ = "unresolved";
++  std::string producer_id_;
++  std::string process_epoch_;
++  std::string pkind_;
++
++  mojo::Remote<blink::mojom::XTraceHost> host_;
++  bool host_bound_ = false;
++
++  std::deque<std::string> buffer_;  // lines already carry identity tail
++  uint64_t next_seq_ = 1;
++  uint64_t eligible_ = 0;
++  uint64_t enqueued_ = 0;
++  uint64_t dropped_ = 0;
++  uint32_t assets_out_ = 0;
++  bool settled_ = false;
++  bool overflowed_ = false;
++  bool flush_timer_posted_ = false;
++  uint64_t registry_id_ = 0;
++};
++
++}  // namespace blink::xtrace
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_

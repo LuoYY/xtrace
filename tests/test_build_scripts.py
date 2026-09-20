@@ -288,6 +288,9 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn('upload.Set("body_hex"', client)
         self.assertIn('upload.Set("body_sha256", body_hash);', client)
 
+        # P2-E8 layering: 0001 carries the full browser-network
+        # implementation for chrome_content_browser_client.cc (HEAD ->
+        # old-0001 state); 0004 carries only the schema-v3 delta on top.
         native_patch = (
             ROOT
             / "patches"
@@ -1838,6 +1841,9 @@ class BuildScriptTests(unittest.TestCase):
         self.assertNotIn("std::min(bytes.size()", crypto_result_impl)
 
     def test_native_patch_exports_webcrypto_signature_hooks(self):
+        # P2-E8 layering: 0001 carries the full browser-network
+        # implementation for chrome_content_browser_client.cc (HEAD ->
+        # old-0001 state); 0004 carries only the schema-v3 delta on top.
         native_patch = (
             ROOT
             / "patches"

@@ -2101,11 +2101,24 @@ def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
             f"trace has producers absent from manifest: {sorted(observed_ids - manifest_ids)}"
         )
     unconfirmed = []
+    total_confirmed = {"eligible": 0, "enqueued": 0, "dropped": 0}
+    total_writer = {"accepted": 0, "written": 0, "failed": 0}
     for producer in producers:
         pid = producer["producer_id"]
         received = (producer.get("watermark") or {}).get("received") is True
         if not received:
             unconfirmed.append(pid)
+            # v1.2 §7: unknown producer-side counters are JSON null, never
+            # zero-filled strings.
+            for field in ("eligible", "enqueued", "dropped", "assets_out",
+                          "final_producer_seq"):
+                if producer.get(field) is not None:
+                    raise TraceValidationError(
+                        f"{pid}: unconfirmed producer {field} must be null"
+                    )
+            total_writer["accepted"] += int(producer["accepted"])
+            total_writer["written"] += int(producer["written"])
+            total_writer["failed"] += int(producer["failed"])
             continue
         eligible, enqueued = int(producer["eligible"]), int(producer["enqueued"])
         dropped, accepted = int(producer["dropped"]), int(producer["accepted"])
@@ -2134,6 +2147,25 @@ def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
         if seqs and seqs[-1] > final_seq:
             raise TraceValidationError(
                 f"{pid}: observed seq {seqs[-1]} beyond watermark final {final_seq}"
+            )
+        total_confirmed["eligible"] += eligible
+        total_confirmed["enqueued"] += enqueued
+        total_confirmed["dropped"] += dropped
+        total_writer["accepted"] += accepted
+        total_writer["written"] += written
+        total_writer["failed"] += failed
+    # Global counts semantics (v1.2 §7): producer-side sums over confirmed
+    # producers only; writer-side sums over all producers.
+    counts = manifest.get("counts") or {}
+    for field, value in total_confirmed.items():
+        if int(counts.get(field, "0")) != value:
+            raise TraceValidationError(
+                f"counts.{field} {counts.get(field)} != confirmed sum {value}"
+            )
+    for field, value in total_writer.items():
+        if int(counts.get(field, "0")) != value:
+            raise TraceValidationError(
+                f"counts.{field} {counts.get(field)} != writer sum {value}"
             )
     if state == "complete":
         if unconfirmed:
