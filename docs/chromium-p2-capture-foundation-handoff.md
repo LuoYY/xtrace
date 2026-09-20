@@ -1,6 +1,6 @@
 # P2 交接：采集与写入基础（单一 writer / producer 登记 / 计数守恒 / 停止协议 / schema v3）
 
-- 文档版本：v1.1（2026-09-19；R1 已通过——schema v3 规范 v1.1 冻结、DP2–DP5 全部裁决，执行模式改为**长程单次终审**，见 §7）。
+- 文档版本：v1.2（2026-09-20；v1.1 R1 通过、决策点全部裁决；**P2 于 2026-09-20 通过 R2+R3 合并终审并冻结**——终审记录见 `integration-progress.json` 的 `p2_acceptance`；后续阶段见 [P3 交接文档](chromium-p3-control-plane-handoff.md)）。
 - 前置状态：**P1 已冻结**（[P1 架构 review](chromium-p1-architecture-review.md) §8 确认；`integration-progress.json` 状态 `accepted-p1`）。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。本会话不并行启动实施。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §6（协议/身份/证据）、§7（写入/背压/停止）、§6.6（旧缺陷收口）、§12.2（测试宿主与基线）、§13.1（已收敛决策）。本文件把上述设计拆成可执行任务与验收关卡；**设计语义以草稿为准，本文件不重述契约内容，只规定落地顺序与验收方式**。

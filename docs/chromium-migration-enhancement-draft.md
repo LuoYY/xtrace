@@ -1,6 +1,6 @@
 # XTrace × Firefox-Reverse：Chromium 迁移增强方案设计草稿
 
-- 版本：v0.6（P1 已通过 R3 核验并冻结；P2 交接文档已出；本轮为状态收口，设计内容不变，记录见第 16 节）
+- 版本：v0.7（P2 已通过 R2+R3 合并终审并冻结；P3 交接文档已出；本轮为状态收口，设计内容不变，记录见第 16 节）
 - 日期：2026-09-19
 - 状态：设计草稿；区分已验证事实、已选定设计和仍需实现验收的项目。
 - 依据：两项目报告、已返回的子 agent 研究结论、固定版本源码核对与本地验证实验。
@@ -560,7 +560,7 @@ Agent 首期以限额证据切片和本地索引为输入，结论可以回链�
 | --- | --- | --- | --- |
 | P0：上游 d8 追踪 PoC（最小验证已通过） | 独立产物、10 组覆盖样本、4 组 tier 检查；见第 9.6 节 | 固定版本下样本语义、ShortStar/Wide/分支/调用/返回/异常及真实 tier 已核验；不外推为任意程序保证 | 固定源码与构建环境 |
 | P1：重现 XTrace 基线（**已完成，2026-09-19 经 R3 核验冻结**） | 四补丁实际应用及静态/分析测试通过；完整 `chrome` 构建成功；12 组矩阵 12/12；launcher 端到端通过；V05 修复闭环 | 干净基线可复现；实际调用的 API 有对应事件；v1/v2 validator 通过 | P0 结论作为输入 |
-| P2：采集与写入基础 | producer 登记（§7.1 全部写入源，含 browser-network 并轨）、有界批量、manifest、终态和 watermark；§6.6 旧缺陷逐条收口 | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete；限额与 summary 截断有触发用例 | P1 |
+| P2：采集与写入基础（**已完成，2026-09-20 经 R2+R3 终审冻结**） | producer 登记（§7.1 全部写入源，browser-network 已并轨）、有界批量、manifest、终态和 watermark；§6.6 旧缺陷逐条收口 | 正常停止可核对；溢出/崩溃/磁盘错误不伪报 complete；限额与 summary 截断有触发用例；schema v3 落地、launcher 与 12 组矩阵 v3 通过 | P1 |
 | P3：控制面 | browser-only 域、pipe、配置 generation、身份映射 | renderer/worker 首次生效及更新可确认；断连/重连状态明确 | P2 |
 | P4：结构化 Ignition | observer、字节码元数据（含 code cache 路径决策）、执行层与值边界 | 与 P0 对照；无重复/漏记的已支持路径；关闭开销及日志速率在 **release 构建**上可测（debug 构建 JS 执行慢约一个数量级，不作性能依据） | P0、P2/P3 契约 |
 | P5：Blink 选定接口 | 生成器修改、scope、模式和覆盖表 | 生成 C++ 编译；异常、重入、overload、Fast API/cache 分路径测试通过 | P2/P3 契约 |
@@ -745,6 +745,7 @@ python3 chromium/src/out/XTraceD8Verify/validation/verify_tiers.py \
 
 ## 16. 修订记录
 
+- v0.7（2026-09-20）：P2 经总架构师 R2+R3 合并终审通过并冻结（schema v3 落地、browser-network 并轨、§6.6 收口、五场景故障注入、矩阵与 launcher v3 通过；终审记录见 `integration-progress.json` 的 `p2_acceptance`）；P3 交接文档 [chromium-p3-control-plane-handoff.md](chromium-p3-control-plane-handoff.md) 发布。仅状态更新，设计决策不变。
 - v0.6（2026-09-19）：P1 经总架构师 R3 核验通过并冻结（审查记录：[chromium-p1-architecture-review.md](chromium-p1-architecture-review.md)）；P2 交接文档 [chromium-p2-capture-foundation-handoff.md](chromium-p2-capture-foundation-handoff.md) 发布。仅状态更新，设计决策不变。
 - v0.5（2026-09-19）：P1 完整构建与浏览器集成执行完毕并写入状态：`chrome` 50640/50640 构建成功、12 组矩阵 12/12、launcher 端到端通过、V05 缺口修复闭环（补丁 0001 + 回归断言 + 干净索引复验）；产出 66 工具清单 `docs/tool-inventory.md`（P6 前置交付物）；`docs/chromium-build.md` arm64 hook 表述勘误。仅状态与文档更新，设计决策不变。
 - v0.4（2026-09-19）：登记指纹伪装层缓期与环境管理最小集（§1.1、§5）；新增既有缺陷收口表（§6.6）；补 producer 完整清单与采样计数约定（§7.1）；补 worklet 边界（§8.3）、code cache 路径（§9.2）、tier 校验双层（§9.4）、能力协商三态与非增强浏览器立场（§11.1）、证据索引存储决策（§11.2）；更新 P2/P4/P6 阶段交付与验收（§12）、测试宿主分配与基线采集（§12.2）、迭代成本预算（§12.3）、收敛决策表（§13.1）、源码索引（§14）。本轮为文档级补充，不改变任何已验证结论与实施状态。
