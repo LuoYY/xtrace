@@ -1596,15 +1596,17 @@ index 0000000000..1474ac28ce
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..06003ff5b0
+index 0000000000..d5a6e211a2
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1075 @@
+@@ -0,0 +1,1092 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#include "content/browser/xtrace/xtrace_capture_controller.h"
++
++#include "components/version_info/version_info.h"
 +#include "content/browser/renderer_host/frame_tree.h"
 +#include "content/browser/renderer_host/frame_tree_node.h"
 +#include "content/browser/renderer_host/render_frame_host_impl.h"
@@ -2491,6 +2493,21 @@ index 0000000000..06003ff5b0
 +  json.append(",\"schema_version\":3");
 +  json.append(",\"capture_id\":" + base::GetQuotedJSONString(capture_id_));
 +  json.append(",\"config\":" + config_json_);
++  {
++    std::string build_json = ",\"build\":{\"product\":";
++    build_json += base::GetQuotedJSONString(
++        version_info::GetVersionNumber());
++    build_json += ",\"is_debug\":";
++    build_json += DCHECK_IS_ON() ? "true" : "false";
++    build_json += ",\"component_build\":";
++#if defined(COMPONENT_BUILD)
++    build_json += "true";
++#else
++    build_json += "false";
++#endif
++    build_json += "}";
++    json.append(build_json);
++  }
 +  json.append(",\"artifacts\":{");
 +  json.append("\"trace\":" + base::GetQuotedJSONString(
 +                                 trace_file_path_.BaseName().AsUTF8Unsafe()));
@@ -2923,10 +2940,10 @@ index 0000000000..5bbbbfe517
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 new file mode 100644
-index 0000000000..d360f1388b
+index 0000000000..a6dfd2f057
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,234 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2941,7 +2958,7 @@ index 0000000000..d360f1388b
 +#include "base/files/file_util.h"
 +#include "base/json/json_reader.h"
 +#include "base/strings/string_number_conversions.h"
-+#include "base/test/task_environment.h"
++#include "content/public/test/browser_task_environment.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/threading/thread_restrictions.h"
 +#include "base/values.h"
@@ -3021,9 +3038,18 @@ index 0000000000..d360f1388b
 +    state->written = written;
 +    state->failed = failed;
 +  }
-+  void BeginStop() { controller_->BeginStopOnWriter(50); }
-+  void FireDeadline() { controller_->OnStopDeadline(); }
-+  void FinalizeNow() { controller_->Finalize(std::string()); }
++  void BeginStop() {
++    controller_->BeginStopOnWriter(50);
++    env_.RunUntilIdle();  // flush UI snapshot + writer continuation (P3-E5)
++  }
++  void FireDeadline() {
++    controller_->OnStopDeadline();
++    env_.RunUntilIdle();
++  }
++  void FinalizeNow() {
++    controller_->Finalize(std::string());
++    env_.RunUntilIdle();
++  }
 +  bool IsFinalized() { return controller_->finalized_.load(); }
 +
 +  base::Value ReadManifest() {
@@ -3069,7 +3095,9 @@ index 0000000000..d360f1388b
 +  }
 +
 + protected:
-+  base::test::TaskEnvironment env_;
++  // BrowserTaskEnvironment: FinalizeLocked posts the identity snapshot
++  // to the browser UI runner (P3-E5), which needs a browser task executor.
++  content::BrowserTaskEnvironment env_;
 +  base::FilePath dir_;
 +  base::FilePath trace_;
 +  raw_ptr<XTraceCaptureController> controller_;  // process-lifetime (AtExit hook)

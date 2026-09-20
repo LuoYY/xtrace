@@ -54,7 +54,7 @@ async function main() {
   {
     const { child, client } = await launch([
       '--xtrace-enable', `--xtrace-file=${trace}`, '--xtrace-categories=reverse,fingerprint',
-      '--xtrace-causality=sync', '--xtrace-stop-after-ms=25000']);
+      '--xtrace-causality=sync']);
     const caps = await client.send('XTrace.getCapabilities');
     assert.equal(caps.capabilities.limits.captureEnabled, 'true');
     assert.equal(caps.capabilities.limits.overflowPolicy, 'drop-newest');

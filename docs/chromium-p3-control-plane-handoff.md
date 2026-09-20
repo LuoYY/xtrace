@@ -204,4 +204,12 @@
 3. `scripts/p3-pipe-reconnect.cjs` 末行引用未定义变量 `after`，永不打印结果行（证据落盘不受影响）；顺手修。
 4. `out/XTraceIntegration/` 下旧 `Chromium.app` 残留（0005 前构建遗物）；各驱动已指向 ChromiumX.app，无碍，但建议删除或注明，避免误用。
 
+### 10.5 执行层阻塞与小项闭环记录（2026-09-20）
+
+- **阻塞 1（10.2）已修**：0001 再生为含 `BrowserTaskEnvironment + RunUntilIdle` 单测的版本；干净 HEAD 顺序重放 == 工作树（tree `47e50d8b…`），且**逐文件 blob 比对**（全部 117 个补丁文件 vs 工作树）0 不符；`p3E8Supplement` 摘要与磁盘一致。
+- 小项 1：4 个驱动脚本（tracked 与 out 副本）的惰性 `--xtrace-stop-after-ms` 参数已清理——C++ 内与本仓库脚本现均无引用。
+- 小项 2：manifest `build` 块已恢复（`product` 取 version_info、`is_debug`/`component_build` 编译期判定；冒烟实测 `151.0.7917.0/true/true`）。
+- 小项 3：`p3-pipe-reconnect.cjs` 悬空 `after` 已改为 `fs.statSync(trace).size`。
+- 小项 4：旧 `out/XTraceIntegration/Chromium.app` 已删除（out 目录现存 app 仅 ChromiumX 及 Helpers）。
+
 冻结后由架构师将 `integration-progress.json` 标为 `accepted-p3` 并更新草稿 §12 P3 行。下一阶段 P4 交接见 [chromium-p4-ignition-observer-handoff.md](chromium-p4-ignition-observer-handoff.md)（入口条件 = P3 冻结）。

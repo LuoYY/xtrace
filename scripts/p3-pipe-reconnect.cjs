@@ -46,6 +46,6 @@ function launch() {
   const m = JSON.parse(fs.readFileSync(trace.replace(/\.ndjson$/, '.manifest.json'), 'utf8'));
   assert.equal(m.terminal.state, 'incomplete');
   assert.equal(m.terminal.reason, 'browser-shutdown');
-  console.log(JSON.stringify({ status: 'pass', disconnectKeptBrowser: true, terminal: m.terminal.state + '/' + m.terminal.reason, traceBytes: after }));
+  console.log(JSON.stringify({ status: 'pass', disconnectKeptBrowser: true, terminal: m.terminal.state + '/' + m.terminal.reason, traceBytes: fs.statSync(trace).size }));
   process.exit(0);
 })().catch(e => { console.error(e); process.exit(1); });
