@@ -45,11 +45,15 @@
 
 ### P3-E0：C++ 单测欠账清零（硬性进入条件）
 
+> [x] 完成（2026-09-20）：content_unittests 5/5（CompleteWhenConfirmedAndConsistent / IncompleteWhenDroppedPositive / IncompleteUnconfirmedNullCounters / IncompleteNoProducersObserved / MalformedBatchNotAccepted）；blink_platform_unittests 4/4（ParseTestCapacitySwitch / OverflowCountsStickyDropNewest / SettleIsIdempotentAndStopsAccepting / StopFlagRejectsNewEvents）。测试缝：host 工厂替换 + hub 复位/容量覆盖 + 解析导出。证据：`integration-progress.json` p3.e0_unit_test_debt
+
 - controller 终态裁决四态（complete / incomplete / 失联 / 超时）content 层单测：构造 ProducerState 直接驱动 Finalize，断言终态与 reason（含 `no-producers-observed` 守卫、未确认 producer 计数为 null 的 v1.2 规则）。
 - blink producer 计数/结算 platform 单测：溢出计数、watermark 提交、线程销毁即结算、`--xtrace-test-capacity` 触发路径。
 - 验收：两目标构建通过、用例全绿；用例名与数量如实报告。
 
 ### P3-E1：P3 设计文档（R1 关卡，纯文档）
+
+> [x] 产出 `docs/chromium-p3-design.md`（PDL 草案/受信强制/generation 传播/身份映射/脚手架处置/Host 语义/测试矩阵/决策点建议）——待架构师 R1 裁决
 
 产出 `docs/chromium-p3-design.md`，覆盖：CDP 域 PDL 草案（方法/参数/事件/错误语义、`getCapabilities` 形状、IO stream 用法）；generation 传播协议（通道、初始快照传递点、混合代与确认规则）；身份映射模型（`attribution.document` 开填条件、crosswalk 格式与来源标记）；脚手架移除清单；P3 测试矩阵新增行。附第 5 节决策点的推荐方案与备选。
 
