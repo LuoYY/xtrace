@@ -88,7 +88,7 @@
 
 ### P3-E5：身份映射
 
-> [x] 完成——manifest.identity crosswalk（frame_tree_node_id/document_token/frame_url/resolved），UI 线程快照 + writer 续写（两段式结算）；事件行保���轻量；validator identity 形状断言；证据：3 resolved rows
+> [x] 完成——manifest.identity crosswalk（frame_tree_node_id/document_token/frame_url/resolved），UI 线程快照 + writer 续写（两段式结算）；事件行保持轻量；validator identity 形状断言；证据：3 resolved rows
 
 - browser 从 target、RenderProcessHost、frame、document、worker 生命周期构建关联（`TargetInfo` 不提供 PID，PID/frame ID 不单独代表一次文档执行）。
 - `attribution.document` 按设计文档开填；不可得保持 unresolved（v3 §3.3 规则不破坏）。
@@ -96,7 +96,7 @@
 
 ### P3-E6：脚手架移除与矩阵扩展
 
-> [x] 完成——stop-after 移除（域接管停止，grep 仅余注释）；capacity 改名 xtrace-test-buffer-capacity（标记���续、launcher 不透传）；故障 4/4 + 矩阵 12/12 域驱动停止全绿
+> [x] 完成——stop-after 移除（域接管停止，grep 仅余注释）；capacity 改名 xtrace-test-buffer-capacity（标记延续、launcher 不透传）；故障 4/4 + 矩阵 12/12 域驱动停止全绿
 
 - 按 `XTRACE_TEST_SCAFFOLDING` 标记 grep 移除 `--xtrace-stop-after-ms`（正式 `stopCapture` 接管）；`--xtrace-test-capacity` 按决策点 5 裁决处置；移除情况在本文档登记。
 - 12 组矩阵全量回归（v3）+ 新增 P3 用例：启动配置、运行期更新、更新中创建 Worker、停止中创建 producer、pipe 断连/重连、BFCache 进入（≠ context 销毁）。
@@ -174,3 +174,34 @@
 | browser→renderer 发送 / renderer 绑定 | `chromium/src/content/browser/renderer_host/render_process_host_impl.cc:2003`、`chromium/src/content/renderer/render_thread_impl.cc:1702` |
 | Worker 更新 / 新线程启动 | `chromium/src/content/renderer/worker/worker_thread_registry.cc:90`、`chromium/src/third_party/blink/renderer/core/workers/worker_thread.cc:675` |
 | P2 控制面（带内端点） | `chromium/src/content/browser/xtrace/xtrace_capture_controller.{h,cc}`、`chromium/src/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.{h,cc}` |
+
+---
+
+## 10. 架构师终审记录（2026-09-20）
+
+**结论：实质通过，附条件冻结。** 一项阻塞修复 + 三项小项完成后，P3 标为完成。
+
+### 10.1 独立核验通过项
+
+- **补丁重放**：干净索引顺序应用 0001→0003→0004→0005 复现 `ca047253`，与申报一致；`apply_patches.sh` 序列登记正确（0005 在 0004 后、0002 位置不变）。
+- **ChromiumX 命名**：`CFBundleDisplayName=ChromiumX`、`CFBundleExecutable=Chromium`、`CFBundleIdentifier=org.chromium.Chromium` 未变；`--version` 输出 `Chromium 151.0.7917.0`；0005 补丁内容逐行核对（`mac_app_bundle` 可选 `bundle_name` 向后兼容）。
+- **CDP 域端到端**：`startCapture` generation "0" → `updateCapture` "1" → `stopCapture` → complete（`p3-domain-smoke-tqMD5v`）；非受信会话拒绝实测（`pageSessionRejected: true`）；ProducerStatus 未知计数用 optional 的裁决已落地。
+- **身份映射**：`manifest.identity` 段存在（frame_tree_node_id → document_token，含 chrome:// 内部页的诚实记录）。
+- **脚手架**：`--xtrace-stop-after-ms` 已从 C++ 移除（仅余注释）；`--xtrace-test-buffer-capacity` 改名在位。
+- **最终矩阵** `browser-run-Mj6NFk` 12/12（在 ChromiumX 上运行）；故障注入修复后场景全过。
+- **回归**：架构师以 `scripts/run_tests.sh` 亲测 338/28/211 全绿（注意：直接 `python3` 在本机会落到 3.9 导致两个模块导入失败——验收一律走 run_tests.sh 的解释器选择）；单测 5/5 + 4/4 在最终二进制上亲测通过。
+- **p3E8Supplement 摘要**与磁盘实测一致。
+- **pipe 语义**（架构师亲跑 `p3-pipe-reconnect.cjs`）：pipe 断开 → 浏览器干净退出（exit 0）→ 以 `incomplete/browser-shutdown` 诚实结算、已入队数据全保留。**注意**：pipe 断开即关闭浏览器（pipe 即宿主所有权），设计文档 §6 的"断连不中止 capture"应理解为此路径；可重连控制面需另议（P6 输入）。
+
+### 10.2 阻塞项（冻结前必须完成）
+
+1. **补丁陈旧：`content/browser/xtrace/xtrace_capture_controller_unittest.cc`**。逐文件 blob 比对发现：工作树为 `BrowserTaskEnvironment + RunUntilIdle` 版（P3-E5 使 settle 变异步后所必需），补丁 0001 内仍是旧的 `base::test::TaskEnvironment` 版——干净基线重放该补丁后，controller 单测在异步 settle 下会失败。E8 回写发生在该测试修复之前。处理：重新生成 0001 → 重跑干净索引重放 + 逐文件比对（方法见 P2 终审记录口径）→ 更新 `p3E8Supplement` 摘要。这正是逐文件核对要拦的事，不要只重跑树哈希。
+
+### 10.3 小项（不阻塞冻结，一并记录）
+
+1. "stop-after 全树无引用"表述不准：`scripts/p2-fault-injection.cjs`、`scripts/p3-domain-smoke.cjs` 仍传该（已失效的）开关——C++ 忽略未知开关所以无害，但应清理残留或把登记表措辞改为"C++ 内无引用"。
+2. manifest 的 `build` 块在 P3 产物中变为 `null`（P2 产物有 product/is_debug/component_build）——恢复或说明。
+3. `scripts/p3-pipe-reconnect.cjs` 末行引用未定义变量 `after`，永不打印结果行（证据落盘不受影响）；顺手修。
+4. `out/XTraceIntegration/` 下旧 `Chromium.app` 残留（0005 前构建遗物）；各驱动已指向 ChromiumX.app，无碍，但建议删除或注明，避免误用。
+
+冻结后由架构师将 `integration-progress.json` 标为 `accepted-p3` 并更新草稿 §12 P3 行。下一阶段 P4 交接见 [chromium-p4-ignition-observer-handoff.md](chromium-p4-ignition-observer-handoff.md)（入口条件 = P3 冻结）。
