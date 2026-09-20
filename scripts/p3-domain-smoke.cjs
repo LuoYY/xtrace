@@ -73,8 +73,22 @@ async function main() {
 
     const stop = await client.send('XTrace.stopCapture');
     assert.ok(['stopping', 'incomplete', 'complete'].includes(stop.state), `stop=${stop.state}`);
-    // Settle (deadline 2s) then check terminal state.
-    await new Promise(r => setTimeout(r, 4000));
+    // The stop reply itself carries the settled state + manifest stream
+    // (bounded internal wait, not client polling).
+    assert.ok(['incomplete', 'complete'].includes(stop.state), `settled=${stop.state}`);
+    assert.ok(stop.manifestStream, 'manifest stream handle expected');
+    const chunk = await client.send('IO.read', { handle: stop.manifestStream });
+    assert(chunk.data, 'IO.read returned no data');
+    const raw = chunk.base64Encoded
+        ? Buffer.from(chunk.data, 'base64').toString('utf8')
+        : chunk.data;
+    const manifest = JSON.parse(raw);
+    assert.equal(manifest.terminal.state, stop.state);
+    assert.equal(manifest.schema_version, 3);
+    await client.send('IO.close', { handle: stop.manifestStream });
+    // Closed-stream behavior follows the IO domain's own semantics; the
+    // point for XTrace is only that the handle lifecycle is IO-owned.
+    // (Some builds return eof:true rather than an error.)
     const final = await client.send('XTrace.getCaptureStatus');
     assert.ok(['complete', 'incomplete'].includes(final.state), `final=${final.state}`);
     assert.equal(final.terminal.state, final.state);
