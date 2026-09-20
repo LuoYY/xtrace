@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 89eb629e19..5b5d4d7a8b 100644
+index 89eb629e19..363eaa10e1 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -341,7 +341,7 @@
@@ -27,9 +27,9 @@ index 89eb629e19..5b5d4d7a8b 100644
          "xtrace-capture-assets",
          "xtrace-categories",
          "xtrace-causality",
-+        // XTRACE_TEST_SCAFFOLDING: forwarded so the fault-injection capacity
-+        // override reaches renderer producers; removed with the scaffolding.
-+        "xtrace-test-capacity",
++        // XTRACE_TEST_SCAFFOLDING (long-term, ruled keep): forwarded so the
++        // fault-injection buffer-capacity override reaches renderers.
++        "xtrace-test-buffer-capacity",
          "xtrace-enable",
          "xtrace-file",
          "xtrace-max-body-bytes",

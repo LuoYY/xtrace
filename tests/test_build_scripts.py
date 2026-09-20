@@ -2875,7 +2875,7 @@ class BuildScriptTests(unittest.TestCase):
             '"xtrace-categories",\n        "xtrace-causality",\n        // XTRACE_TEST_SCAFFOLDING',
             browser,
         )
-        self.assertIn('"xtrace-test-capacity",\n        "xtrace-enable",', browser)
+        self.assertIn('"xtrace-test-buffer-capacity",\n        "xtrace-enable",', browser)
         self.assertIn('{\\"schema_version\\":3', logger)
         self.assertIn("thread_local std::vector<XTraceActivation>", logger)
         self.assertIn("AppendCausalityObject", logger)

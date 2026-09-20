@@ -1,0 +1,68 @@
+From the ChromiumX naming task (P3-E9, user-directed 2026-09-20).
+
+Bundle directory becomes ChromiumX.app for local coexistence with an
+installed Chromium; the executable stays Contents/MacOS/Chromium and all
+site-visible identity (product string Chrome/151.0.7917.0, bundle id
+org.chromium.Chromium, UA/UA-CH brands) is untouched.
+
+- build/config/mac/rules.gni: mac_app_bundle gains an optional bundle_name
+  (bundle directory only; executable keeps output_name).
+- chrome/BUILD.gn: chrome_app sets bundle_name = "ChromiumX".
+- chrome/app/app-Info.plist: CFBundleDisplayName = ChromiumX.
+diff --git a/build/config/mac/rules.gni b/build/config/mac/rules.gni
+index 52478f4086..faa91a5895 100644
+--- a/build/config/mac/rules.gni
++++ b/build/config/mac/rules.gni
+@@ -435,6 +435,13 @@ template("mac_app_bundle") {
+     _output_name = invoker.output_name
+   }
+ 
++  # XTRACE P3-E9: optional bundle directory name decoupled from the
++  # executable name (ChromiumX.app carrying Contents/MacOS/Chromium).
++  _bundle_name = _output_name
++  if (defined(invoker.bundle_name)) {
++    _bundle_name = invoker.bundle_name
++  }
++
+   _package_type = "app"
+   if (defined(invoker.package_type)) {
+     _package_type = invoker.package_type
+@@ -565,7 +572,7 @@ template("mac_app_bundle") {
+     }
+ 
+     product_type = _product_type
+-    bundle_root_dir = "$root_out_dir/${_output_name}.${_output_extension}"
++    bundle_root_dir = "$root_out_dir/${_bundle_name}.${_output_extension}"
+     bundle_contents_dir = "$bundle_root_dir/Contents"
+     bundle_resources_dir = "$bundle_contents_dir/Resources"
+     bundle_executable_dir = "$bundle_contents_dir/MacOS"
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index 973a46b2a3..6674d4d4fe 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -519,6 +519,12 @@ if (is_win) {
+   mac_app_bundle("chrome_app") {
+     output_name = chrome_product_full_name
+ 
++    # XTRACE P3-E9: coexistence name — the bundle directory is ChromiumX.app
++    # while the executable stays Contents/MacOS/Chromium (launcher/driver
++    # path resolution unchanged); site-visible identity (product string, UA,
++    # bundle id) is untouched.
++    bundle_name = "ChromiumX"
++
+     info_plist_target = ":chrome_app_plist"
+     extra_substitutions = [
+       "CHROMIUM_BUNDLE_ID=$chrome_mac_bundle_id",
+diff --git a/chrome/app/app-Info.plist b/chrome/app/app-Info.plist
+index 6fada0a2b1..62db2e77ac 100644
+--- a/chrome/app/app-Info.plist
++++ b/chrome/app/app-Info.plist
+@@ -5,7 +5,7 @@
+ 	<key>CFBundleDevelopmentRegion</key>
+ 	<string>en</string>
+ 	<key>CFBundleDisplayName</key>
+-	<string>${EXECUTABLE_NAME}</string>
++	<string>ChromiumX</string>
+ 	<key>CFBundleDocumentTypes</key>
+ 	<array>
+ 		<dict>

@@ -62,11 +62,15 @@
 
 ### P3-E2：CDP 域骨架与受信强制
 
+> [x] 完成——PDL 五命令（两处 R1 修订并入）、protocol_config/BUILD 接入、browser target 注册于 CreateAndAddHandler 受信门内；getCapabilities 三态；证据：p3-domain-smoke-tqMD5v
+
 - PDL 接入与协议生成（真实入口是 `content/browser/devtools/BUILD.gn:55` 与 `protocol_config.json:206`，不是不存在的 `protocol/BUILD.gn`）；handler 注册进 browser target（`browser_devtools_agent_host.cc:226` 起）。
 - `getCapabilities` 先行：返回 schema、模式、可观测路径、限制、动态/启动时配置项。
 - 受信强制：非受信会话调用 XTrace 域一律拒绝（受 `debugger_api.cc:247,746,825` 同族信任约束）；附正向/反向实测。
 
 ### P3-E3：capture 生命周期接口
+
+> [x] 完成——stopCapture 同步回终态 + manifest IO stream（DevToolsStreamFile + IO.read/close）；startCapture 回运行采集身份（launch-time 权威模式内）；证据：p3-domain-smoke（IO stream 断言）
 
 - `startCapture`：校验范围与模式，返回 capture ID、generation 与启动状态（starting 也可失败且原因可查）。
 - `stopCapture`：幂等；返回 stopping 或已有终态，不提前承诺 complete。
@@ -76,11 +80,15 @@
 
 ### P3-E4：updateCapture 与 generation 传播
 
+> [x] 完成——XTraceControl.UpdateConfig（带内）、串行 generation 自 "1"、新线程继承最新代、stopping 拒绝 update、applied/pending 不伪造 ACK；证据：update 后事件 config_generation "1"（直方图 0:5946/1:2）
+
 - browser 串行分配 generation、快照当前参与集合；renderer 经带内 `XTraceControl` 下发；worker/SW 覆盖独立启动与生命周期路径；新 producer 继承最新版。
 - 更新进行中允许旧/新 generation 同时出现在日志；状态接口报告未确认 producer；进入 stopping 拒绝 update；退出者记录退出结果，不伪造 applied ACK。
 - renderer 启动初始快照：首次脚本执行前确定（沿用启动期配置路径，不视为已有代码保证，需在新链路实现并验证）。
 
 ### P3-E5：身份映射
+
+> [x] 完成——manifest.identity crosswalk（frame_tree_node_id/document_token/frame_url/resolved），UI 线程快照 + writer 续写（两段式结算）；事件行保���轻量；validator identity 形状断言；证据：3 resolved rows
 
 - browser 从 target、RenderProcessHost、frame、document、worker 生命周期构建关联（`TargetInfo` 不提供 PID，PID/frame ID 不单独代表一次文档执行）。
 - `attribution.document` 按设计文档开填；不可得保持 unresolved（v3 §3.3 规则不破坏）。
@@ -88,11 +96,15 @@
 
 ### P3-E6：脚手架移除与矩阵扩展
 
+> [x] 完成——stop-after 移除（域接管停止，grep 仅余注释）；capacity 改名 xtrace-test-buffer-capacity（标记���续、launcher 不透传）；故障 4/4 + 矩阵 12/12 域驱动停止全绿
+
 - 按 `XTRACE_TEST_SCAFFOLDING` 标记 grep 移除 `--xtrace-stop-after-ms`（正式 `stopCapture` 接管）；`--xtrace-test-capacity` 按决策点 5 裁决处置；移除情况在本文档登记。
 - 12 组矩阵全量回归（v3）+ 新增 P3 用例：启动配置、运行期更新、更新中创建 Worker、停止中创建 producer、pipe 断连/重连、BFCache 进入（≠ context 销毁）。
 - 每项用例附证据；终态语义同 P2（计数等式为唯一判据）。
 
 ### P3-E7：Host 通信验证
+
+> [x] 完成——NUL framing（冒烟全程）；pipe 断连=干净退出 + browser-shutdown 结算（11812 事件保留，非中止）；未引入 HTTP 调试端口/宽 origins（驱动环境断言延续）
 
 - pipe FD 3/4、NUL framing 实测（framing 边界、断连检测、请求取消）；明确不启用 CBOR 模式。
 - 不引入 HTTP 调试端口与 `--remote-allow-origins=*`（反向断言沿用 P1 E4 模式）。
@@ -100,9 +112,13 @@
 
 ### P3-E8：证据包与终审提交
 
+> [x] 完成——0001/0003/0004 再生 + 0005 新增；干净 HEAD 顺序复现 == 工作树（ca047253）；V8 0002 未动；摘要入 identity.json p3E8Supplement；回归 338/28/211 + 单测 5/5+4/4
+
 沿用 P2 证据纪律与 §7.5 清单：补丁回写（改动集中 0001；v3 字段若涉 0003/0004 同步）+ 干净索引顺序复验 + 逐文件一致性核对（P2 终审方法：补丁清单逐文件 blob 比对）；回归 338/28/211 + 新增测试数；`integration-progress.json` 新增 P3 段（初始 `p3-in-progress`，终审前不得 accepted）；文档状态同步（草稿 §2.3/§12、本文件勾选）。
 
 ### P3-E9：应用命名 ChromiumX（用户指示，2026-09-20 登记）
+
+> [x] 完成——ChromiumX.app（bundle 目录 + CFBundleDisplayName）；可执行仍为 Contents/MacOS/Chromium；product/UA/bundle-id 逐项实测不变；与本机 Chromium 共存（两 app 并存 out 目录）；全链路（冒烟/故障/矩阵/launcher/pipe）在 ChromiumX 上通过
 
 本机已安装 Chromium，为避免共存混淆，产物应用命名为 **ChromiumX**——仅应用命名层面改名；对访问的目标网站而言与 Chromium 完全一致。
 

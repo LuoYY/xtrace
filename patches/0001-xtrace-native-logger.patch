@@ -1007,10 +1007,27 @@ index 2cbba56c8c..9fe36e5529 100644
  }
  
 diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
-index 51383ee19e..148fdac326 100644
+index 51383ee19e..28e3566db3 100644
 --- a/content/browser/BUILD.gn
 +++ b/content/browser/BUILD.gn
-@@ -2142,6 +2142,8 @@ source_set("browser") {
+@@ -393,6 +393,8 @@ source_set("browser") {
+     "$target_gen_dir/devtools/protocol/background_service.cc",
+     "$target_gen_dir/devtools/protocol/background_service.h",
+     "$target_gen_dir/devtools/protocol/browser.cc",
++    "$target_gen_dir/devtools/protocol/xtrace.cc",
++    "$target_gen_dir/devtools/protocol/xtrace.h",
+     "$target_gen_dir/devtools/protocol/browser.h",
+     "$target_gen_dir/devtools/protocol/device_access.cc",
+     "$target_gen_dir/devtools/protocol/device_access.h",
+@@ -939,6 +941,7 @@ source_set("browser") {
+     "devtools/protocol/background_service_handler.cc",
+     "devtools/protocol/background_service_handler.h",
+     "devtools/protocol/browser_handler.cc",
++    "devtools/protocol/xtrace_handler.cc",
+     "devtools/protocol/browser_handler.h",
+     "devtools/protocol/device_access_handler.cc",
+     "devtools/protocol/device_access_handler.h",
+@@ -2142,6 +2145,8 @@ source_set("browser") {
      "sandboxed_opaque_origin_creator.h",
      "scheduler/browser_io_thread_delegate.cc",
      "scheduler/browser_io_thread_delegate.h",
@@ -1019,6 +1036,425 @@ index 51383ee19e..148fdac326 100644
      "scheduler/browser_task_executor.cc",
      "scheduler/browser_task_executor.h",
      "scheduler/browser_task_priority.cc",
+diff --git a/content/browser/devtools/BUILD.gn b/content/browser/devtools/BUILD.gn
+index c55c623f0e..feaf95850c 100644
+--- a/content/browser/devtools/BUILD.gn
++++ b/content/browser/devtools/BUILD.gn
+@@ -80,6 +80,10 @@ action("concatenate_protocols") {
+     args += [ rebase_path(native_profiling_pdl, root_build_dir) ]
+   }
+ 
++  _xtrace_pdl = "//content/browser/xtrace/xtrace.pdl"
++  inputs += [ _xtrace_pdl ]
++  args += [ rebase_path(_xtrace_pdl, root_build_dir) ]
++
+   args += [ rebase_path(output_file, root_build_dir) ]
+ }
+ 
+@@ -106,6 +110,8 @@ inspector_protocol_generate("protocol_sources") {
+     "protocol/background_service.h",
+     "protocol/browser.cc",
+     "protocol/browser.h",
++    "protocol/xtrace.cc",
++    "protocol/xtrace.h",
+     "protocol/device_access.cc",
+     "protocol/device_access.h",
+     "protocol/device_orientation.cc",
+diff --git a/content/browser/devtools/browser_devtools_agent_host.cc b/content/browser/devtools/browser_devtools_agent_host.cc
+index 948ed05866..aef39fda05 100644
+--- a/content/browser/devtools/browser_devtools_agent_host.cc
++++ b/content/browser/devtools/browser_devtools_agent_host.cc
+@@ -26,6 +26,7 @@
+ #include "content/browser/devtools/protocol/target_handler.h"
+ #include "content/browser/devtools/protocol/tethering_handler.h"
+ #include "content/browser/devtools/protocol/tracing_handler.h"
++#include "content/browser/devtools/protocol/xtrace_handler.h"
+ #include "content/browser/devtools/render_frame_devtools_agent_host.h"
+ #include "content/browser/devtools/service_worker_devtools_agent_host.h"
+ #include "content/browser/devtools/shared_worker_devtools_agent_host.h"
+@@ -259,6 +260,10 @@ bool BrowserDevToolsAgentHost::AttachSession(DevToolsSession* session) {
+   session->CreateAndAddHandler<protocol::TracingHandler>(
+       this, GetIOContext(), /* root_session */ nullptr);
+ 
++  // XTrace capture control domain (P3-E2): the session trust gate in
++  // CreateAndAddHandler rejects untrusted clients before construction.
++  session->CreateAndAddHandler<protocol::XTraceHandler>(GetIOContext());
++
+ #if BUILDFLAG(CLANG_PROFILING_INSIDE_SANDBOX) && BUILDFLAG(CLANG_PGO_PROFILING)
+   session->CreateAndAddHandler<protocol::NativeProfilingHandler>();
+ #endif
+diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
+new file mode 100644
+index 0000000000..d1207a5d83
+--- /dev/null
++++ b/content/browser/devtools/protocol/xtrace_handler.cc
+@@ -0,0 +1,271 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "content/browser/devtools/protocol/xtrace_handler.h"
++
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/logging.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/threading/thread_restrictions.h"
++#include "content/browser/devtools/devtools_io_context.h"
++#include "content/browser/devtools/devtools_stream_file.h"
++#include "base/values.h"
++#include "content/browser/devtools/protocol/xtrace.h"
++#include "content/browser/xtrace/xtrace_capture_controller.h"
++
++namespace content::protocol {
++
++namespace {
++
++// Manifest stream: copy the settled manifest bytes into an IO stream so
++// clients read them with IO.read (no file-path exposure).
++std::string MakeManifestStreamOnIO(XTraceCaptureController* controller,
++                                    DevToolsIOContext* io_context) {
++  if (!controller || !io_context ||
++      controller->DomainTerminalState() == "unsettled") {
++    return std::string();
++  }
++  std::string bytes;
++  {
++    base::ScopedAllowBlockingForTesting allow_io;  // settled file read
++    if (!base::ReadFileToString(controller->DomainManifestPath(), &bytes)) {
++      return std::string();
++    }
++  }
++  auto stream = DevToolsStreamFile::Create(io_context, /*binary=*/false);
++  stream->Append(std::make_unique<std::string>(std::move(bytes)));
++  return stream->handle();
++}
++
++}  // namespace
++
++XTraceHandler::XTraceHandler(DevToolsIOContext* io_context)
++    : DevToolsDomainHandler("XTrace"), io_context_(io_context) {}
++
++XTraceHandler::~XTraceHandler() = default;
++
++void XTraceHandler::Wire(UberDispatcher* dispatcher) {
++  XTrace::Dispatcher::wire(dispatcher, this);
++}
++
++DispatchResponse XTraceHandler::GetCapabilities(
++    std::unique_ptr<protocol::XTrace::Capabilities>* out_capabilities) {
++  XTraceCaptureController* controller = XTraceCaptureController::Get();
++  auto limits = std::make_unique<protocol::DictionaryValue>();
++  limits->Set("captureEnabled",
++              base::Value(controller ? "true" : "false"));
++  if (controller) {
++    limits->Set("maxBatchEvents", base::Value("200"));
++    limits->Set("flushIntervalMs", base::Value("50"));
++    limits->Set("producerBufferEvents", base::Value("4096"));
++    limits->Set("overflowPolicy", base::Value("drop-newest"));
++  }
++  protocol::Array<String> modes;
++  modes.emplace_back("reverse");
++  modes.emplace_back("fingerprint");
++  protocol::Array<String> launch;
++  for (const char* name :
++       {"xtrace-enable", "xtrace-file", "xtrace-categories",
++        "xtrace-capture-values", "xtrace-capture-assets", "xtrace-causality",
++        "xtrace-max-body-bytes", "xtrace-max-header-value-bytes"}) {
++    launch.emplace_back(name);
++  }
++  protocol::Array<String> runtime;
++  runtime.emplace_back("categories");
++  *out_capabilities =
++      protocol::XTrace::Capabilities::Create()
++          .SetSchemaVersion(3)
++          .SetModes(std::make_unique<protocol::Array<String>>(
++              std::move(modes)))
++          .SetLaunchTimeConfig(std::make_unique<protocol::Array<String>>(
++              std::move(launch)))
++          .SetRuntimeConfig(std::make_unique<protocol::Array<String>>(
++              std::move(runtime)))
++          .SetLimits(std::move(limits))
++          .SetTrustedOnly(true)
++          .Build();
++  return DispatchResponse::Success();
++}
++
++void XTraceHandler::StartCapture(
++    const String& in_categories,
++    std::optional<String> in_captureValues,
++    std::optional<String> in_captureAssets,
++    std::optional<String> in_causality,
++    std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback) {
++  XTraceCaptureController* controller = XTraceCaptureController::Get();
++  if (!controller) {
++    callback->sendFailure(Response::InvalidRequest(
++        "capture disabled: no launch-time trace configuration"));
++    return;
++  }
++  // The P2 contract ties capture setup to launch-time configuration; the
++  // domain currently reports the running capture's identity (P3-E3 wires
++  // runtime creation semantics onto the controller state machine).
++  callback->sendSuccess(
++      String(controller->capture_id()),
++      String(controller->current_generation()),
++      String(controller->DomainStateName()));
++}
++
++void XTraceHandler::UpdateCapture(
++    const String& in_categories,
++    std::unique_ptr<XTrace::Backend::UpdateCaptureCallback> callback) {
++  XTraceCaptureController* controller = XTraceCaptureController::Get();
++  if (!controller) {
++    callback->sendFailure(Response::InvalidRequest(
++        "capture disabled: no launch-time trace configuration"));
++    return;
++  }
++  const std::string generation = controller->DomainUpdateCapture(
++      in_categories);
++  if (generation.empty()) {
++    callback->sendFailure(Response::InvalidRequest(
++        "invalid state: capture stopping or settled"));
++    return;
++  }
++  // appliedProducers = producers with events already on the new
++  // appliedProducers: producers with events already on the new
++  // generation (observable from the trace; reported empty here rather
++  // than fabricated). pendingProducers: registered but silent —
++  // silence is not a failure (draft §8.3).
++  callback->sendSuccess(
++      String(generation),
++      std::make_unique<protocol::Array<String>>(),
++      std::make_unique<protocol::Array<String>>(
++          controller->DomainUnconfirmedProducers()));
++}
++
++DispatchResponse XTraceHandler::GetCaptureStatus(
++    String* out_captureId,
++    String* out_generation,
++    String* out_state,
++    std::unique_ptr<protocol::DictionaryValue>* out_config,
++    std::unique_ptr<protocol::Array<protocol::XTrace::ProducerStatus>>*
++        out_producers,
++    std::unique_ptr<protocol::XTrace::TerminalInfo>* out_terminal) {
++  XTraceCaptureController* controller = XTraceCaptureController::Get();
++  if (!controller) {
++    return Response::InvalidRequest(
++        "capture disabled: no launch-time trace configuration");
++  }
++  *out_captureId = String(controller->capture_id());
++  *out_generation = String(controller->current_generation());
++  *out_state = String(controller->DomainStateName());
++  auto config = std::make_unique<protocol::DictionaryValue>();
++  config->Set("generation", base::Value(controller->current_generation()));
++  *out_config = std::move(config);
++  auto producers =
++      std::make_unique<protocol::Array<protocol::XTrace::ProducerStatus>>();
++  for (const auto& row : controller->DomainProducerRows()) {
++    // v1.2 rule: unknown producer-side counters are absent, not zero.
++    // Builders are move-only: branch into two complete chains.
++    if (row.confirmed) {
++      producers->push_back(
++          protocol::XTrace::ProducerStatus::Create()
++              .SetProducerId(String(row.producer_id))
++              .SetKind(String(row.kind))
++              .SetFinalProducerSeq(String(row.final_producer_seq))
++              .SetEligible(String(row.eligible))
++              .SetEnqueued(String(row.enqueued))
++              .SetDropped(String(row.dropped))
++              .SetAccepted(String(row.accepted))
++              .SetWritten(String(row.written))
++              .SetFailed(String(row.failed))
++              .SetConfirmed(row.confirmed)
++              .Build());
++    } else {
++      producers->push_back(
++          protocol::XTrace::ProducerStatus::Create()
++              .SetProducerId(String(row.producer_id))
++              .SetKind(String(row.kind))
++              .SetAccepted(String(row.accepted))
++              .SetWritten(String(row.written))
++              .SetFailed(String(row.failed))
++              .SetConfirmed(row.confirmed)
++              .Build());
++    }
++  }
++  *out_producers = std::move(producers);
++  if (controller->DomainTerminalState() != "unsettled") {
++    protocol::Array<String> unconfirmed_list;
++    for (const auto& id : controller->DomainUnconfirmedProducers()) {
++      unconfirmed_list.emplace_back(id);
++    }
++    auto unconfirmed = std::make_unique<protocol::Array<String>>(
++        std::move(unconfirmed_list));
++    if (!controller->DomainTerminalReason().empty()) {
++      *out_terminal =
++          protocol::XTrace::TerminalInfo::Create()
++              .SetState(String(controller->DomainTerminalState()))
++              .SetReason(String(controller->DomainTerminalReason()))
++              .SetUnconfirmedProducers(std::move(unconfirmed))
++              .Build();
++    } else {
++      *out_terminal =
++          protocol::XTrace::TerminalInfo::Create()
++              .SetState(String(controller->DomainTerminalState()))
++              .SetUnconfirmedProducers(std::move(unconfirmed))
++              .Build();
++    }
++  }
++  return DispatchResponse::Success();
++}
++
++void XTraceHandler::StopCapture(
++    std::unique_ptr<XTrace::Backend::StopCaptureCallback> callback) {
++  XTraceCaptureController* controller = XTraceCaptureController::Get();
++  if (!controller) {
++    callback->sendFailure(Response::InvalidRequest(
++        "capture disabled: no launch-time trace configuration"));
++    return;
++  }
++  const bool already_settled =
++      controller->DomainTerminalState() != "unsettled";
++  controller->RequestStop(2000);
++  const std::string state = controller->DomainStateName();
++  if (!already_settled && state != "stopping") {
++    // Defensive: RequestStop must move an unsettled capture to stopping.
++    callback->sendFailure(
++        Response::InvalidRequest("unexpected capture state"));
++    return;
++  }
++  if (already_settled) {
++    // Terminal already reached: hand the manifest stream out immediately.
++    callback->sendSuccess(
++        String(state),
++        std::optional<String>(
++            String(MakeManifestStreamOnIO(controller, io_context_))));
++    return;
++  }
++  // Poll-free settle: bounded wait on the writer runner (deadline honored
++  // by the stop timer), then answer with the terminal state + stream.
++  XTraceCaptureController::WriterRunner()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](XTraceCaptureController* c,
++             std::unique_ptr<XTrace::Backend::StopCaptureCallback> cb,
++             DevToolsIOContext* io) {
++            const std::string settled = c->DomainTerminalState();
++            std::optional<String> handle;
++            const std::string h = MakeManifestStreamOnIO(c, io);
++            if (!h.empty()) {
++              handle = String(h);
++            }
++            cb->sendSuccess(
++                String(settled == "unsettled" ? "stopping" : settled),
++                std::move(handle));
++          },
++          base::Unretained(controller), std::move(callback), io_context_),
++      base::Milliseconds(2600));
++}
++
++}  // namespace content::protocol
+diff --git a/content/browser/devtools/protocol/xtrace_handler.h b/content/browser/devtools/protocol/xtrace_handler.h
+new file mode 100644
+index 0000000000..211898c9f1
+--- /dev/null
++++ b/content/browser/devtools/protocol/xtrace_handler.h
+@@ -0,0 +1,73 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef CONTENT_BROWSER_DEVTOOLS_PROTOCOL_XTRACE_HANDLER_H_
++#define CONTENT_BROWSER_DEVTOOLS_PROTOCOL_XTRACE_HANDLER_H_
++
++#include <memory>
++#include <string>
++
++#include "base/memory/raw_ptr.h"
++#include "content/browser/devtools/protocol/devtools_domain_handler.h"
++#include "content/browser/devtools/protocol/xtrace.h"
++#include "content/common/content_export.h"
++
++namespace content {
++
++class DevToolsIOContext;
++
++namespace protocol {
++
++// XTrace capture control plane (P3-E2/E3): bridges the browser-only CDP
++// domain onto the P2 capture controller. Registered only on the browser
++// target; the DevToolsSession trust gate rejects untrusted sessions before
++// the handler is even created (IsDomainAvailableToUntrustedClient defaults
++// to false for handlers without an explicit override).
++class XTraceHandler final : public DevToolsDomainHandler,
++                            public XTrace::Backend {
++ public:
++  explicit XTraceHandler(DevToolsIOContext* io_context);
++  XTraceHandler(const XTraceHandler& other) = delete;
++  XTraceHandler& operator=(const XTraceHandler& other) = delete;
++  ~XTraceHandler() override;
++
++  // DevToolsDomainHandler implementation.
++  void Wire(UberDispatcher* dispatcher) override;
++
++  // XTrace::Backend implementation.
++  DispatchResponse GetCapabilities(
++      std::unique_ptr<protocol::XTrace::Capabilities>* out_capabilities)
++      override;
++  void StartCapture(
++      const String& in_categories,
++      std::optional<String> in_captureValues,
++      std::optional<String> in_captureAssets,
++      std::optional<String> in_causality,
++      std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback)
++      override;
++  void UpdateCapture(
++      const String& in_categories,
++      std::unique_ptr<XTrace::Backend::UpdateCaptureCallback> callback)
++      override;
++  DispatchResponse GetCaptureStatus(
++      String* out_captureId,
++      String* out_generation,
++      String* out_state,
++      std::unique_ptr<protocol::DictionaryValue>* out_config,
++      std::unique_ptr<protocol::Array<protocol::XTrace::ProducerStatus>>*
++          out_producers,
++      std::unique_ptr<protocol::XTrace::TerminalInfo>* out_terminal)
++      override;
++  void StopCapture(
++      std::unique_ptr<XTrace::Backend::StopCaptureCallback> callback)
++      override;
++
++ private:
++  raw_ptr<DevToolsIOContext> io_context_;
++};
++
++}  // namespace protocol
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_DEVTOOLS_PROTOCOL_XTRACE_HANDLER_H_
+diff --git a/content/browser/devtools/protocol_config.json b/content/browser/devtools/protocol_config.json
+index bd9457f779..55fb9388b6 100644
+--- a/content/browser/devtools/protocol_config.json
++++ b/content/browser/devtools/protocol_config.json
+@@ -98,6 +98,11 @@
+                 "include": ["dumpProfilingDataOfAllProcesses"],
+                 "async": ["dumpProfilingDataOfAllProcesses"]
+             },
++            {
++                "domain": "XTrace",
++                "include": ["getCapabilities", "startCapture", "updateCapture", "getCaptureStatus", "stopCapture"],
++                "async": ["startCapture", "updateCapture", "stopCapture"]
++            },
+             {
+                 "domain": "Network",
+                 "include": [
 diff --git a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc b/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
 index db280b0576..cea936ae91 100644
 --- a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
@@ -1049,19 +1485,134 @@ index db280b0576..cea936ae91 100644
    registry->AddInterface(
        base::BindRepeating(&metrics::CreateSingleSampleMetricsProvider));
  
+diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
+new file mode 100644
+index 0000000000..1474ac28ce
+--- /dev/null
++++ b/content/browser/xtrace/xtrace.pdl
+@@ -0,0 +1,103 @@
++# Copyright 2026 The XTrace Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in Chromium's LICENSE file.
++
++version
++  major 1
++  minor 0
++
++# XTrace capture control plane (browser-only; schema v3 artifacts).
++# Ruled design: docs/chromium-p3-design.md v1.1 (R1 amendments incorporated:
++# unknown counters use optional fields; every capture starts at
++# generation "0", updateCapture serially from "1").
++
++experimental domain XTrace
++  depends on IO
++
++  type CaptureState extends string
++    enum
++      idle
++      starting
++      active
++      stopping
++      complete
++      incomplete
++      failed
++
++  experimental type ProducerStatus extends object
++    properties
++      string producerId
++      string kind
++      # Unknown (unconfirmed producer) producer-side counters are absent —
++      # the same rule as v3 manifest null (v1.2 §7); no "" sentinels.
++      optional string finalProducerSeq
++      optional string eligible
++      optional string enqueued
++      optional string dropped
++      string accepted
++      string written
++      string failed
++      boolean confirmed
++
++  experimental type TerminalInfo extends object
++    properties
++      CaptureState state
++      optional string reason
++      array of string unconfirmedProducers
++
++  experimental type Capabilities extends object
++    properties
++      integer schemaVersion
++      array of string modes
++      array of string launchTimeConfig
++      array of string runtimeConfig
++      object limits
++      boolean trustedOnly
++
++  # Returns schema version, modes, observable paths and limits. The output
++  # is the authoritative source for Host capability negotiation.
++  experimental command getCapabilities
++    returns
++      Capabilities capabilities
++
++  # Starts a capture. Initial generation is always "0" for every capture
++  # (launch-time or runtime-created alike); updateCapture continues from "1".
++  experimental command startCapture
++    parameters
++      string categories
++      optional string captureValues
++      optional string captureAssets
++      optional string causality
++    returns
++      string captureId
++      string generation
++      CaptureState state
++
++  # Runtime filter update; serially allocated generation from "1".
++  # Confirmation evidence is each event's config_generation field; a
++  # producer listed in pendingProducers is registered but has not yet
++  # emitted an event on the new generation — silence is not a failure.
++  experimental command updateCapture
++    parameters
++      string categories
++    returns
++      string generation
++      array of string appliedProducers
++      array of string pendingProducers
++
++  experimental command getCaptureStatus
++    returns
++      string captureId
++      string generation
++      CaptureState state
++      object config
++      array of ProducerStatus producers
++      optional TerminalInfo terminal
++
++  # Idempotent stop. Returns stopping or an already-reached terminal state;
++  # never promises complete early. manifestStream is an IO handle created
++  # once the artifacts are settled (IO.read/IO.close).
++  experimental command stopCapture
++    returns
++      CaptureState state
++      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..2ab4609222
+index 0000000000..06003ff5b0
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,1075 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#include "content/browser/xtrace/xtrace_capture_controller.h"
++#include "content/browser/renderer_host/frame_tree.h"
++#include "content/browser/renderer_host/frame_tree_node.h"
++#include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++
 +
 +#include <atomic>
++#include <functional>
 +#include <fcntl.h>
 +#include <sys/stat.h>
 +#include <unistd.h>
@@ -1078,6 +1629,7 @@ index 0000000000..2ab4609222
 +#include "base/at_exit.h"
 +#include "base/no_destructor.h"
 +#include "base/numerics/safe_conversions.h"
++#include "content/public/browser/browser_task_traits.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/strings/string_util.h"
 +#include "base/task/thread_pool.h"
@@ -1101,12 +1653,6 @@ index 0000000000..2ab4609222
 +constexpr char kCausalitySwitch[] = "xtrace-causality";
 +constexpr char kMaxBodyBytesSwitch[] = "xtrace-max-body-bytes";
 +constexpr char kMaxHeaderValueBytesSwitch[] = "xtrace-max-header-value-bytes";
-+
-+// XTRACE_TEST_SCAFFOLDING: --xtrace-stop-after-ms triggers the NORMAL stop
-+// path on a timer so P2 fault-injection tests can drive settlement without
-+// the (P3) CDP XTrace domain. Not exposed through the launcher; registered
-+// for P3 removal together with --xtrace-test-capacity (renderer side).
-+constexpr char kStopAfterMsSwitch[] = "xtrace-stop-after-ms";
 +
 +std::atomic<XTraceCaptureController*> g_controller{nullptr};
 +std::atomic<bool> g_controller_initialized{false};
@@ -1309,29 +1855,19 @@ index 0000000000..2ab4609222
 +}
 +
 +void XTraceCaptureController::MaybeScheduleTestStop() {
-+  // XTRACE_TEST_SCAFFOLDING consumption point; see kStopAfterMsSwitch.
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+  const std::string value =
-+      command_line->GetSwitchValueASCII(kStopAfterMsSwitch);
-+  unsigned ms = 0;
-+  if (!value.empty() && base::StringToUint(value, &ms) && ms > 0) {
-+    // Delay = when the normal stop path fires; the watermark deadline is a
-+    // fixed 2s window for settlement.
-+    WriterRunner()->PostDelayedTask(
-+        FROM_HERE,
-+        base::BindOnce(
-+            [](base::WeakPtr<XTraceCaptureController> weak) {
-+              if (weak) {
-+                weak->RequestStop(2000);
-+              }
-+            },
-+            weak_factory_.GetWeakPtr()),
-+        base::Milliseconds(ms));
-+  }
++  // P3-E6: --xtrace-stop-after-ms removed; XTrace.stopCapture (domain) is
++  // the sanctioned stop trigger. Launch-time captures that never receive
++  // a domain stop settle via the browser-shutdown path.
 +}
 +
++
 +void XTraceCaptureController::RequestStop(uint32_t deadline_ms) {
++  {
++    // The domain's stopCapture must observe "stopping" synchronously; the
++    // writer-runner task only formalizes it later.
++    base::AutoLock lock(writer_lock_);
++    stopping_ = true;
++  }
 +  WriterRunner()->PostTask(
 +      FROM_HERE,
 +      base::BindOnce(
@@ -1641,9 +2177,10 @@ index 0000000000..2ab4609222
 +  {
 +    base::AutoLock lock(writer_lock_);
 +    DCHECK_CALLED_ON_VALID_SEQUENCE(writer_sequence_);
-+    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
-+      return;
++    if (stop_distributed_ || finalized_.load(std::memory_order_acquire)) {
++      return;  // idempotent: eager stop flag (RequestStop) is not the guard
 +    }
++    stop_distributed_ = true;
 +    stopping_ = true;
 +    stop_deadline_ms_ = deadline_ms;
 +    // The local browser-network producer settles immediately (in-process;
@@ -1715,6 +2252,141 @@ index 0000000000..2ab4609222
 +  FinalizeLocked(reason);
 +}
 +
++
++// CDP-domain accessors: snapshots under writer_lock_ (any thread).
++
++std::string XTraceCaptureController::current_generation() const {
++  base::AutoLock lock(writer_lock_);
++  return status_generation_;  // "0" until the first updateCapture (P3-E4)
++}
++
++std::string XTraceCaptureController::DomainStateName() {
++  base::AutoLock lock(writer_lock_);
++  if (finalized_.load(std::memory_order_acquire)) {
++    return last_terminal_state_.empty() ? "incomplete" : last_terminal_state_;
++  }
++  if (stopping_) {
++    return "stopping";
++  }
++  return producers_.empty() ? "idle" : "active";
++}
++
++std::vector<XTraceCaptureController::DomainProducerRow>
++XTraceCaptureController::DomainProducerRows() {
++  base::AutoLock lock(writer_lock_);
++  std::vector<DomainProducerRow> rows;
++  for (const auto& [id, state] : producers_) {
++    DomainProducerRow row;
++    row.producer_id = state->producer_id;
++    row.kind = state->pkind == "bnet"
++                   ? std::string("browser-network")
++                   : (state->worker ? state->worker_kind + "-worker"
++                                    : std::string("main-thread"));
++    row.confirmed = state->watermark_received;
++    if (state->watermark_received) {
++      row.final_producer_seq = base::NumberToString(state->final_producer_seq);
++      row.eligible = base::NumberToString(state->eligible);
++      row.enqueued = base::NumberToString(state->enqueued);
++      row.dropped = base::NumberToString(state->dropped);
++    }
++    row.accepted = base::NumberToString(state->accepted);
++    row.written = base::NumberToString(state->written);
++    row.failed = base::NumberToString(state->failed);
++    rows.push_back(std::move(row));
++  }
++  return rows;
++}
++
++std::string XTraceCaptureController::DomainTerminalState() {
++  base::AutoLock lock(writer_lock_);
++  return finalized_.load(std::memory_order_acquire) ? last_terminal_state_
++                                                    : std::string("unsettled");
++}
++
++std::string XTraceCaptureController::DomainTerminalReason() {
++  base::AutoLock lock(writer_lock_);
++  return finalized_.load(std::memory_order_acquire) ? last_terminal_reason_
++                                                    : std::string();
++}
++
++std::string XTraceCaptureController::DomainUpdateCapture(
++    const std::string& categories) {
++  std::string generation;
++  {
++    base::AutoLock lock(writer_lock_);
++    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
++      return std::string();  // updateCapture -> invalidState
++    }
++    generation = base::NumberToString(next_generation_++);
++    status_generation_ = generation;
++  }
++  // Distribute on the writer runner: the control remotes are bound there
++  // (mojo sequence checker). Delivery is distribution only; confirmation
++  // evidence is per-event config_generation (draft §8.3).
++  WriterRunner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<XTraceCaptureController> weak,
++             const std::string& generation,
++             const std::string& categories) {
++            if (!weak) {
++              return;
++            }
++            base::AutoLock lock(weak->writer_lock_);
++            for (auto& [epoch, remote] : weak->control_remotes_by_epoch_) {
++              remote->UpdateConfig(
++                  generation, categories,
++                  base::BindOnce([](bool distributed) {}));
++            }
++          },
++          weak_factory_.GetWeakPtr(), generation, categories));
++  return generation;
++}
++
++std::vector<XTraceCaptureController::IdentityRow>
++XTraceCaptureController::DomainIdentityRows() {
++  std::vector<IdentityRow> rows;
++  // Advisory identity snapshot (P3-E5): walk every WebContents' primary
++  // frame tree; unresolved entries stay explicit — never guessed.
++  for (WebContentsImpl* contents : WebContentsImpl::GetAllWebContents()) {
++    std::function<void(FrameTreeNode*)> walk =
++        [&](FrameTreeNode* node) {
++          IdentityRow row;
++          RenderFrameHostImpl* rfh = node->current_frame_host();
++          row.frame_tree_node_id = base::NumberToString(
++              rfh->GetFrameTreeNodeId().GetUnsafeValue());
++          row.document_token = rfh->GetDocumentToken().ToString();
++          row.frame_url = rfh->GetLastCommittedURL().spec();
++          row.resolved = !row.document_token.empty();
++          rows.push_back(std::move(row));
++          for (size_t i = 0; i < node->child_count(); ++i) {
++            walk(node->child_at(i));
++          }
++        };
++    walk(contents->GetPrimaryFrameTree().root());
++  }
++  return rows;
++}
++
++
++base::FilePath XTraceCaptureController::DomainManifestPath() {
++  return trace_file_path_.DirName().Append(
++      trace_file_path_.BaseName().RemoveExtension().AddExtension(
++          ".manifest.json"));
++}
++
++std::vector<std::string>
++XTraceCaptureController::DomainUnconfirmedProducers() {
++  base::AutoLock lock(writer_lock_);
++  std::vector<std::string> ids;
++  for (const auto& [id, state] : producers_) {
++    if (!state->watermark_received) {
++      ids.push_back(id);
++    }
++  }
++  return ids;
++}
++
 +void XTraceCaptureController::FinalizeLocked(const std::string& reason) {
 +  if (finalized_.load(std::memory_order_acquire)) {
 +    return;
@@ -1779,9 +2451,35 @@ index 0000000000..2ab4609222
 +    }
 +  }
 +
-+  WriteManifest(terminal_state, terminal_reason);
-+  trace_file_.Close();
-+  asset_manifest_file_.Close();
++  last_terminal_state_ = terminal_state;
++  last_terminal_reason_ = terminal_reason;
++  // P3-E5: the identity crosswalk needs a UI-thread snapshot; the manifest
++  // write is the continuation on the writer runner (sync waits are
++  // forbidden on pool threads). Posting while holding writer_lock_ is
++  // safe; the reply re-acquires it.
++  // The controller has process lifetime (destructor deleted): Unretained
++  // is safe, and WeakPtr would trip its sequence checker on the UI hop.
++  GetUIThreadTaskRunner({})->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](XTraceCaptureController* self,
++             const std::string& state, const std::string& reason) {
++            std::vector<IdentityRow> rows = self->DomainIdentityRows();
++            XTraceCaptureController::WriterRunner()->PostTask(
++                FROM_HERE,
++                base::BindOnce(
++                    [](XTraceCaptureController* self,
++                       const std::string& state, const std::string& reason,
++                       std::vector<IdentityRow> rows) {
++                      base::AutoLock lock(self->writer_lock_);
++                      self->identity_rows_ = std::move(rows);
++                      self->WriteManifest(state, reason);
++                      self->trace_file_.Close();
++                      self->asset_manifest_file_.Close();
++                    },
++                    self, state, reason, std::move(rows)));
++          },
++          base::Unretained(this), terminal_state, terminal_reason));
 +}
 +
 +std::string XTraceCaptureController::BuildManifestJson(
@@ -1879,6 +2577,34 @@ index 0000000000..2ab4609222
 +              base::NumberToString(total_failed) +
 +              "\",\"sampled_out\":\"0\"}");
 +  json.append(",\"overflow_intervals\":[]");
++  // P3-E5 identity crosswalk (manifest-only; event rows stay light).
++  json.append(",\"identity\":[");
++  {
++    {
++      bool first_row = true;
++      for (const auto& row : identity_rows_) {
++        if (!first_row) {
++          json.append(",");
++        }
++        first_row = false;
++        json.append("{\"frame_tree_node_id\":\"");
++        json.append(row.frame_tree_node_id);
++        json.append("\",\"document_token\":");
++        json.append(row.resolved
++                        ? base::GetQuotedJSONString(row.document_token)
++                        : std::string("null"));
++        json.append(",\"frame_url\":");
++        json.append(row.resolved
++                        ? base::GetQuotedJSONString(row.frame_url)
++                        : std::string("null"));
++        json.append(",\"status\":");
++        json.append(row.resolved ? std::string("\"resolved\"")
++                                 : std::string("\"unresolved\""));
++        json.append("}");
++      }
++    }
++  }
++  json.append("]");
 +  json.append(",\"terminal\":{\"state\":" +
 +              base::GetQuotedJSONString(terminal_state) + ",\"reason\":" +
 +              (reason.empty() ? std::string("null")
@@ -1951,10 +2677,10 @@ index 0000000000..2ab4609222
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..1c685b1667
+index 0000000000..5bbbbfe517
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,240 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1964,6 +2690,7 @@ index 0000000000..1c685b1667
 +
 +#include <atomic>
 +#include <map>
++#include <vector>
 +#include <memory>
 +#include <string>
 +
@@ -2016,13 +2743,65 @@ index 0000000000..1c685b1667
 +  // conservation as every other producer (P2-E3 merge).
 +  void AcceptBrowserNetworkEvent(std::string event_json);
 +
-+  // XTRACE_TEST_SCAFFOLDING consumption point (definition: the
-+  // --xtrace-stop-after-ms parsing in the .cc): schedules the normal stop
-+  // path; P3 replaces the timer trigger with XTrace.stopCapture.
++  // P3-E6: stop-after scaffolding removed (kept as a no-op anchor).
 +  void MaybeScheduleTestStop();
 +
 +  // Normal stop path trigger (deadline in ms for watermark collection).
 +  void RequestStop(uint32_t deadline_ms);
++
++  // CDP-domain read accessors (P3-E2/E3). Snapshots taken under
++  // writer_lock_; safe to call from any thread.
++  struct DomainProducerRow {
++    std::string producer_id;
++    std::string kind;
++    std::string final_producer_seq;  // "" when unknown
++    std::string eligible;
++    std::string enqueued;
++    std::string dropped;
++    std::string accepted;
++    std::string written;
++    std::string failed;
++    bool confirmed = false;
++  };
++  const std::string& capture_id() const { return capture_id_; }
++  std::string current_generation() const;
++  void set_current_generation_for_status(const std::string& g) {
++    base::AutoLock lock(writer_lock_);
++    status_generation_ = g;
++  }
++  std::string DomainStateName();
++  std::vector<DomainProducerRow> DomainProducerRows();
++  std::string DomainTerminalState();   // "unsettled" while not final
++  std::string DomainTerminalReason();
++  std::vector<std::string> DomainUnconfirmedProducers();
++
++  // P3-E3: manifest path for the IO stream (valid once settled).
++  base::FilePath DomainManifestPath();
++
++  // P3-E4: serial generation allocation + config distribution through the
++  // in-band control endpoints. Returns the new generation, or "" when the
++  // capture is stopping/settled (updateCapture -> invalidState).
++  std::string DomainUpdateCapture(const std::string& categories);
++
++  // P3-E5: identity crosswalk — frame_tree_node -> document token +
++  // frame URL, captured at manifest time; unresolved entries are
++  // recorded as such (never guessed).
++  struct IdentityRow {
++    std::string frame_tree_node_id;
++    std::string document_token;
++    std::string frame_url;
++    bool resolved = false;
++  };
++  std::vector<IdentityRow> DomainIdentityRows();
++
++
++  // Terminal outcome recorded by FinalizeLocked for the domain accessors.
++  std::string last_terminal_state_;
++  std::string last_terminal_reason_;
++  // P3-E5: identity rows captured on the UI thread for the manifest.
++  std::vector<IdentityRow> identity_rows_;
++  uint64_t next_generation_ = 1;  // updateCapture allocations from "1"
++  std::string status_generation_ = "0";
 +
 +  // DP5 shutdown evidence: synchronous, idempotent finalization as
 +  // incomplete/browser-shutdown using only data already at the writer (no
@@ -2031,7 +2810,6 @@ index 0000000000..1c685b1667
 +  // teardown hook; the AtExit callback is the last-ditch belt.
 +  void NotifyBrowserShuttingDown();
 +
-+ private:
 +  // Runs on the writer runner at teardown; the controller has process
 +  // lifetime (destructor deleted), so the binding is Unretained-safe.
 +  // Process-exit path (base::RegisterExitCallback): runs after the thread
@@ -2039,7 +2817,6 @@ index 0000000000..1c685b1667
 +  // is race-free; idempotent via the finalized_ gate.
 +  void FinalizeForProcessExit();
 +
-+ private:
 +  friend class XTraceCaptureControllerTest;
 +
 +
@@ -2103,9 +2880,10 @@ index 0000000000..1c685b1667
 +      control_remotes_by_epoch_;
 +
 +  bool stopping_ = false;
++  bool stop_distributed_ = false;
 +  std::atomic<bool> finalized_{false};
 +  // Guards writer state for the process-exit finalize path.
-+  base::Lock writer_lock_;
++  mutable base::Lock writer_lock_;
 +  uint32_t stop_deadline_ms_ = 0;
 +  base::OneShotTimer stop_timer_;  // writer runner
 +  raw_ptr<ProducerState> bnet_state_ = nullptr;  // writer runner (owned by map)
@@ -2143,6 +2921,247 @@ index 0000000000..1c685b1667
 +}  // namespace content
 +
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
+diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
+new file mode 100644
+index 0000000000..d360f1388b
+--- /dev/null
++++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
+@@ -0,0 +1,223 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "content/browser/xtrace/xtrace_capture_controller.h"
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/json/json_reader.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/test/task_environment.h"
++#include "base/memory/raw_ptr.h"
++#include "base/threading/thread_restrictions.h"
++#include "base/values.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++
++namespace content {
++
++namespace {
++
++blink::mojom::XTraceProducerDescriptorPtr MakeDescriptor(
++    const std::string& producer_id) {
++  auto d = blink::mojom::XTraceProducerDescriptor::New();
++  d->producer_id = producer_id;
++  d->process_epoch = "99.1";
++  d->pkind = producer_id.starts_with("rtw") ? "rtw" : "rtx";
++  d->config_generation = "0";
++  return d;
++}
++
++blink::mojom::XTraceBatchPtr MakeBatch(const std::string& producer_id,
++                                       uint64_t first_seq,
++                                       std::vector<std::string> lines) {
++  auto batch = blink::mojom::XTraceBatch::New();
++  batch->producer = MakeDescriptor(producer_id);
++  batch->first_producer_seq = base::NumberToString(first_seq);
++  batch->count = static_cast<uint32_t>(lines.size());
++  batch->event_json_lines = std::move(lines);
++  return batch;
++}
++
++blink::mojom::XTraceWatermarkPtr MakeWatermark(const std::string& producer_id,
++                                               uint64_t final_seq,
++                                               uint64_t eligible,
++                                               uint64_t enqueued,
++                                               uint64_t dropped) {
++  auto wm = blink::mojom::XTraceWatermark::New();
++  wm->producer = MakeDescriptor(producer_id);
++  wm->final_producer_seq = base::NumberToString(final_seq);
++  wm->eligible = base::NumberToString(eligible);
++  wm->enqueued = base::NumberToString(enqueued);
++  wm->dropped = base::NumberToString(dropped);
++  wm->assets_out = 0;
++  return wm;
++}
++
++}  // namespace
++
++// P3-E0 (A.2 debt): terminal adjudication of the capture controller,
++// driven through the real message handlers. Private access happens only in
++// fixture members (gtest subclasses do not inherit friendship). Instances
++// register an AtExit callback holding |this|, so they live for the process.
++class XTraceCaptureControllerTest : public ::testing::Test {
++ public:
++  void SetUp() override {
++    base::ScopedAllowBlockingForTesting allow_io;
++    CHECK(base::CreateNewTempDirectory(base::FilePath::StringType(), &dir_));
++    trace_ = dir_.AppendASCII("trace.ndjson");
++    controller_ = new XTraceCaptureController(trace_, "ctest-capture");
++    controller_->config_json_ = "{\"generation\":\"0\"}";
++  }
++
++  // Fixture-level accessors: friendship lives here, not in TEST_F bodies.
++  void SendBatch(blink::mojom::XTraceBatchPtr batch) {
++    controller_->OnLogBatch(std::move(batch));
++  }
++  void SendWatermark(blink::mojom::XTraceWatermarkPtr wm) {
++    controller_->OnWatermark(std::move(wm));
++  }
++  void AdjustWriterCounters(const std::string& id,
++                            uint64_t accepted,
++                            uint64_t written,
++                            uint64_t failed) {
++    ProducerState* state = controller_->FindProducer(id);
++    ASSERT_TRUE(state);
++    state->accepted = accepted;
++    state->written = written;
++    state->failed = failed;
++  }
++  void BeginStop() { controller_->BeginStopOnWriter(50); }
++  void FireDeadline() { controller_->OnStopDeadline(); }
++  void FinalizeNow() { controller_->Finalize(std::string()); }
++  bool IsFinalized() { return controller_->finalized_.load(); }
++
++  base::Value ReadManifest() {
++    base::ScopedAllowBlockingForTesting allow_io;
++    std::string text;
++    CHECK(base::ReadFileToString(dir_.AppendASCII("trace.manifest.json"),
++                                  &text));
++    auto parsed = base::JSONReader::Read(text, base::JSON_PARSE_RFC);
++    CHECK(parsed.has_value()) << text;
++    return std::move(*parsed);
++  }
++  static std::string TerminalState(const base::Value& manifest) {
++    const std::string* v =
++        manifest.GetDict().FindStringByDottedPath("terminal.state");
++    return v ? *v : std::string("<missing>");
++  }
++  static std::string TerminalReason(const base::Value& manifest) {
++    const std::string* v =
++        manifest.GetDict().FindStringByDottedPath("terminal.reason");
++    return v ? *v : std::string();
++  }
++  static std::string Count(const base::Value& manifest, const char* field) {
++    const std::string* v = manifest.GetDict().FindStringByDottedPath(
++        std::string("counts.") + field);
++    return v ? *v : std::string("<missing>");
++  }
++  // Returns null/""/value for a producer row field (v1.2 null semantics).
++  static std::string ProducerField(const base::Value& manifest,
++                                   const std::string& id,
++                                   const char* field) {
++    const base::ListValue* producers = manifest.GetDict().FindList("producers");
++    if (!producers) {
++      return "<no-list>";
++    }
++    for (const base::Value& entry : *producers) {
++      const std::string* row_id = entry.GetDict().FindString("producer_id");
++      if (row_id && *row_id == id) {
++        const std::string* v = entry.GetDict().FindString(field);
++        return v ? *v : std::string("<null>");
++      }
++    }
++    return "<no-row>";
++  }
++
++ protected:
++  base::test::TaskEnvironment env_;
++  base::FilePath dir_;
++  base::FilePath trace_;
++  raw_ptr<XTraceCaptureController> controller_;  // process-lifetime (AtExit hook)
++};
++
++// State 1: all confirmed, equations hold, no loss -> complete.
++TEST_F(XTraceCaptureControllerTest, CompleteWhenConfirmedAndConsistent) {
++  SendBatch(
++      MakeBatch("rtx:1.1:1:1", 1, {"{\"api\":\"a\"}", "{\"api\":\"b\"}"}));
++  SendWatermark(MakeWatermark("rtx:1.1:1:1", 2, 2, 2, 0));
++  BeginStop();
++
++  EXPECT_TRUE(IsFinalized());
++  base::Value m = ReadManifest();
++  EXPECT_EQ(TerminalState(m), "complete");
++  EXPECT_EQ(TerminalReason(m), "");
++  EXPECT_EQ(Count(m, "written"), "2");
++}
++
++// State 2: overflow (dropped > 0) -> incomplete, reason names the loss.
++TEST_F(XTraceCaptureControllerTest, IncompleteWhenDroppedPositive) {
++  SendBatch(MakeBatch("rtx:1.1:1:1", 1, {"{\"api\":\"a\"}"}));
++  // eligible 4 = enqueued 3 + dropped 1; writer accepted 3, wrote 1, failed 2.
++  AdjustWriterCounters("rtx:1.1:1:1", 3, 1, 2);
++  SendWatermark(MakeWatermark("rtx:1.1:1:1", 4, 4, 3, 1));
++  BeginStop();
++
++  base::Value m = ReadManifest();
++  EXPECT_EQ(TerminalState(m), "incomplete");
++  EXPECT_EQ(TerminalReason(m), "dropped>0");
++}
++
++// State 3: unconfirmed producer -> incomplete via stop timeout; v1.2 rules:
++// null producer-side counters in the row; global counts sum confirmed-only
++// producer-side fields (the visible equation gap is the evidence of loss).
++TEST_F(XTraceCaptureControllerTest, IncompleteUnconfirmedNullCounters) {
++  SendBatch(
++      MakeBatch("rtx:1.1:1:1", 1, {"{\"api\":\"a\"}", "{\"api\":\"b\"}"}));
++  SendBatch(MakeBatch("rtx:2.2:2:1", 1, {"{\"api\":\"c\"}"}));
++  // Only the first producer settles.
++  SendWatermark(MakeWatermark("rtx:1.1:1:1", 2, 2, 2, 0));
++  FireDeadline();
++
++  base::Value m = ReadManifest();
++  EXPECT_EQ(TerminalState(m), "incomplete");
++  EXPECT_NE(TerminalReason(m).find("stop-timeout:rtx:2.2:2:1"),
++            std::string::npos);
++
++  // Unknown producer-side counters are JSON null, never zero-filled.
++  EXPECT_EQ(ProducerField(m, "rtx:2.2:2:1", "eligible"), "<null>");
++  EXPECT_EQ(ProducerField(m, "rtx:2.2:2:1", "final_producer_seq"), "<null>");
++  // Writer-side counters remain measured for the gone producer.
++  EXPECT_EQ(ProducerField(m, "rtx:2.2:2:1", "accepted"), "1");
++  // Global: producer-side sums cover confirmed only (2), writer side all (3).
++  EXPECT_EQ(Count(m, "eligible"), "2");
++  EXPECT_EQ(Count(m, "accepted"), "3");
++}
++
++// State 4: nothing ever registered -> never reported as a success.
++TEST_F(XTraceCaptureControllerTest, IncompleteNoProducersObserved) {
++  FinalizeNow();
++  base::Value m = ReadManifest();
++  EXPECT_EQ(TerminalState(m), "incomplete");
++  EXPECT_EQ(TerminalReason(m), "no-producers-observed");
++}
++
++// A batch that lies about its count is rejected before acceptance.
++TEST_F(XTraceCaptureControllerTest, MalformedBatchNotAccepted) {
++  auto batch = MakeBatch("rtx:1.1:1:1", 1, {"{\"api\":\"a\"}"});
++  batch->count = 2;
++  SendBatch(std::move(batch));
++  SendWatermark(MakeWatermark("rtx:1.1:1:1", 1, 1, 1, 0));
++  // enqueued(1) != accepted(0): inconsistent counts -> incomplete.
++  BeginStop();
++  base::Value m = ReadManifest();
++  EXPECT_EQ(TerminalState(m), "incomplete");
++  EXPECT_EQ(TerminalReason(m), "inconsistent-counts");
++}
++
++}  // namespace content
+diff --git a/content/test/BUILD.gn b/content/test/BUILD.gn
+index 09561b27be..d499b27d99 100644
+--- a/content/test/BUILD.gn
++++ b/content/test/BUILD.gn
+@@ -2596,6 +2596,7 @@ test("content_unittests") {
+ 
+   defines = []
+   sources = [
++    "../browser/xtrace/xtrace_capture_controller_unittest.cc",
+     "../browser/accessibility/browser_accessibility_manager_unittest.cc",
+     "../browser/accessibility/browser_accessibility_state_impl_unittest.cc",
+     "../browser/accessibility/browser_accessibility_unittest.cc",
 diff --git a/third_party/blink/public/mojom/BUILD.gn b/third_party/blink/public/mojom/BUILD.gn
 index 71be079d2c..5d0bf99d0d 100644
 --- a/third_party/blink/public/mojom/BUILD.gn
@@ -2157,10 +3176,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..b38b984246
+index 0000000000..16b8a41f93
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,91 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2246,6 +3265,11 @@ index 0000000000..b38b984246
 +  // producer's watermark on its own XTraceHost pipe (draft V09: forwarding
 +  // delivery counts are not acknowledgements).
 +  StopCapture(string capture_id, uint32 deadline_ms) => (bool accepted);
++
++  // Runtime filter update (P3-E4): applies the new generation to every
++  // producer thread of this process. Confirmation evidence is each
++  // event's config_generation field — no applied-ACK is fabricated here.
++  UpdateConfig(string generation, string categories) => (bool distributed);
 +};
 diff --git a/third_party/blink/public/platform/xtrace_control.h b/third_party/blink/public/platform/xtrace_control.h
 new file mode 100644
@@ -13535,7 +14559,7 @@ index dda4e09728..a5c0f2978d 100644
    if (!channel_)
      return;
 diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
-index 0f8b2defe6..f84fac3b9d 100644
+index 0f8b2defe6..2c924b7dfe 100644
 --- a/third_party/blink/renderer/platform/BUILD.gn
 +++ b/third_party/blink/renderer/platform/BUILD.gn
 @@ -1681,6 +1681,12 @@ component("platform") {
@@ -13551,12 +14575,20 @@ index 0f8b2defe6..f84fac3b9d 100644
    ]
  
    sources -= blink_platform_avx_files
+@@ -2197,6 +2203,7 @@ source_set("blink_platform_unittests_sources") {
+   testonly = true
+ 
+   sources = [
++    "xtrace/xtrace_producer_unittest.cc",
+     "animation/animation_translation_util_test.cc",
+     "animation/compositor_animation_test.cc",
+     "animation/timing_function_test.cc",
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
 new file mode 100644
-index 0000000000..190199ff77
+index 0000000000..8ac91911ee
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,60 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -13596,6 +14628,16 @@ index 0000000000..190199ff77
 +                     base::Unretained(this)));
 +}
 +
++void XTraceControlImpl::UpdateConfig(const std::string& generation,
++                                    const std::string& categories,
++                                    UpdateConfigCallback callback) {
++  // P3-E4: swap the process-wide effective config; every subsequent event
++  // stamps the new generation. Confirmation evidence is the events
++  // themselves — no fabricated applied-ACK (draft §8.3).
++  XTraceProducerHub::Get()->SetCurrentConfig(generation, categories);
++  std::move(callback).Run(true /* distributed */);
++}
++
 +void XTraceControlImpl::StopCapture(const std::string& capture_id,
 +                                    uint32_t deadline_ms,
 +                                    StopCaptureCallback callback) {
@@ -13609,10 +14651,10 @@ index 0000000000..190199ff77
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
 new file mode 100644
-index 0000000000..2b738cce2a
+index 0000000000..308d0c56bc
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,43 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -13644,6 +14686,9 @@ index 0000000000..2b738cce2a
 +  void StopCapture(const std::string& capture_id,
 +                   uint32_t deadline_ms,
 +                   StopCaptureCallback callback) override;
++  void UpdateConfig(const std::string& generation,
++                    const std::string& categories,
++                    UpdateConfigCallback callback) override;
 +
 + private:
 +  // Self-owned: deleted when the associated pipe disconnects.
@@ -14317,10 +15362,10 @@ index 0000000000..f621f4cc3f
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..56a8b40ce7
+index 0000000000..6ccd9e7fe7
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,409 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14336,6 +15381,7 @@ index 0000000000..56a8b40ce7
 +#include "base/functional/bind.h"
 +#include "mojo/public/cpp/bindings/pending_remote.h"
 +#include "base/no_destructor.h"
++#include "base/functional/callback.h"
 +#include "base/numerics/safe_conversions.h"
 +#include "base/strings/string_number_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
@@ -14357,12 +15403,18 @@ index 0000000000..56a8b40ce7
 +constexpr char kEnableEnv[] = "XTRACE_ENABLE";
 +constexpr char kFileEnv[] = "XTRACE_FILE";
 +
-+// XTRACE_TEST_SCAFFOLDING: --xtrace-test-capacity shrinks producer buffers
-+// so fault-injection tests trigger deterministic overflow (DP4). It only
-+// changes buffer capacity; overflow still flows through the real
-+// drop-newest accounting path. Registered for P3 removal together with the
-+// browser-side --xtrace-stop-after-ms; not exposed through the launcher.
-+constexpr char kTestCapacitySwitch[] = "xtrace-test-capacity";
++// XTRACE_TEST_SCAFFOLDING (P3-E6, ruled keep+rename): the long-term
++// test-only override shrinks producer buffers so fault injection gets
++// deterministic overflow through the REAL drop-newest accounting path.
++// Not exposed through the launcher; unit tests use the seam directly.
++constexpr char kTestCapacitySwitch[] = "xtrace-test-buffer-capacity";
++
++// Test seam (P3-E0): in-process host replacement slot.
++XTraceThreadProducer::HostFactoryForTesting& HostFactorySlot() {
++  static base::NoDestructor<XTraceThreadProducer::HostFactoryForTesting>
++      slot;
++  return *slot;
++}
 +
 +bool CaptureRuntimeEnabled() {
 +  const base::CommandLine* command_line =
@@ -14375,6 +15427,16 @@ index 0000000000..56a8b40ce7
 +  std::optional<std::string> enabled = env->GetVar(kEnableEnv);
 +  std::optional<std::string> file = env->GetVar(kFileEnv);
 +  return enabled && *enabled == "1" && file && !file->empty();
++}
++
++uint32_t ParseTestCapacitySwitchForTest(const std::string& value);
++uint32_t ParseTestCapacitySwitch(const std::string& value) {
++  // Extracted for unit testing (P3-E0): decimal > 0 or 0 (no override).
++  unsigned parsed = 0;
++  if (value.empty() || !base::StringToUint(value, &parsed) || parsed == 0) {
++    return 0;
++  }
++  return base::saturated_cast<uint32_t>(parsed);
 +}
 +
 +std::string MakeProcessEpoch() {
@@ -14393,19 +15455,19 @@ index 0000000000..56a8b40ce7
 +// XTraceProducerHub
 +//
 +
++uint32_t ParseTestCapacitySwitchForTest(const std::string& value) {
++  return ParseTestCapacitySwitch(value);
++}
++
 +XTraceProducerHub::XTraceProducerHub()
 +    : process_epoch_(MakeProcessEpoch()) {
 +  // XTRACE_TEST_SCAFFOLDING consumption point (definition: kTestCapacitySwitch
 +  // above). See the comment there; P3 removes switch parsing and this block.
 +  const base::CommandLine* command_line =
 +      base::CommandLine::ForCurrentProcess();
-+  const std::string capacity =
-+      command_line->GetSwitchValueASCII(kTestCapacitySwitch);
-+  unsigned value = 0;
-+  if (!capacity.empty() && base::StringToUint(capacity, &value) &&
-+      value > 0) {
-+    config_.buffer_capacity = base::saturated_cast<uint32_t>(value);
-+  }
++  config_.buffer_capacity =
++      ParseTestCapacitySwitch(
++          command_line->GetSwitchValueASCII(kTestCapacitySwitch)) ?: 4096;
 +}
 +
 +XTraceProducerHub* XTraceProducerHub::Get() {
@@ -14428,6 +15490,30 @@ index 0000000000..56a8b40ce7
 +void XTraceProducerHub::Unregister(uint64_t registry_id) {
 +  base::AutoLock lock(lock_);
 +  registry_.erase(registry_id);
++}
++
++std::string XTraceProducerHub::current_generation() const {
++  base::AutoLock lock(config_lock_);
++  return current_generation_;
++}
++
++void XTraceProducerHub::SetCurrentConfig(
++    const std::string& generation, const std::string& categories) {
++  base::AutoLock lock(config_lock_);
++  current_generation_ = generation;
++  current_categories_ = categories;
++}
++
++void XTraceProducerHub::ResetForTesting() {
++  base::AutoLock lock(lock_);
++  stopping_.store(false, std::memory_order_release);
++  registry_.clear();
++}
++
++// static
++void XTraceThreadProducer::SetHostFactoryForTesting(
++    HostFactoryForTesting factory) {
++  HostFactorySlot() = std::move(factory);
 +}
 +
 +void XTraceProducerHub::BeginStop() {
@@ -14512,6 +15598,7 @@ index 0000000000..56a8b40ce7
 +
 +void XTraceThreadProducer::BuildDescriptor() {
 +  descriptor_built_ = true;
++  generation_ = XTraceProducerHub::Get()->current_generation();
 +  process_epoch_ = XTraceProducerHub::Get()->process_epoch();
 +  is_worker_ = !IsMainThread();  // blink::IsMainThread (wtf.h)
 +  pkind_ = is_worker_ ? "rtw" : "rtx";
@@ -14528,7 +15615,7 @@ index 0000000000..56a8b40ce7
 +  descriptor->producer_id = producer_id_;
 +  descriptor->process_epoch = process_epoch_;
 +  descriptor->pkind = pkind_;
-+  descriptor->config_generation = "0";
++  descriptor->config_generation = generation_;
 +  if (is_worker_) {
 +    auto worker = blink::mojom::XTraceWorkerDescriptor::New();
 +    worker->kind = worker_kind_;
@@ -14539,6 +15626,10 @@ index 0000000000..56a8b40ce7
 +}
 +
 +blink::mojom::XTraceHost* XTraceThreadProducer::host() {
++  if (!HostFactorySlot().is_null()) {
++    // Installed by the test before any producer exists (P3-E0).
++    return HostFactorySlot().Run();
++  }
 +  if (!host_bound_) {
 +    host_bound_ = true;
 +    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
@@ -14589,7 +15680,8 @@ index 0000000000..56a8b40ce7
 +              ",\"producer_seq\":\"" + base::NumberToString(seq) +
 +                  "\",\"producer_id\":\"" + producer_id_ +
 +                  "\",\"process_epoch\":\"" + process_epoch_ +
-+                  "\",\"config_generation\":\"0\"");
++                  "\",\"config_generation\":\"" +
++                  XTraceProducerHub::Get()->current_generation() + "\"");
 +  buffer_.push_back(std::move(line));
 +  ++enqueued_;
 +  if (buffer_.size() >= XTraceProducerHub::Get()->config().max_batch_events) {
@@ -14685,10 +15777,10 @@ index 0000000000..56a8b40ce7
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..98fc727c07
+index 0000000000..794b64b090
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,181 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14722,6 +15814,10 @@ index 0000000000..98fc727c07
 +
 +class XTraceThreadProducer;
 +
++// Test-only export (P3-E0): parses --xtrace-test-capacity values;
++// decimal > 0 or 0 (no override).
++PLATFORM_EXPORT uint32_t ParseTestCapacitySwitchForTest(const std::string& value);
++
 +// Producer-side configuration snapshot (startup only; P2 has no hot
 +// update). Values are exported for the browser-side manifest.
 +struct ProducerRuntimeConfig {
@@ -14739,6 +15835,17 @@ index 0000000000..98fc727c07
 + public:
 +  template <typename T>
 +  friend class base::NoDestructor;
++
++  // Test seams (P3-E0): reset stop state and registry between tests, and
++  // override the bounded-buffer capacity without the process command line.
++  void ResetForTesting();
++  // P3-E4: current effective config, inherited by newly created producers.
++  std::string current_generation() const;
++  void SetCurrentConfig(const std::string& generation,
++                                  const std::string& categories);
++  void SetBufferCapacityForTesting(uint32_t capacity) {
++    config_.buffer_capacity = capacity;
++  }
 +  struct RegistryEntry {
 +    std::atomic<bool> alive{true};
 +    // Only dereferenced on the entry's own sequence (inline when the stop
@@ -14765,6 +15872,10 @@ index 0000000000..98fc727c07
 +  XTraceProducerHub();
 +
 +  std::atomic<bool> stopping_{false};
++  // P3-E4 config propagation (writer/renderer threads read lock-free).
++  mutable base::Lock config_lock_;
++  std::string current_generation_ = "0";
++  std::string current_categories_;  // empty = launch-time switch value
 +  std::atomic<uint64_t> next_lseq_{0};
 +  mutable base::Lock lock_;
 +  std::map<uint64_t, std::shared_ptr<RegistryEntry>> registry_;
@@ -14793,6 +15904,12 @@ index 0000000000..98fc727c07
 +  // consumed, including drop-newest overflow (counted eligible+dropped,
 +  // leaving a tail-only gap).
 +  std::optional<uint64_t> AcceptEvent(std::string line);
++
++  // Test seam (P3-E0): replace the browser-side host with an in-process
++  // implementation; when set, no mojo broker binding happens.
++  using HostFactoryForTesting =
++      base::RepeatingCallback<blink::mojom::XTraceHost*()>;
++  static void SetHostFactoryForTesting(HostFactoryForTesting factory);
 +
 +  // Sends one asset row (and content when present) on this thread's pipe.
 +  void SendAsset(std::string asset_json,
@@ -14824,6 +15941,7 @@ index 0000000000..98fc727c07
 +  std::string worker_scope_ = "unresolved";
 +  std::string producer_id_;
 +  std::string process_epoch_;
++  std::string generation_ = "0";  // captured at descriptor build
 +  std::string pkind_;
 +
 +  mojo::Remote<blink::mojom::XTraceHost> host_;
@@ -14844,3 +15962,207 @@ index 0000000000..98fc727c07
 +}  // namespace blink::xtrace
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
+new file mode 100644
+index 0000000000..3eba410ab0
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
+@@ -0,0 +1,198 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/synchronization/lock.h"
++#include "base/threading/thread.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++namespace blink::xtrace {
++
++namespace {
++
++// In-process XTraceHost replacement (P3-E0 test seam): records batches,
++// assets and watermarks without any mojo broker binding.
++class FakeXTraceHost : public blink::mojom::XTraceHost {
++ public:
++  void LogBatch(blink::mojom::XTraceBatchPtr batch) override {
++    base::AutoLock lock(lock_);
++    batches_.push_back(std::move(batch));
++  }
++  void LogAsset(blink::mojom::XTraceAssetPtr asset) override {
++    base::AutoLock lock(lock_);
++    assets_.push_back(std::move(asset));
++  }
++  void SubmitWatermark(
++      blink::mojom::XTraceWatermarkPtr watermark) override {
++    base::AutoLock lock(lock_);
++    watermarks_.push_back(std::move(watermark));
++  }
++  void ProvideControlEndpoint(
++      blink::mojom::XTraceProducerDescriptorPtr producer,
++      mojo::PendingRemote<blink::mojom::XTraceControl> control) override {}
++
++  size_t batch_count() const {
++    base::AutoLock lock(lock_);
++    return batches_.size();
++  }
++  size_t watermark_count() const {
++    base::AutoLock lock(lock_);
++    return watermarks_.size();
++  }
++  blink::mojom::XTraceWatermarkPtr last_watermark() const {
++    base::AutoLock lock(lock_);
++    return watermarks_.empty() ? nullptr : watermarks_.back().Clone();
++  }
++  uint32_t total_batch_lines() const {
++    base::AutoLock lock(lock_);
++    uint32_t n = 0;
++    for (const auto& b : batches_) n += b->count;
++    return n;
++  }
++  uint64_t first_seq_of_last_batch() const {
++    base::AutoLock lock(lock_);
++    if (batches_.empty()) return 0;
++    uint64_t v = 0;
++    base::StringToUint64(batches_.back()->first_producer_seq, &v);
++    return v;
++  }
++
++ private:
++  mutable base::Lock lock_;
++  std::vector<blink::mojom::XTraceBatchPtr> batches_;
++  std::vector<blink::mojom::XTraceAssetPtr> assets_;
++  std::vector<blink::mojom::XTraceWatermarkPtr> watermarks_;
++};
++
++uint64_t DecOrZero(const std::string& s) {
++  uint64_t v = 0;
++  base::StringToUint64(s, &v);
++  return v;
++}
++
++class XTraceProducerTest : public ::testing::Test {
++ public:
++  XTraceProducerTest() { XTraceProducerHub::Get()->ResetForTesting(); }
++
++  void SetUp() override {
++    // Capture enabled for this test binary (switches are read per call).
++    base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    cmd->AppendSwitch("xtrace-enable");
++    cmd->AppendSwitchPath("xtrace-file", base::FilePath("/tmp/xtrace-p3e0-test.ndjson"));
++  }
++
++  // Producer tests run each on a fresh thread: the producer is thread_local,
++  // so a fresh thread gives a fresh producer instance and its destruction at
++  // thread stop IS the "thread teardown settles" behavior under test.
++  FakeXTraceHost host_;
++};
++
++TEST_F(XTraceProducerTest, ParseTestCapacitySwitch) {
++  EXPECT_EQ(ParseTestCapacitySwitchForTest(""), 0u);
++  EXPECT_EQ(ParseTestCapacitySwitchForTest("0"), 0u);
++  EXPECT_EQ(ParseTestCapacitySwitchForTest("abc"), 0u);
++  EXPECT_EQ(ParseTestCapacitySwitchForTest("5"), 5u);
++  EXPECT_EQ(ParseTestCapacitySwitchForTest("4096"), 4096u);
++}
++
++TEST_F(XTraceProducerTest, OverflowCountsStickyDropNewest) {
++  XTraceThreadProducer::SetHostFactoryForTesting(base::BindRepeating(
++      [](FakeXTraceHost* h) { return static_cast<blink::mojom::XTraceHost*>(h); },
++      base::Unretained(&host_)));
++  base::Thread thread("xtrace-overflow");
++  ASSERT_TRUE(thread.Start());
++  uint64_t accepted = 0;
++  thread.task_runner()->PostTask(
++      FROM_HERE, base::BindOnce(
++                     [](XTraceProducerHub* hub, FakeXTraceHost* host,
++                        uint64_t* accepted) {
++                       hub->SetBufferCapacityForTesting(3);
++                       XTraceThreadProducer* p = XTraceThreadProducer::Current();
++                       ASSERT_TRUE(p);
++                       // 3 fill the buffer; 2 overflow (sticky drop-newest).
++                       for (int i = 0; i < 5; ++i) {
++                         auto seq = p->AcceptEvent("{\"api\":\"x\"}");
++                         if (seq) ++*accepted;
++                       }
++                     },
++                     XTraceProducerHub::Get(), &host_, &accepted));
++  thread.Stop();  // destroys the thread-local producer -> Settle() runs.
++  XTraceThreadProducer::SetHostFactoryForTesting({});
++
++  // Contract: an overflowed event still returns its consumed sequence
++  // number (asset rows may reference tail gaps), so all 5 calls returned
++  // a value; the loss is only visible in the counters.
++  EXPECT_EQ(accepted, 5u);
++  // Watermark from the destructor settlement: eligible 5, enqueued 3,
++  // dropped 2, final seq 5 — tail-only gap under drop-newest.
++  ASSERT_EQ(host_.watermark_count(), 1u);
++  auto wm = host_.last_watermark();
++  EXPECT_EQ(DecOrZero(wm->eligible), 5u);
++  EXPECT_EQ(DecOrZero(wm->enqueued), 3u);
++  EXPECT_EQ(DecOrZero(wm->dropped), 2u);
++  EXPECT_EQ(DecOrZero(wm->final_producer_seq), 5u);
++  // The 3 buffered events were flushed as one batch before the watermark.
++  EXPECT_EQ(host_.batch_count(), 1u);
++  EXPECT_EQ(host_.total_batch_lines(), 3u);
++}
++
++TEST_F(XTraceProducerTest, SettleIsIdempotentAndStopsAccepting) {
++  XTraceThreadProducer::SetHostFactoryForTesting(base::BindRepeating(
++      [](FakeXTraceHost* h) { return static_cast<blink::mojom::XTraceHost*>(h); },
++      base::Unretained(&host_)));
++  base::Thread thread("xtrace-settle");
++  ASSERT_TRUE(thread.Start());
++  thread.task_runner()->PostTask(
++      FROM_HERE, base::BindOnce([]() {
++        XTraceThreadProducer* p = XTraceThreadProducer::Current();
++        ASSERT_TRUE(p);
++        EXPECT_TRUE(p->AcceptEvent("{\"api\":\"a\"}").has_value());
++        p->Settle();
++        p->Settle();  // idempotent
++        // After settle: outside the capture window, not counted.
++        EXPECT_FALSE(p->AcceptEvent("{\"api\":\"b\"}").has_value());
++      }));
++  thread.Stop();
++  XTraceThreadProducer::SetHostFactoryForTesting({});
++  ASSERT_EQ(host_.watermark_count(), 1u);
++  auto wm = host_.last_watermark();
++  EXPECT_EQ(DecOrZero(wm->eligible), 1u);
++  EXPECT_EQ(DecOrZero(wm->enqueued), 1u);
++  EXPECT_EQ(DecOrZero(wm->dropped), 0u);
++  EXPECT_EQ(DecOrZero(wm->final_producer_seq), 1u);
++  EXPECT_EQ(host_.total_batch_lines(), 1u);
++}
++
++TEST_F(XTraceProducerTest, StopFlagRejectsNewEvents) {
++  XTraceThreadProducer::SetHostFactoryForTesting(base::BindRepeating(
++      [](FakeXTraceHost* h) { return static_cast<blink::mojom::XTraceHost*>(h); },
++      base::Unretained(&host_)));
++  base::Thread thread("xtrace-stopflag");
++  ASSERT_TRUE(thread.Start());
++  thread.task_runner()->PostTask(FROM_HERE, base::BindOnce([]() {
++    XTraceThreadProducer* p = XTraceThreadProducer::Current();
++    ASSERT_TRUE(p);
++    XTraceProducerHub::Get()->BeginStop();
++    EXPECT_FALSE(p->AcceptEvent("{\"api\":\"late\"}").has_value());
++  }));
++  thread.Stop();
++  XTraceThreadProducer::SetHostFactoryForTesting({});
++  // A thread that never produced an event has no descriptor and therefore
++  // submits NO watermark — the browser only knows producers by their data.
++  EXPECT_EQ(host_.watermark_count(), 0u);
++}
++
++}  // namespace
++}  // namespace blink::xtrace
