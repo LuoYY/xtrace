@@ -44,10 +44,14 @@
 
 ### P4-E0：d8 迭代环（先于 C++ 主线）
 
+> [x] 完成（2026-09-20）：`out/XTraceP4D8` d8 构建成功（3443 步，GN 含 tracing 组合）；P0 `verify_d8.py` 10 样本 PASS + `verify_tiers.py` 4 组 PASS 在打补丁树上复跑（V8 源与 P0 基线一致，可比性说明见设计文档头部）；证据 `out/XTraceP4D8/validation/{d8-build-p4,verify-d8-p4,verify-tiers-p4}.log`。附带修复：0005 的 verify_libraries_chrome_app input 路径改为 ChromiumX.app（GN 全图在 release 参数下因 stale 路径报错，已随本项修正并入补丁 0005）。
+
 - 在已打补丁的源码树构建 d8 到**独立输出目录**（如 `out/XTraceP4D8`）；GN 参数沿用 P0 的 tracing 组合（`v8_enable_trace_ignition` 等）。**严禁**在 `out/XTraceD8Verify` 原地构建（那是未打补丁的 P0 证据）。
 - 验收：d8 构建成功；P0 的 `verify_d8.py`/`verify_tiers.py` 在新目录复跑通过（环境差异说明）。
 
 ### P4-E1：P4 设计文档（R1 关卡，纯文档）
+
+> [x] 产出 `docs/chromium-p4-design.md`（observer 落点/gate/六字段扩展/code cache 选禁用/tier 拒绝矩阵/采样首版关闭/销毁顺序/测试矩阵，含五决策点推荐）——待架构师 R1 裁决
 
 产出 `docs/chromium-p4-design.md`：observer 机制与 gate 位置；事件字段扩展清单（含与 v2 `causality.call_id` 的承接关系）；code cache 二选一的选定与理由；tier 校验参数形状；采样/限流策略与 `sampled_out` 的关系；销毁顺序与 GC/寄存器不变量论证。逐项给推荐与备选（对应 §5 决策点）。
 
