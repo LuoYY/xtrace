@@ -1,6 +1,6 @@
 # XTrace Trace Schema v3
 
-- 版本：v1.1（P2-E1 产出，架构师 R1 审查通过并并入三处修订——§3.1 单调钟基准表述、§4.2/§4.3 tid 复用下 producer_id 唯一性、§10 args 适配包装规则；实现以本文件为准）。
+- 版本：v1.2（P2-E1 产出，架构师 R1 审查通过；v1.1 并入单调钟基准、producer_id `lseq`、args 适配包装三处修订；v1.2 并入未确认 producer 计数 null 规则、bnet producer_id 格式、带内控制端点说明——实现以本文件为准）。
 - 依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §6（协议/身份/证据模型）、§7（写入/背压/停止）、§6.6（旧缺陷收口）、§13.1（已收敛决策）；语义以草稿为准，本文件不另造契约。
 - 现状基线：v1/v2 语义见 [trace-schema-v1.md](trace-schema-v1.md)、[trace-schema-v2.md](trace-schema-v2.md)。**P2 起，新 capture 一律输出 v3；v1/v2 trace 由导入适配器只读兼容，不做原地升级。单个 capture 不混写多个 schema 版本。**
 
@@ -117,11 +117,13 @@ V8/VMP 热路径（`xtrace:vmp-runtime:` 系）：归属按现状可空——`at
 - 自声明、browser 在注册时核验唯一性（冲突即 capture failed，不静默改名——带 `lseq` 后冲突仅意味实现缺陷）。
 - `lseq` 是 tid 复用的答案：capture 期间操作系统可复用 tid（worker 线程退出后新线程获得同值），进程内序号保证同 tid 的不同 producer 实例仍有唯一 `producer_id`，事件的唯一定位（`capture_id + producer_id + producer_seq`）不受复用影响；browser 不做任何改名或实例推断。
 - `rtw` 线程还需在注册描述符中给出 `worker.kind` 与 `worker.scope_url`（不可得写 unresolved）。
+- `bnet` 同样遵守五段格式：`<pid>.<creation_ticks>` 为 browser 进程真实值，`tid` 为 writer 线程 tid，`lseq` 可用常量 `1`；不得省略段或用 `local` 占位（P2 初版实现曾写 `bnet:<pid>.local:1`，属偏离，终审前修正）。
 
 ### 4.3 注册与注销
 
 - 注册：producer 首个数据消息（batch / 资产 / watermark）携带完整描述符 `{producer_id, process_epoch, worker?}`；browser 按收到消息的 mojo 管道登记进程归属（管道即进程边界凭据）。无独立 Register 消息（零额外往返）。
 - 注销：线程退出或 producer 终结时在**原日志通道**提交 watermark（§8）；未提交即失联，按 §9 异常路径裁决。
+- 控制端点（P2 带内方案，DP2 追认）：renderer 进程的首个 producer 数据管道经 `XTraceHost.ProvideControlEndpoint` 带内传递一次控制端点；browser 按 `process_epoch` 登记，端点断连兼作 renderer 死亡信号。**从未产生数据的 renderer 不进入 producer 集合，停止编排不等待它**——这不是缺口：无管道即无事件可结算。
 
 ## 5. 值与资产
 
@@ -217,7 +219,7 @@ accepted = written + failed          （writer 侧：接受 = 落盘成功 + 落
 
 **complete 的判定（全部成立）**：所有已登记 producer 均有 `watermark.received=true` 且 `confirmed=true`；全部等式成立；`dropped = failed = 0`。任一不满足 → `incomplete`（有可用产物）或 `failed`（无法建立有效产物）。
 
-- 计数未知（producer 失联、browser 崩溃）**不得补零**：未确认 producer 列入 `terminal.unconfirmed_producers`，终态 `incomplete`（§9）。
+- 计数未知（producer 失联、browser 崩溃）**不得补零**：未确认 producer 列入 `terminal.unconfirmed_producers`，终态 `incomplete`（§9）。其 manifest 行内 producer 侧三元组（`eligible/enqueued/dropped`）与 `final_producer_seq` 写 JSON `null`（非字符串 `"0"`，非缺省）；全局 `counts` 中 `eligible/enqueued/dropped` 仅合计**已确认** producer，`accepted/written/failed` 为 writer 全量实测——因此异常路径下全局等式可见缺口，这本身就是失联的证据，不得抹平。
 - `writer_seq` 与计数的关系：`written` 等于 writer 为该 producer 盖章的行数；文件行数 = Σwritten（trace 文件仅含事件行）。
 
 ## 8. 停止协议的产物语义（流程本体见草稿 §7.3 六步）
