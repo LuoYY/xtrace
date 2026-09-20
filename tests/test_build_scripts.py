@@ -115,7 +115,10 @@ class BuildScriptTests(unittest.TestCase):
         self.assertNotIn('"$NINJA_BIN" -C out/XTrace chrome', script)
 
     def test_xtrace_mojo_remote_is_thread_local(self):
-        logger = (
+        # P2/v3: the per-thread pipe lives in the bounded producer; the
+        # logger only builds lines. Evidence: p2-v3-smoke + fault injection
+        # exercise one pipe per producer thread.
+        producer = (
             ROOT
             / "chromium"
             / "src"
@@ -124,14 +127,12 @@ class BuildScriptTests(unittest.TestCase):
             / "renderer"
             / "platform"
             / "xtrace"
-            / "xtrace_logger.cc"
+            / "xtrace_producer.cc"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("thread_local mojo::Remote<mojom::blink::XTraceHost>", logger)
-        self.assertNotIn(
-            "DEFINE_STATIC_LOCAL(mojo::Remote<mojom::blink::XTraceHost>",
-            logger,
-        )
+        self.assertIn("thread_local XTraceThreadProducer producer;", producer)
+        self.assertIn("host_.BindNewPipeAndPassReceiver()", producer)
+        self.assertIn("XTraceProducerHub::RegistryEntry", producer)
 
     def test_xtrace_asset_mojo_and_renderer_switches_are_wired(self):
         mojom = (
@@ -165,17 +166,18 @@ class BuildScriptTests(unittest.TestCase):
             / "xtrace_logger.cc"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("LogAsset(string content_path", mojom)
+        self.assertIn("LogAsset(XTraceAsset asset)", mojom)
         self.assertIn('"xtrace-capture-assets"', client)
         self.assertNotIn('"xtrace-asset-max-bytes"', client)
         self.assertNotIn('"xtrace-max-value-bytes"', client)
         self.assertIn("XTRACE_CAPTURE_ASSETS", logger)
         self.assertIn('std::string capture_assets = "full";', logger)
         self.assertIn('.value_or("full")', logger)
-        self.assertIn("content = source_utf8;", logger)
-        self.assertIn('manifest.append(",\\"source\\":");', logger)
-        self.assertIn('fields.append(",\\"source\\":");', logger)
-        self.assertIn('manifest.append("false");', logger)
+        # V06 closure (P2): asset rows and events never embed the source.
+        self.assertIn('retrieval_status', logger)
+        self.assertIn('ref.captured ? "captured" : "metadata-only"', logger)
+        self.assertIn("asset_refs", logger)
+        self.assertIn('metadata-only', logger)
         self.assertNotIn("kSourcePreviewBytes", logger)
         self.assertNotIn("source_preview", logger)
         self.assertNotIn("std::min(source_utf8.size()", logger)
@@ -196,7 +198,8 @@ class BuildScriptTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('line.append(args);', logger)
-        self.assertIn('line.append(",\\"truncated\\":false");', logger)
+        # P2/v3: truncation is the per-value quadruple, not a per-event boolean.
+        self.assertIn('fields->append(",\\"truncated\\":false");', logger)
         self.assertNotIn("XTRACE_MAX_VALUE_BYTES", logger)
         self.assertNotIn("max_value_bytes", logger)
         self.assertNotIn("kMaxEventBytes", logger)
@@ -237,10 +240,13 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("CreateXTraceBrowserNetworkEventJson", client)
         self.assertIn("CreateXTraceBrowserNetworkResponseEventJson", client)
         self.assertIn("CreateXTraceBrowserNetworkCompleteEventJson", client)
-        self.assertIn("content/browser/xtrace/xtrace_host_impl.h", client)
-        self.assertIn('event.Set("session_seq", seq);', client)
-        self.assertIn("content::XTraceHostImpl::GetTaskRunner()", client)
-        self.assertIn("content::XTraceHostImpl::StampGlobalSequenceForWrite", client)
+        # P2-E3: the private counter/AppendToFile path is gone; events flow
+        # into the capture controller's single writer.
+        self.assertIn("content/browser/xtrace/xtrace_capture_controller.h", client)
+        self.assertIn("controller->AcceptBrowserNetworkEvent", client)
+        self.assertNotIn("g_xtrace_browser_network_sequence", client)
+        self.assertNotIn("AppendToFile", client)
+        self.assertNotIn("XTraceHostImpl", client)
         self.assertIn("response_code", client)
         self.assertIn("mime_type", client)
         self.assertIn("response_headers", client)
@@ -275,8 +281,10 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn('header.Set("value", captured_value);', client)
         self.assertIn('header.Set("name_length", static_cast<int>(name.size()));', client)
         self.assertIn('header.Set("value_truncated", true);', client)
-        self.assertIn('event.Set("truncated", truncated);', client)
-        self.assertIn('event.Set("truncation", std::move(top_level_truncation));', client)
+        # Single truncation form: quadruples on an args element.
+        self.assertIn('truncation_arg.Set("value_truncations"', client)
+        self.assertNotIn('event.Set("truncated", truncated);', client)
+        self.assertNotIn('event.Set("truncation", std::move(top_level_truncation));', client)
         self.assertIn('upload.Set("body_hex"', client)
         self.assertIn('upload.Set("body_sha256", body_hash);', client)
 
@@ -299,40 +307,25 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("base::HexEncode(base::as_byte_span(captured_body))", client)
         self.assertNotIn("preview_sha256", client)
 
-    def test_xtrace_browser_writer_stamps_global_sequence(self):
-        host_header = (
-            ROOT
-            / "chromium"
-            / "src"
-            / "content"
-            / "browser"
-            / "xtrace"
-            / "xtrace_host_impl.h"
+    def test_xtrace_browser_writer_stamps_writer_seq(self):
+        # P2-E3: writer_seq (merge order) + capture_id are stamped by the
+        # single writer in the capture controller; global_seq is retired.
+        controller_header = (
+            ROOT / "chromium" / "src" / "content" / "browser" / "xtrace"
+            / "xtrace_capture_controller.h"
         ).read_text(encoding="utf-8")
-        host_impl = (
-            ROOT
-            / "chromium"
-            / "src"
-            / "content"
-            / "browser"
-            / "xtrace"
-            / "xtrace_host_impl.cc"
+        controller = (
+            ROOT / "chromium" / "src" / "content" / "browser" / "xtrace"
+            / "xtrace_capture_controller.cc"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("StampGlobalSequenceForWrite", host_header)
-        self.assertIn("class CONTENT_EXPORT XTraceHostImpl", host_header)
-        self.assertIn("g_xtrace_file_global_sequence", host_impl)
-        self.assertIn(
-            "std::atomic<uint64_t> g_xtrace_file_global_sequence",
-            host_impl,
-        )
-        self.assertIn(
-            "HasTopLevelJsonKey(event_json, \"global_seq\")",
-            host_impl,
-        )
-        self.assertIn("fetch_add(1, std::memory_order_relaxed)", host_impl)
-        self.assertIn('",\\"global_seq\\":"', host_impl)
-        self.assertIn("StampGlobalSequenceForWrite(event_json)", host_impl)
+        self.assertIn("class CONTENT_EXPORT XTraceCaptureController",
+                      controller_header)
+        self.assertIn("uint64_t next_writer_seq_", controller_header)
+        self.assertIn('StampWriterFields', controller)
+        self.assertIn('capture_id', controller)
+        self.assertIn("TaskShutdownBehavior::BLOCK_SHUTDOWN", controller)
+        self.assertNotIn("global_seq", controller)
 
     def test_xtrace_url_mutation_and_request_constructor_hooks_are_wired(self):
         url_search_params = (
@@ -2873,17 +2866,18 @@ class BuildScriptTests(unittest.TestCase):
         # The renderer switch-forwarding list must carry the causality switch;
         # adjacency pins it to kSwitchNames (not the browser-side constant).
         self.assertIn(
-            '"xtrace-categories",\n        "xtrace-causality",\n        "xtrace-enable",',
+            '"xtrace-categories",\n        "xtrace-causality",\n        // XTRACE_TEST_SCAFFOLDING',
             browser,
         )
-        self.assertIn('"schema_version\\":2"', logger)
+        self.assertIn('"xtrace-test-capacity",\n        "xtrace-enable",', browser)
+        self.assertIn('{\\"schema_version\\":3', logger)
         self.assertIn("thread_local std::vector<XTraceActivation>", logger)
-        self.assertIn("AppendCausalityFields", logger)
+        self.assertIn("AppendCausalityObject", logger)
         self.assertIn("XTraceActivationScope", header)
         self.assertIn("XTraceActivationScope xtrace_activation", runner)
         self.assertIn("xtrace:vmp-runtime:", initializer)
         self.assertIn("LogEventNoStack(\"reverse\"", initializer)
-        self.assertIn("AddXTraceExternalCausality", browser)
+        self.assertIn("AddXTraceV3ExternalCausality", browser)
 
     def test_xtrace_classic_script_evaluate_links_asset_metadata(self):
         v8_script_runner = (
@@ -2926,13 +2920,11 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("LogEventNoStackWithContext", xtrace_logger_header)
         self.assertIn("LogEventWithOptionalAssetAndContext", xtrace_logger_header)
         self.assertIn("LogEventWithOptionalAsset", xtrace_logger)
-        self.assertIn("frame_url_utf8", xtrace_logger)
-        self.assertIn('line.append(",\\"frame_url\\":");', xtrace_logger)
-        self.assertIn('line.append(",\\"origin\\":");', xtrace_logger)
-        self.assertIn("BuildScriptAssetFieldsAndSend", xtrace_logger)
-        self.assertIn("IsInternalScriptUrl(url)", xtrace_logger)
-        self.assertIn("LogEventWithSequence", xtrace_logger)
-        self.assertIn('line.append(",\\"session_seq\\":");', xtrace_logger)
+        self.assertIn("IsInternalScriptUrl(*asset_url)", xtrace_logger)
+        self.assertIn("PrepareScriptAssetRef", xtrace_logger)
+        self.assertIn("SendScriptAssetRow", xtrace_logger)
+        self.assertIn("AppendAssetRefFields", xtrace_logger)
+        self.assertIn("EmitEvent", xtrace_logger)
         self.assertIn("XTraceClassicScriptAssetKind", v8_script_runner)
         self.assertIn("classic_script->SourceText().ToString()", v8_script_runner)
         self.assertIn("XTraceLogger::LogEventWithOptionalAssetAndContext", v8_script_runner)

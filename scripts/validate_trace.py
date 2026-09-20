@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Iterable
@@ -1924,6 +1925,270 @@ def validate_schema_v1_event(event: dict, index: int) -> None:
                 raise TraceValidationError(f"Event {index} truncation metadata missing {field}")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Schema v3 (docs/trace-schema-v3.md v1.1): presence + filled-contract
+# assertions, file-order checks, manifest count-conservation equations and
+# terminal-state consistency. §12 of the spec is the authoritative list.
+# ---------------------------------------------------------------------------
+
+V3_REQUIRED_FIELDS = (
+    "schema_version",
+    "capture_id",
+    "producer_id",
+    "process_epoch",
+    "producer_seq",
+    "writer_seq",
+    "config_generation",
+    "mono_time_us",
+    "wall_time_us",
+    "pid",
+    "tid",
+    "category",
+    "phase",
+    "api",
+    "args",
+    "stack",
+    "attribution",
+    "causality",
+)
+
+V3_DECIMAL_STRING_FIELDS = (
+    "producer_seq",
+    "writer_seq",
+    "mono_time_us",
+    "wall_time_us",
+)
+
+V3_CAUSALITY_KINDS = ("paired", "singleton", "external")
+
+
+def _decimal_string(value: object, field: str, index: int) -> int:
+    if not isinstance(value, str) or not value.isdigit():
+        raise TraceValidationError(
+            f"Event {index}: field {field} must be a decimal string, got {value!r}"
+        )
+    return int(value)
+
+
+def validate_schema_v3_event(event: dict, index: int) -> None:
+    if event.get("schema_version") != 3:
+        raise TraceValidationError(
+            f"Event {index} has schema_version={event.get('schema_version')!r}, expected 3"
+        )
+    missing = [f for f in V3_REQUIRED_FIELDS if f not in event]
+    if missing:
+        raise TraceValidationError(
+            f"Event {index} missing schema v3 fields: {', '.join(missing)}"
+        )
+    for field in V3_DECIMAL_STRING_FIELDS:
+        _decimal_string(event.get(field), field, index)
+    # §6.6 closure: the removed v1/v2 shapes must not reappear.
+    for legacy in ("event_id", "session_id", "seq", "session_seq", "t", "ts",
+                   "result", "error", "frame_url", "origin", "truncated",
+                   "truncation"):
+        if legacy in event:
+            raise TraceValidationError(
+                f"Event {index} carries removed legacy field {legacy!r}"
+            )
+    attribution = event["attribution"]
+    if not isinstance(attribution, dict) or attribution.get("status") not in (
+            "resolved", "unresolved"):
+        raise TraceValidationError(
+            f"Event {index}: attribution.status must be resolved|unresolved"
+        )
+    if attribution["status"] == "unresolved" and set(attribution) - {"status"}:
+        raise TraceValidationError(
+            f"Event {index}: unresolved attribution must carry no identity"
+        )
+    causality = event["causality"]
+    if not isinstance(causality, dict) or causality.get("kind") not in V3_CAUSALITY_KINDS:
+        raise TraceValidationError(
+            f"Event {index}: causality.kind must be one of {V3_CAUSALITY_KINDS}"
+        )
+    if causality["kind"] != "external":
+        if not isinstance(causality.get("call_id"), str) or not causality["call_id"]:
+            raise TraceValidationError(
+                f"Event {index}: renderer events need a non-empty causality.call_id"
+            )
+    duration = causality.get("duration_us")
+    if causality["kind"] != "paired" and duration is not None:
+        raise TraceValidationError(
+            f"Event {index}: duration_us only on paired terminal events"
+        )
+    if duration is not None and (not isinstance(duration, str) or not duration.isdigit()):
+        raise TraceValidationError(
+            f"Event {index}: causality.duration_us must be a decimal string"
+        )
+    if not isinstance(event["args"], list) or not isinstance(event["stack"], list):
+        raise TraceValidationError(f"Event {index}: args/stack must be arrays")
+    for ref in event.get("asset_refs") or ():
+        for quad in ("asset_id", "sha1", "original_size", "saved_size", "truncated"):
+            if quad not in ref:
+                raise TraceValidationError(
+                    f"Event {index}: asset_ref missing {quad}"
+                )
+        truncated = ref["truncated"]
+        if not isinstance(truncated, bool):
+            raise TraceValidationError(
+                f"Event {index}: asset_ref.truncated must be boolean"
+            )
+        if truncated != (int(ref["saved_size"]) < int(ref["original_size"])):
+            raise TraceValidationError(
+                f"Event {index}: asset_ref truncation quadruple inconsistent"
+            )
+
+
+def validate_v3_file_order(events: list[dict]) -> None:
+    last_writer_seq = 0
+    for index, event in enumerate(events, start=1):
+        writer_seq = int(event["writer_seq"])
+        if writer_seq <= last_writer_seq:
+            raise TraceValidationError(
+                f"Event {index}: writer_seq {writer_seq} not strictly increasing"
+            )
+        last_writer_seq = writer_seq
+
+
+def validate_v3_producer_sequences(
+        events: list[dict], overflow_policy: str) -> dict:
+    per_producer: dict[str, list[int]] = {}
+    for index, event in enumerate(events, start=1):
+        producer = event["producer_id"]
+        seq = int(event["producer_seq"])
+        seqs = per_producer.setdefault(producer, [])
+        if seqs and seq <= seqs[-1]:
+            raise TraceValidationError(
+                f"Event {index}: producer_seq {seq} for {producer} duplicates or regresses"
+            )
+        seqs.append(seq)
+    # DP3 ruling: drop-newest allows tail-only gaps; any middle gap is a
+    # counting defect (would require drop-oldest + overflow_intervals).
+    for producer, seqs in per_producer.items():
+        seqs_sorted = sorted(seqs)
+        expected_prefix = list(range(seqs_sorted[0], seqs_sorted[0] + len(seqs)))
+        if seqs_sorted != expected_prefix:
+            raise TraceValidationError(
+                f"Producer {producer}: non-contiguous seq set (middle gap) "
+                "under drop-newest policy"
+            )
+    return per_producer
+
+
+def load_v3_manifest(trace_path) -> dict:
+    manifest_path = Path(trace_path).with_suffix("").suffix  # placeholder
+    candidate = Path(str(trace_path)[: -len(".ndjson")] + ".manifest.json") \
+        if str(trace_path).endswith(".ndjson") \
+        else Path(str(trace_path) + ".manifest.json")
+    if not candidate.exists():
+        raise TraceValidationError(f"Missing capture manifest: {candidate}")
+    return json.loads(candidate.read_text(encoding="utf-8"))
+
+
+def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
+    if manifest.get("schema_version") != 3 or manifest.get("manifest_version") != 3:
+        raise TraceValidationError("manifest schema/manifest_version must be 3")
+    terminal = manifest.get("terminal") or {}
+    state = terminal.get("state")
+    if state not in ("complete", "incomplete", "failed"):
+        raise TraceValidationError(f"manifest terminal.state invalid: {state!r}")
+    producers = manifest.get("producers") or []
+    observed_ids = set(per_producer)
+    manifest_ids = {p.get("producer_id") for p in producers}
+    if observed_ids - manifest_ids:
+        raise TraceValidationError(
+            f"trace has producers absent from manifest: {sorted(observed_ids - manifest_ids)}"
+        )
+    unconfirmed = []
+    for producer in producers:
+        pid = producer["producer_id"]
+        received = (producer.get("watermark") or {}).get("received") is True
+        if not received:
+            unconfirmed.append(pid)
+            continue
+        eligible, enqueued = int(producer["eligible"]), int(producer["enqueued"])
+        dropped, accepted = int(producer["dropped"]), int(producer["accepted"])
+        written, failed = int(producer["written"]), int(producer["failed"])
+        assets_out = int(producer.get("assets_out", "0"))
+        assets_written = int(producer.get("assets_written", "0"))
+        assets_failed = int(producer.get("assets_failed", "0"))
+        if eligible != enqueued + dropped:
+            raise TraceValidationError(
+                f"{pid}: eligible {eligible} != enqueued {enqueued} + dropped {dropped}"
+            )
+        if enqueued != accepted:
+            raise TraceValidationError(
+                f"{pid}: enqueued {enqueued} != accepted {accepted}"
+            )
+        if accepted != written + failed:
+            raise TraceValidationError(
+                f"{pid}: accepted {accepted} != written {written} + failed {failed}"
+            )
+        if assets_out != assets_written + assets_failed:
+            raise TraceValidationError(
+                f"{pid}: assets_out {assets_out} != written {assets_written} + failed {assets_failed}"
+            )
+        seqs = per_producer.get(pid, [])
+        final_seq = int(producer["final_producer_seq"])
+        if seqs and seqs[-1] > final_seq:
+            raise TraceValidationError(
+                f"{pid}: observed seq {seqs[-1]} beyond watermark final {final_seq}"
+            )
+    if state == "complete":
+        if unconfirmed:
+            raise TraceValidationError(
+                f"complete with unconfirmed producers: {unconfirmed}"
+            )
+        counts = manifest.get("counts") or {}
+        if any(int(counts.get(k, "0")) != 0 for k in ("dropped", "failed")):
+            raise TraceValidationError(
+                "complete with dropped/failed nonzero"
+            )
+        if terminal.get("reason") is not None:
+            raise TraceValidationError("complete must carry reason null")
+    listed = terminal.get("unconfirmed_producers") or []
+    if sorted(listed) != sorted(unconfirmed):
+        raise TraceValidationError(
+            "manifest unconfirmed_producers mismatch"
+        )
+
+
+def validate_v3_assets(trace_path) -> int:
+    asset_dir = Path(trace_path).parent / "assets" / Path(trace_path).stem
+    manifest_path = asset_dir / "manifest.ndjson"
+    if not manifest_path.exists():
+        return 0
+    rows = 0
+    for line in manifest_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows += 1
+        row = json.loads(line)
+        if row.get("schema_version") != 3:
+            raise TraceValidationError(f"asset row {rows}: schema_version must be 3")
+        if "source" in row:
+            raise TraceValidationError(
+                f"asset row {rows}: embedded source (V06 regression)"
+            )
+        status = row.get("retrieval_status")
+        if status not in ("captured", "metadata-only"):
+            raise TraceValidationError(f"asset row {rows}: bad retrieval_status")
+        if status == "captured":
+            content = (Path(trace_path).parent / row["content_path"]).read_bytes()
+            if len(content) != int(row["original_size"]):
+                raise TraceValidationError(f"asset row {rows}: size mismatch")
+            digest = hashlib.sha1(content).hexdigest().upper()
+            if row["sha1"] != f"sha1:{digest}":
+                raise TraceValidationError(f"asset row {rows}: sha1 mismatch")
+        else:
+            if "content_path" in row:
+                raise TraceValidationError(
+                    f"asset row {rows}: metadata-only row must not carry content_path"
+                )
+    return rows
+
+
 def validate_schema_v2_event(event: dict, index: int) -> None:
     """Validate the per-record portion of the schema v2 causal contract."""
     if event.get("schema_version") != 2:
@@ -3277,14 +3542,24 @@ def validate_trace(
 ) -> None:
     events = load_events(path)
     if schema_version is not None:
-        if schema_version not in (1, 2):
+        if schema_version not in (1, 2, 3):
             raise TraceValidationError(f"Unsupported schema version: {schema_version}")
         for index, event in enumerate(events, start=1):
             if schema_version == 1:
                 validate_schema_v1_event(event, index)
-            else:
+            elif schema_version == 2:
                 validate_schema_v2_event(event, index)
-        validate_global_sequence(events)
+            else:
+                validate_schema_v3_event(event, index)
+        if schema_version == 3:
+            validate_v3_file_order(events)
+            manifest = load_v3_manifest(path)
+            per_producer = validate_v3_producer_sequences(
+                events, "drop-newest")
+            validate_v3_manifest(manifest, per_producer)
+            validate_v3_assets(path)
+        else:
+            validate_global_sequence(events)
         if schema_version == 2:
             validate_causality(events)
 
@@ -3393,7 +3668,7 @@ def validate_trace(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=sorted(PROFILE_EXPECTED_APIS), default=None)
-    parser.add_argument("--schema-version", type=int, choices=[1, 2], default=None)
+    parser.add_argument("--schema-version", type=int, choices=[1, 2, 3], default=None)
     parser.add_argument("trace", type=Path)
     parser.add_argument("--expect", action="append", default=[])
     parser.add_argument("--require-stack-for", action="append", default=[])
