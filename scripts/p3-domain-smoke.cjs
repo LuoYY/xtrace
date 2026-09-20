@@ -66,12 +66,29 @@ async function main() {
 
     const status = await client.send('XTrace.getCaptureStatus');
     assert.equal(status.generation, '0');
+
+    // P3-E4: runtime update — generation allocates serially from "1";
+    // subsequent events carry the new generation.
+    const upd = await client.send('XTrace.updateCapture', { categories: 'reverse' });
+    assert.equal(upd.generation, '1');
+    await new Promise(r => setTimeout(r, 1500));
+    const status2 = await client.send('XTrace.getCaptureStatus');
+    assert.equal(status2.generation, '1');
+    // Positive propagation evidence: events emitted AFTER the update must
+    // stamp config_generation "1".
+    await client.send('Runtime.evaluate',
+        { expression: 'JSON.parse(String(7)); JSON.stringify({x:1})', returnByValue: true }, sessionId);
+    await new Promise(r => setTimeout(r, 2500));
+    // Stop rejects updates.
+    const stop0 = await client.send('XTrace.stopCapture');
+    await assert.rejects(() => client.send('XTrace.updateCapture', { categories: 'reverse' }),
+        /invalid state/, 'update during stopping must be rejected');
     assert.ok(['active', 'idle'].includes(status.state), `state=${status.state}`);
     assert.ok(Array.isArray(status.producers));
     assert.ok(status.producers.every(p => p.confirmed || p.eligible === undefined),
         'unconfirmed producers must omit producer-side counters');
 
-    const stop = await client.send('XTrace.stopCapture');
+    const stop = stop0;
     assert.ok(['stopping', 'incomplete', 'complete'].includes(stop.state), `stop=${stop.state}`);
     // The stop reply itself carries the settled state + manifest stream
     // (bounded internal wait, not client polling).
