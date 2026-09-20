@@ -2186,6 +2186,29 @@ def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
         )
 
 
+def validate_v3_identity(manifest: dict) -> None:
+    identity = manifest.get("identity")
+    if identity is None:
+        return
+    if not isinstance(identity, list):
+        raise TraceValidationError("manifest.identity must be an array")
+    for i, row in enumerate(identity):
+        if row.get("status") not in ("resolved", "unresolved"):
+            raise TraceValidationError(f"identity[{i}]: bad status")
+        if row.get("status") == "resolved":
+            for field in ("frame_tree_node_id", "document_token", "frame_url"):
+                if not isinstance(row.get(field), str) or not row[field]:
+                    raise TraceValidationError(
+                        f"identity[{i}]: resolved row missing {field}"
+                    )
+        else:
+            for field in ("frame_tree_node_id", "document_token", "frame_url"):
+                if row.get(field) is not None:
+                    raise TraceValidationError(
+                        f"identity[{i}]: unresolved row must carry null {field}"
+                    )
+
+
 def validate_v3_assets(trace_path) -> int:
     asset_dir = Path(trace_path).parent / "assets" / Path(trace_path).stem
     manifest_path = asset_dir / "manifest.ndjson"
@@ -3589,6 +3612,7 @@ def validate_trace(
             per_producer = validate_v3_producer_sequences(
                 events, "drop-newest")
             validate_v3_manifest(manifest, per_producer)
+            validate_v3_identity(manifest)
             validate_v3_assets(path)
         else:
             validate_global_sequence(events)
