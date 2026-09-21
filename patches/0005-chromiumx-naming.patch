@@ -7,7 +7,9 @@ org.chromium.Chromium, UA/UA-CH brands) is untouched.
 
 - build/config/mac/rules.gni: mac_app_bundle gains an optional bundle_name
   (bundle directory only; executable keeps output_name).
-- chrome/BUILD.gn: chrome_app sets bundle_name = "ChromiumX".
+- chrome/BUILD.gn: chrome_app sets bundle_name = "ChromiumX"; the release
+  verify_libraries_chrome_app action input follows the ChromiumX.app path
+  (surfaces only in non-component full graphs; found by P4-E0).
 - chrome/app/app-Info.plist: CFBundleDisplayName = ChromiumX.
 diff --git a/build/config/mac/rules.gni b/build/config/mac/rules.gni
 index 52478f4086..faa91a5895 100644
@@ -37,7 +39,7 @@ index 52478f4086..faa91a5895 100644
      bundle_resources_dir = "$bundle_contents_dir/Resources"
      bundle_executable_dir = "$bundle_contents_dir/MacOS"
 diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
-index 973a46b2a3..6674d4d4fe 100644
+index 973a46b2a3..76017f4939 100644
 --- a/chrome/BUILD.gn
 +++ b/chrome/BUILD.gn
 @@ -519,6 +519,12 @@ if (is_win) {
@@ -53,6 +55,17 @@ index 973a46b2a3..6674d4d4fe 100644
      info_plist_target = ":chrome_app_plist"
      extra_substitutions = [
        "CHROMIUM_BUNDLE_ID=$chrome_mac_bundle_id",
+@@ -573,7 +579,9 @@ if (is_win) {
+   if (verify_dynamic_libraries) {
+     action("verify_libraries_chrome_app") {
+       script = "//chrome/tools/build/mac/verify_dynamic_libraries.py"
+-      inputs = [ "${root_out_dir}/${chrome_product_full_name}.app/Contents/MacOS/${chrome_product_full_name}" ]
++      # XTRACE P3-E9: the bundle directory is ChromiumX.app while the
++      # executable keeps chrome_product_full_name (Chromium).
++      inputs = [ "${root_out_dir}/ChromiumX.app/Contents/MacOS/${chrome_product_full_name}" ]
+       outputs = [ "$target_out_dir/run_$target_name.stamp" ]
+       args = [
+         "--stamp",
 diff --git a/chrome/app/app-Info.plist b/chrome/app/app-Info.plist
 index 6fada0a2b1..62db2e77ac 100644
 --- a/chrome/app/app-Info.plist

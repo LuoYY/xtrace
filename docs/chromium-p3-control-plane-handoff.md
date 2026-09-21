@@ -206,8 +206,8 @@
 
 ### 10.5 执行层阻塞与小项闭环记录（2026-09-20）
 
-- **阻塞 1（10.2）已修**：0001 再生为含 `BrowserTaskEnvironment + RunUntilIdle` 单测的版本；干净 HEAD 顺序重放 == 工作树（tree `47e50d8b…`），且**逐文件 blob 比对**（全部 117 个补丁文件 vs 工作树）0 不符；`p3E8Supplement` 摘要与磁盘一致。
-- 小项 1：4 个驱动脚本（tracked 与 out 副本）的惰性 `--xtrace-stop-after-ms` 参数已清理——C++ 内与本仓库脚本现均无引用。
+- **阻塞 1（10.2）已修**：0001 再生为含 `BrowserTaskEnvironment + RunUntilIdle` 单测的版本；干净 HEAD 顺序重放 == 工作树，**逐文件 blob 比对** 0 不符。**P4-R1 核验又发现 0005 漂移**（E0 顺带修的 verify_libraries 路径未入补丁）——已重生成 0005 并重验：重放树 `83568346…`、逐文件比对 117 文件 0 不符（2026-09-21）。
+- 小项 1：驱动脚本的惰性 `--xtrace-stop-after-ms` 参数已清理（首轮 4 处；P4-R1 核验又发现 fault 驱动 disk 场景残留一处 + closeEvidence 旧文案两处，均已再清）——C++ 内与仓库脚本现均无引用（仅剩描述性注释）。
 - 小项 2：manifest `build` 块已恢复（`product` 取 version_info、`is_debug`/`component_build` 编译期判定；冒烟实测 `151.0.7917.0/true/true`）。
 - 小项 3：`p3-pipe-reconnect.cjs` 悬空 `after` 已改为 `fs.statSync(trace).size`。
 - 小项 4：旧 `out/XTraceIntegration/Chromium.app` 已删除（out 目录现存 app 仅 ChromiumX 及 Helpers）。

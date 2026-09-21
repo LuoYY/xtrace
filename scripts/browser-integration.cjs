@@ -238,7 +238,7 @@ async function runCase(test, origin) {
     const captureManifest = JSON.parse(fs.readFileSync(captureManifestPath, 'utf8'));
     assert(['complete', 'incomplete'].includes(captureManifest.terminal.state),
         `unexpected terminal state ${captureManifest.terminal.state}`);
-    if (!fs.existsSync(manifest)) return { name: test.name, status: 'pass', exit, traceRecords: records.length, traceBytes, wallClockMs, peakRSSKB, assets: 0, schema: 3, terminal: captureManifest.terminal.state, closeEvidence: 'stop settled via --xtrace-stop-after-ms scaffolding' };
+    if (!fs.existsSync(manifest)) return { name: test.name, status: 'pass', exit, traceRecords: records.length, traceBytes, wallClockMs, peakRSSKB, assets: 0, schema: 3, terminal: captureManifest.terminal.state, closeEvidence: 'domain stopCapture settle (P3); watermark protocol live since P2' };
     const assets = fs.readFileSync(manifest, 'utf8').trim().split('\n').map(line => JSON.parse(line));
     assert(assets.length >= 0);
     for (const asset of assets) {
@@ -253,7 +253,7 @@ async function runCase(test, origin) {
       assert.equal('sha1:' + createHash('sha1').update(content).digest('hex').toUpperCase(), asset.sha1);
       assert.equal(asset.truncated, false);
     }
-    return { name: test.name, status: 'pass', exit, traceRecords: records.length, traceBytes, wallClockMs, peakRSSKB, assets: assets.length, schema: Number(schema), closeEvidence: 'graceful process exit; no capture watermark protocol exists' };
+    return { name: test.name, status: 'pass', exit, traceRecords: records.length, traceBytes, wallClockMs, peakRSSKB, assets: assets.length, schema: Number(schema), closeEvidence: 'domain stopCapture settle (P3); watermark protocol live since P2' };
   } finally {
     clearInterval(sampler);
     fs.writeFileSync(path.join(caseDir, 'cdp-events.json'), JSON.stringify(events, null, 2));

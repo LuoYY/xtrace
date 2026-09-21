@@ -141,7 +141,7 @@ async function main() {
     await new Promise(r => child.once('exit', r));
     const args2 = ['--headless=new', '--remote-debugging-pipe', '--no-first-run',
       '--xtrace-enable', `--xtrace-file=${readOnly}/trace.ndjson`,
-      '--xtrace-categories=reverse', '--xtrace-stop-after-ms=5000',
+      '--xtrace-categories=reverse',
       `--user-data-dir=${path.join(dir, 'profile2')}`, 'about:blank'];
     const env = process.env;
     const stderr = fs.openSync(path.join(dir, 'stderr2.log'), 'w');
