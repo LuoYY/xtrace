@@ -2872,7 +2872,7 @@ class BuildScriptTests(unittest.TestCase):
         # The renderer switch-forwarding list must carry the causality switch;
         # adjacency pins it to kSwitchNames (not the browser-side constant).
         self.assertIn(
-            '"xtrace-categories",\n        "xtrace-causality",\n        // XTRACE_TEST_SCAFFOLDING',
+            '"xtrace-causality",\n        "xtrace-ignition-observer",',
             browser,
         )
         self.assertIn('"xtrace-test-buffer-capacity",\n        "xtrace-enable",', browser)

@@ -38,6 +38,10 @@ use_reclient=false
 proprietary_codecs=true
 ffmpeg_branding="Chrome"
 rtc_use_h264=true
+
+# XTRACE P4-E2 (architect condition A.1): observer call sites compiled in;
+# upstream per-bytecode tracing stays OFF (observer has its own gate).
+v8_enable_xtrace_ignition_observer=true
 '
 
 echo "Generated Chromium build files at $SRC/out/XTrace"
