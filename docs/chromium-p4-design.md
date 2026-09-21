@@ -62,7 +62,7 @@
 | `mode=jitless-experiment` | P4 首版不开放（声明边界，P7 再议） |
 
 - **生效回报**：`startCapture`/`getCaptureStatus` 回报 `effective_config`（mode + 实际 js flags + code cache 状态）；tier 真实性以事件流中的 `tier: "ignition"` 与（对照时）active-tier intrinsic 证据为准，不只看参数字符串。
-- Host 侧静态检查（���一层）：launcher/Host 在构造参数时先做同样的矩阵检查，减少无效 IPC；browser 拒绝是权威。
+- Host 侧静态检查（第一层）：launcher/Host 在构造参数时先做同样的矩阵检查，减少无效 IPC；browser 拒绝是权威。
 
 ## 5. 采样/限流（决策点 5）
 
