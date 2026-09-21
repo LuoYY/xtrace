@@ -62,3 +62,7 @@ P3 待您执行冻结动作（`accepted-p3` + 草稿 §12 P3 行）；P4-E2 起�
 2. **`scripts/p2-fault-injection.cjs:144` 仍传已失效的 `--xtrace-stop-after-ms=5000`**（§10.5 称"本仓库脚本现均无引用"，不成立）；`browser-integration.cjs:241` 的 closeEvidence 字符串也仍是旧文案。清理或修正登记表措辞。
 
 B 两项完成后回报，我执行 P3 冻结（`accepted-p3` + 草稿 §12 P3 行 + P4 入口全开）。两项不阻塞 P4-E2 启动（纯账务，与技术方案无关），但 P3 冻结不因此而豁免。
+
+### C. 2026-09-21 最终复核补充
+
+B 两项的补丁账务已闭环，但 P4 最终实现与原裁决仍有实质差距，终审不通过；下一任务是整改块 P4-F0～F6，不是 P5，详见 [P4 交接 §10](chromium-p4-ignition-observer-handoff.md)。新增 `causality=sync` 前置作为激活引用的依赖予以接受，须按真实生效配置统一拒绝与披露；不豁免真实 tier、范围/生命周期、缓存禁用、逐事件覆盖及匹配性能基线。A.3 的 warm 判据进一步明确：版本增长须辅以真实浏览器缓存消费/禁用证据，不能以 d8 new Function 或新地址代替 warm profile。
