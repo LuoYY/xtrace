@@ -142,10 +142,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..e738891214
+index 0000000000..2ecc8bd402
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,473 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -163,6 +163,8 @@ index 0000000000..e738891214
 +#include "base/logging.h"
 +#include "base/functional/bind.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
 +#include "base/threading/thread_restrictions.h"
 +#include "content/browser/devtools/devtools_io_context.h"
 +#include "content/browser/devtools/devtools_stream_file.h"
@@ -208,6 +210,108 @@ index 0000000000..e738891214
 +
 +}  // namespace
 +
++// F3 (review B2, handoff §10.8-D): the ONE verified environment model —
++// capabilities, startCapture's authority check and the effectiveConfig
++// disclosure all read this; nobody re-derives truth from flag names.
++struct PreciseEnvironment {
++  bool observer_compiled = false;
++  bool observer_switch = false;
++  bool causality_sync = false;
++  bool ignition_locked = false;  // --js-flags actually locks Ignition-only
++  std::string js_flags;          // the raw --js-flags value, disclosed
++  std::string tier_lock;         // "ignition-locked" | "tiering-possible"
++  std::string unavailable_reason;
++
++  bool available() const {
++    return observer_compiled && observer_switch && causality_sync &&
++           ignition_locked;
++  }
++  std::string RequiresList() const {
++    return "v8-observer-compiled;--xtrace-ignition-observer;"
++           "--xtrace-causality=sync;--js-flags=--max-opt=0 (no tier-"
++           "enabling flags)";
++  }
++};
++
++// Parses --js-flags the way V8 applies it: whitespace/comma tokens,
++// --flag=value and "--flag value" forms, later tokens override earlier
++// ones, --no-X negates. Top-level browser switches (which forward to V8)
++// are folded in.
++PreciseEnvironment GetPreciseEnvironment() {
++  PreciseEnvironment env;
++  env.observer_compiled =
++      v8::internal::xtrace::IgnitionObserverIsCompiled();  // return value
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  env.observer_switch = cmd->HasSwitch("xtrace-ignition-observer");
++  env.causality_sync =
++      cmd->GetSwitchValueASCII("xtrace-causality") == "sync";
++  env.js_flags = cmd->GetSwitchValueASCII("js-flags");
++
++  bool max_opt_zero = false;
++  bool sparkplug = cmd->HasSwitch("sparkplug") ||
++                   cmd->HasSwitch("always-sparkplug");
++  bool maglev = false;
++  bool turbofan = false;
++  bool jitless = false;
++  bool have_max_opt = false;
++  const std::vector<std::string> tokens = base::SplitString(
++      env.js_flags, " \t,", base::TRIM_WHITESPACE,
++      base::SPLIT_WANT_NONEMPTY);
++  auto apply = [&](const std::string& name, const std::string& value,
++                   bool has_value) {
++    const bool off = base::StartsWith(name, "no-");
++    const std::string flag =
++        off ? name.substr(3) : (base::StartsWith(name, "no") ? name.substr(2)
++                                                             : name);
++    if (flag == "sparkplug" || flag == "always-sparkplug") {
++      sparkplug = !off;
++    } else if (flag == "maglev") {
++      maglev = !off;
++    } else if (flag == "turbofan" || flag == "always-turbofan") {
++      turbofan = !off;
++    } else if (flag == "jitless") {
++      jitless = !off;
++    } else if (flag == "max-opt" && has_value) {
++      have_max_opt = true;
++      max_opt_zero = !off ? (value == "0") : false;
++    }
++  };
++  for (size_t i = 0; i < tokens.size(); ++i) {
++    const std::string& token = tokens[i];
++    if (!base::StartsWith(token, "--")) {
++      continue;
++    }
++    const std::string body = token.substr(2);
++    const size_t eq = body.find('=');
++    if (eq != std::string::npos) {
++      apply(body.substr(0, eq), body.substr(eq + 1), true);
++    } else if (body == "max-opt" && i + 1 < tokens.size() &&
++               base::IsAsciiDigit(tokens[i + 1][0])) {
++      apply(body, tokens[++i], true);  // "--flag value" form
++    } else {
++      apply(body, std::string(), false);
++    }
++  }
++  env.ignition_locked =
++      have_max_opt && max_opt_zero && !sparkplug && !maglev && !turbofan &&
++      !jitless;
++  env.tier_lock = env.ignition_locked ? "ignition-locked"
++                                      : "tiering-possible";
++  if (!env.observer_compiled) {
++    env.unavailable_reason = "v8 observer not compiled into this build";
++  } else if (!env.observer_switch) {
++    env.unavailable_reason =
++        "launch flag --xtrace-ignition-observer required";
++  } else if (!env.causality_sync) {
++    env.unavailable_reason = "launch flag --xtrace-causality=sync required";
++  } else if (!env.ignition_locked) {
++    env.unavailable_reason =
++        "--js-flags must lock Ignition (--max-opt=0) without tier-enabling "
++        "flags (sparkplug/maglev/turbofan/jitless)";
++  }
++  return env;
++}
++
 +XTraceHandler::XTraceHandler(DevToolsIOContext* io_context)
 +    : DevToolsDomainHandler("XTrace"), io_context_(io_context) {}
 +
@@ -229,29 +333,30 @@ index 0000000000..e738891214
 +    limits->Set("producerBufferEvents", base::Value("4096"));
 +    limits->Set("overflowPolicy", base::Value("drop-newest"));
 +  }
-+  // P4-E5 (A.3): the precise mode exists only in environments launched
-+  // for it — Hosts learn this from the browser, not from docs.
-+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+  const bool observer_switch = cmd->HasSwitch("xtrace-ignition-observer");
-+  const bool tier_conflict = cmd->HasSwitch("sparkplug") ||
-+                             cmd->HasSwitch("always-sparkplug");
-+  // Observer compiled: the boundary function's return value is the
-+  // compile macro's truth (F2; link-presence proved nothing).
-+  const bool observer_compiled =
-+      v8::internal::xtrace::IgnitionObserverIsCompiled();
++  // F3 (review B2): capabilities disclose the VERIFIED environment — the
++  // same PreciseEnvironment the startCapture authority check uses.
++  const PreciseEnvironment precise = GetPreciseEnvironment();
 +  limits->Set("ignitionObserverCompiled",
-+              base::Value(observer_compiled ? "true" : "false"));
++              base::Value(precise.observer_compiled ? "true" : "false"));
 +  limits->Set("ignitionObserverSwitch", base::Value(
-+      observer_switch ? "true" : "false"));
++      precise.observer_switch ? "true" : "false"));
 +  limits->Set("preciseModeAvailable", base::Value(
-+      (observer_compiled && observer_switch && !tier_conflict)
-+          ? "true" : "false"));
++      precise.available() ? "true" : "false"));
++  if (!precise.available() && !precise.unavailable_reason.empty()) {
++    limits->Set("preciseModeUnavailableReason",
++                base::Value(precise.unavailable_reason));
++  }
++  // Real code-cache policy (F3/B3): the dedicated observer environment
++  // disables the fetch-code-cache lookup AND the V8 compile-time
++  // consume/produce path in the renderer; ordinary environments keep the
++  // default behavior.
 +  limits->Set("codeCachePolicy", base::Value(
-+      "precise-mode-disables-and-discloses"));
-+  // Precise mode is only meaningful in a launch environment that carries
-+  // sync causality; Hosts learn the requirement from the browser (A.3).
-+  limits->Set("preciseModeRequires",
-+              base::Value(std::string("xtrace-causality=sync")));
++      precise.observer_switch
++          ? "disabled-in-observer-environment"
++          : "default"));
++  limits->Set("jsFlags", base::Value(precise.js_flags));
++  limits->Set("tierLock", base::Value(precise.tier_lock));
++  limits->Set("preciseModeRequires", base::Value(precise.RequiresList()));
 +  protocol::Array<String> modes;
 +  modes.emplace_back("reverse");
 +  modes.emplace_back("fingerprint");
@@ -318,45 +423,33 @@ index 0000000000..e738891214
 +    return;
 +  }
 +  if (mode == "ignition-precise") {
-+    // The observer's activation scoping and its activation_ref field both
-+    // ride on the sync-causality activation stack (design §2): with
-+    // causality=off no activation exists, so nothing would be observed.
-+    // Require it at launch and say so machine-readably.
-+    const std::string causality =
-+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
-+            "xtrace-causality");
-+    if (causality != "sync") {
++    // F3 (review B2): the browser is the authority — reject against the
++    // VERIFIED launch environment, never echo the request as effective.
++    const PreciseEnvironment precise = GetPreciseEnvironment();
++    if (!precise.available()) {
 +      callback->sendFailure(Response::InvalidRequest(
-+          "ignition-precise requires launch-time --xtrace-causality=sync "
-+          "(observer scoping and activation_ref ride the sync activation "
-+          "stack)"));
++          "ignition-precise unavailable: " + precise.unavailable_reason));
 +      return;
 +    }
-+    // V14: explicit tier flags override max_opt's weak implications —
-+    // reject precise mode on a browser launched with them.
-+    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+    for (const char* conflict :
-+         {"sparkplug", "always-sparkplug"}) {
-+      if (cmd->HasSwitch(conflict)) {
-+        callback->sendFailure(Response::InvalidRequest(
-+            std::string("ignition-precise conflicts with launch flag ") +
-+            conflict));
-+        return;
-+      }
-+    }
 +  }
-+  // Effective config: what actually governs execution — launch flags and
-+  // the observer switch (tier truth comes from events, not names).
++  // Effective config: VERIFIED facts from the same environment model —
++  // what actually governs execution, not a mirror of the request text.
++  const PreciseEnvironment precise_env = GetPreciseEnvironment();
 +  auto effective = std::make_unique<protocol::DictionaryValue>();
 +  effective->Set("mode", base::Value(mode));
 +  effective->Set("observerRequested",
-+                 base::Value(controller->DomainObserverRequested()
++                 base::Value(precise_env.observer_switch
 +                                 ? std::string("true")
 +                                 : std::string("false")));
-+  effective->Set("codeCache",
-+                 base::Value(mode == "ignition-precise"
-+                                 ? std::string("disabled-and-disclosed")
-+                                 : std::string("default")));
++  effective->Set("codeCache", base::Value(
++      precise_env.observer_switch
++          ? std::string("disabled-in-observer-environment")
++          : std::string("default")));
++  effective->Set("causality", base::Value(
++      precise_env.causality_sync ? std::string("sync")
++                                 : std::string("off")));
++  effective->Set("jsFlags", base::Value(precise_env.js_flags));
++  effective->Set("tierLock", base::Value(precise_env.tier_lock));
 +  effective->Set("tierParam",
 +                 base::Value(tier.empty() ? std::string("none") : tier));
 +  // The P2 contract ties capture setup to launch-time configuration;
@@ -2693,6 +2786,31 @@ index 0000000000..7dadfa3a09
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc b/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
+index ee5692a0a0..0fb3154de3 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_code_cache.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
+ 
+ #include <optional>
+ 
+@@ -421,7 +422,11 @@ V8CodeCache::GetCompileOptionsInternal(
+   }
+ #endif
+ 
+-  if (cache_options == mojom::blink::V8CacheOptions::kNone) {
++  if (cache_options == mojom::blink::V8CacheOptions::kNone ||
++      // XTrace F3 (review B3): the dedicated observer (precise-mode) launch
++      // environment forces the same kNone path — no compile-time cache
++      // consumption, no production, honest NoCacheBecauseCachingDisabled.
++      blink::xtrace::IgnitionBridge::ObserverRequested()) {
+     no_cache_reason = v8::ScriptCompiler::kNoCacheBecauseCachingDisabled;
+     return std::make_tuple(no_code_cache_compile_options,
+                            ProduceCacheOptions::kNoProduceCache,
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc b/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
 index 473f01ca40..58c21e35f1 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_initializer.cc
@@ -13708,12 +13826,38 @@ index 0f8b2defe6..e6eb79a824 100644
      "animation/animation_translation_util_test.cc",
      "animation/compositor_animation_test.cc",
      "animation/timing_function_test.cc",
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc
+index 0d3d4a3305..be7ed9c451 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc
+@@ -11,6 +11,7 @@
+ #include "third_party/blink/public/platform/web_url.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/code_cache_host.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/isolated_code_cache_fetcher.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/webui_bundled_code_cache_fetcher.h"
+ #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"
+ 
+@@ -100,6 +101,13 @@ scoped_refptr<CodeCacheFetcher> CodeCacheFetcher::TryCreateAndStart(
+     CodeCacheHost* code_cache_host,
+     scoped_refptr<base::SequencedTaskRunner> host_task_runner,
+     base::OnceClosure done_closure) {
++  // XTrace F3 (review B3): the dedicated observer (precise-mode) launch
++  // environment disables fetch-code-cache lookups entirely — no metadata
++  // is attached, so neither the compile-time consumer nor the background
++  // deserializer can run. Ordinary environments keep default behavior.
++  if (blink::xtrace::IgnitionBridge::ObserverRequested()) {
++    return nullptr;
++  }
+   scoped_refptr<CodeCacheFetcher> fetcher;
+   if (ShouldFetchWebUIBundledCodeCache(request)) {
+     fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..1bc179c704
+index 0000000000..a8977859f8
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,233 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -13884,7 +14028,10 @@ index 0000000000..1bc179c704
 +}  // namespace
 +
 +bool IgnitionBridge::ObserverRequested() {
-+  return ObserverRequestedImpl();
++  // Process-lifetime constant: the command line never changes mid-process,
++  // and the code-cache gates (F3) consult this per request/script.
++  static const bool requested = ObserverRequestedImpl();
++  return requested;
 +}
 +
 +void IgnitionBridge::EnsureInstalled() {
