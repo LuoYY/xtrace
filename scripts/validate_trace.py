@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qs, urlparse
@@ -1963,6 +1964,21 @@ V3_DECIMAL_STRING_FIELDS = (
 
 V3_CAUSALITY_KINDS = ("paired", "singleton", "external")
 
+# P4 ignition observer contract (docs/chromium-p4-design.md §3, F0 hardening):
+# every Ignition.execute record carries exactly these six fields on the
+# top-level `ignition` object. `opcode` is mandatory — a five-field record is
+# a B4 defect, not a tolerated older shape.
+V3_IGNITION_REQUIRED_FIELDS = (
+    "script_id",
+    "bytecode_version",
+    "bytecode_offset",
+    "opcode",
+    "tier",
+    "activation_ref",
+)
+V3_IGNITION_SUPPORTED_TIERS = ("ignition",)
+V3_IGNITION_OPCODE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+
 
 def _decimal_string(value: object, field: str, index: int) -> int:
     if not isinstance(value, str) or not value.isdigit():
@@ -2038,6 +2054,53 @@ def validate_schema_v3_event(event: dict, index: int) -> None:
             raise TraceValidationError(
                 f"Event {index}: asset_ref truncation quadruple inconsistent"
             )
+    if event.get("api") == "Ignition.execute":
+        ignition = event.get("ignition")
+        if not isinstance(ignition, dict):
+            raise TraceValidationError(
+                f"Event {index}: Ignition.execute requires an ignition object"
+            )
+        missing = [f for f in V3_IGNITION_REQUIRED_FIELDS if f not in ignition]
+        if missing:
+            raise TraceValidationError(
+                f"Event {index}: ignition object missing fields: "
+                + ", ".join(missing)
+            )
+        extra = sorted(set(ignition) - set(V3_IGNITION_REQUIRED_FIELDS))
+        if extra:
+            raise TraceValidationError(
+                f"Event {index}: ignition object carries undeclared fields: "
+                + ", ".join(extra)
+            )
+        for field in ("script_id", "bytecode_version", "bytecode_offset"):
+            value = ignition[field]
+            if not isinstance(value, str) or not value.isdigit():
+                raise TraceValidationError(
+                    f"Event {index}: ignition.{field} must be a decimal "
+                    f"string, got {value!r}"
+                )
+        if int(ignition["bytecode_offset"]) < 0:
+            raise TraceValidationError(
+                f"Event {index}: ignition.bytecode_offset must be >= 0"
+            )
+        opcode = ignition["opcode"]
+        if not isinstance(opcode, str) or not V3_IGNITION_OPCODE_RE.fullmatch(opcode):
+            raise TraceValidationError(
+                f"Event {index}: ignition.opcode must be a bytecode "
+                f"mnemonic, got {opcode!r}"
+            )
+        if ignition["tier"] not in V3_IGNITION_SUPPORTED_TIERS:
+            raise TraceValidationError(
+                f"Event {index}: ignition.tier {ignition['tier']!r} not in "
+                f"supported set {V3_IGNITION_SUPPORTED_TIERS} (declare new "
+                "tiers in the schema before emitting them)"
+            )
+        ref = ignition["activation_ref"]
+        if not isinstance(ref, str) or not ref:
+            raise TraceValidationError(
+                f"Event {index}: ignition.activation_ref must be a non-empty "
+                "call id (precise mode rides the sync activation stack)"
+            )
 
 
 def validate_v3_file_order(events: list[dict]) -> None:
@@ -2074,6 +2137,46 @@ def validate_v3_producer_sequences(
                 "under drop-newest policy"
             )
     return per_producer
+
+
+def validate_v3_ignition_causality(events: list[dict]) -> None:
+    """Every Ignition.execute activation_ref must resolve to a paired
+    activation (causality.call_id) inside the same producer scope."""
+    activations: set[tuple[str, str]] = set()
+    for event in events:
+        causality = event.get("causality") or {}
+        if causality.get("kind") == "paired":
+            call_id = causality.get("call_id")
+            if isinstance(call_id, str) and call_id:
+                activations.add((event.get("producer_id"), call_id))
+    for index, event in enumerate(events, start=1):
+        if event.get("api") != "Ignition.execute":
+            continue
+        key = (event.get("producer_id"), event["ignition"]["activation_ref"])
+        if key not in activations:
+            raise TraceValidationError(
+                f"Event {index}: ignition.activation_ref "
+                f"{event['ignition']['activation_ref']!r} does not resolve to "
+                "a paired activation with the same producer_id"
+            )
+
+
+def validate_v3_capture_identity(events: list[dict], manifest: dict) -> None:
+    """A trace file is a single capture: one capture_id across all records,
+    matching the manifest (F0: mixed-capture files must be rejected)."""
+    capture_ids = {event.get("capture_id") for event in events}
+    if None in capture_ids or len(capture_ids) != 1:
+        shown = sorted(str(c) for c in capture_ids)[:5]
+        raise TraceValidationError(
+            f"trace mixes capture identities: {shown}"
+        )
+    trace_capture_id = next(iter(capture_ids))
+    manifest_capture_id = manifest.get("capture_id")
+    if manifest_capture_id != trace_capture_id:
+        raise TraceValidationError(
+            f"manifest capture_id {manifest_capture_id!r} != trace "
+            f"capture_id {trace_capture_id!r}"
+        )
 
 
 def load_v3_manifest(trace_path) -> dict:
@@ -2147,6 +2250,16 @@ def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
         if seqs and seqs[-1] > final_seq:
             raise TraceValidationError(
                 f"{pid}: observed seq {seqs[-1]} beyond watermark final {final_seq}"
+            )
+        # F0 closure: for confirmed producers `written` counts records the
+        # writer appended to the trace file, so the file itself must show
+        # exactly that many records per producer. A declared-complete
+        # manifest with a deleted tail fails here instead of passing.
+        observed_records = len(seqs)
+        if observed_records != written:
+            raise TraceValidationError(
+                f"{pid}: manifest written {written} != observed trace records "
+                f"{observed_records}"
             )
         total_confirmed["eligible"] += eligible
         total_confirmed["enqueued"] += enqueued
@@ -3611,7 +3724,9 @@ def validate_trace(
             manifest = load_v3_manifest(path)
             per_producer = validate_v3_producer_sequences(
                 events, "drop-newest")
+            validate_v3_capture_identity(events, manifest)
             validate_v3_manifest(manifest, per_producer)
+            validate_v3_ignition_causality(events)
             validate_v3_identity(manifest)
             validate_v3_assets(path)
         else:

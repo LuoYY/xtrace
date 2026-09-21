@@ -286,7 +286,7 @@ Hub 写入 `current_categories_` 后无人读取，logger 仍读启动时静态�
 
 | 任务 / 顺序 | 具体交付 | 必过验收 |
 | --- | --- | --- |
-| F0：冻结反例与证据卫生 | 将本轮 probe 转为受跟踪、可移植测试；全部运行用唯一目录；补 v3 validator 的字段、capture 身份、真实 written 数、负例与 fixture | 本轮 B1/B2/B7 反例先红；坏 ignition、删尾、混 capture、旧坏 envelope 必须红；旧 v1/v2 正常输入仍绿 |
+| F0：冻结反例与证据卫生 ✅（2026-09-21；证据：`tests/test_validate_trace_v3.py` 16 例全绿 + 套件 354 全绿、`scripts/p4-review-contract.cjs` 冻结反例 6 红 5 绿、`browser-run-TbvU5a`/`browser-run-4Uk8GZ` 根驱动双模式复跑） | 将本轮 probe 转为受跟踪、可移植测试；全部运行用唯一目录；补 v3 validator 的字段、capture 身份、真实 written 数、负例与 fixture | 本轮 B1/B2/B7 反例先红；坏 ignition、删尾、混 capture、旧坏 envelope 必须红；旧 v1/v2 正常输入仍绿 |
 | F1：P3 配置落地（先于范围 gate） | 修 categories+generation 原子快照、status/manifest 配置、按代事件的 applied/pending；检查新 renderer/Worker 初始化与 stopping 竞态 | fingerprint-only 不再输出带新代 reverse；已有/新 Worker 两类；静默 pending 与故障区分；停止后 update 拒绝 |
 | F2：observer 状态、身份与元数据 | 按 isolate 管理 gate、回调和嵌套栈；恢复外层状态；stop/destroy 注销；实现既定 isolate/context/script 过滤；修 GC-safe bytecode_version、预解码缓存、opcode 与单一 ABI 声明 | 2224→0 的嵌套反例修复；多 Worker 互不关门；不同 context/script 排除生效；GC/重编译/地址复用/销毁；不逐事件从头扫描 |
 | F3：精细模式权威配置与缓存 | 真实编译能力接口；launcher/Host 预检与 browser 权威检查；解析实际 --js-flags；从启动即约束 tier 与 code-cache，拒绝不兼容现成环境；统一 capabilities/start/status/manifest | observer 未编译/未请求/causality off/真实 Sparkplug-Maglev-TurboFan 冲突均拒绝；合法环境实际 active tier 为 Ignition；精细模式 warm 重载有禁用+版本双证据；普通模式对照不受影响 |

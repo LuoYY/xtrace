@@ -5,7 +5,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
-const executable = path.resolve(process.argv[2] || path.join(__dirname, '../ChromiumX.app/Contents/MacOS/Chromium'));
+const executable = path.resolve(process.argv[2] || path.join(root, 'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium'));
 const selected = new Set(process.argv.slice(3));
 const runDir = fs.mkdtempSync(path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/validation', 'browser-run-'));
 const save = (name, value) => fs.writeFileSync(path.join(runDir, name), JSON.stringify(value, null, 2));

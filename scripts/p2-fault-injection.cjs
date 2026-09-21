@@ -7,7 +7,7 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const executable = path.resolve(path.join(__dirname, '../ChromiumX.app/Contents/MacOS/Chromium'));
+const executable = path.resolve(process.argv[2] || path.join(root, 'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium'));
 const runDir = fs.mkdtempSync(path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/validation', 'p2-fault-'));
 const save = (n, v) => fs.writeFileSync(path.join(runDir, n), JSON.stringify(v, null, 2));
 
