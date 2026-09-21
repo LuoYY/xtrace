@@ -74,7 +74,7 @@ index 8da7876994..05e5e99341 100644
    };
  
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b..1cd0f31503 100644
+index b2a722741b..c2caa63830 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -4,6 +4,7 @@
@@ -124,11 +124,42 @@ index b2a722741b..1cd0f31503 100644
    config.session_id = MakeSessionId();
    if (trace_file_path) {
      config.trace_stem =
-@@ -155,11 +163,51 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
+@@ -137,16 +145,21 @@ std::string QuoteJsonString(std::string_view value) {
+   return quoted;
+ }
+ 
+-bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
+-  if (!config.enabled || category.empty()) {
++// F1/B7: the category decision reads the hub's EFFECTIVE-config snapshot
++// (launch categories, or the browser's last UpdateConfig), not the static
++// launch copy. Callers take one snapshot per event and feed the same
++// generation into EmitEvent so an event is never filtered by the old
++// config while stamped with the new generation.
++bool CategoriesInclude(std::string_view categories,
++                       std::string_view category) {
++  if (category.empty()) {
+     return false;
+   }
+-  if (config.categories == "all") {
++  if (categories == "all") {
+     return true;
+   }
+-
+   for (std::string_view token :
+-       base::SplitStringPiece(config.categories, ",", base::TRIM_WHITESPACE,
++       base::SplitStringPiece(categories, ",", base::TRIM_WHITESPACE,
+                               base::SPLIT_WANT_NONEMPTY)) {
+     if (token == category) {
+       return true;
+@@ -155,11 +168,55 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
    return false;
  }
  
 -uint64_t NextSequenceNumber() {
++std::shared_ptr<const xtrace::EffectiveCaptureConfig> EntrySnapshot() {
++  return xtrace::XTraceProducerHub::Get()->SnapshotConfig();
++}
++
 +uint64_t NextActivationSequenceNumber() {
    static std::atomic<uint64_t> sequence{0};
    return ++sequence;
@@ -177,7 +208,7 @@ index b2a722741b..1cd0f31503 100644
  std::string Sha1Ref(std::string_view value) {
    return "sha1:" + base::HexEncode(base::SHA1HashString(value));
  }
-@@ -247,162 +295,260 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
+@@ -247,162 +304,263 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
    return safe.empty() ? "asset" : safe;
  }
  
@@ -335,8 +366,13 @@ index b2a722741b..1cd0f31503 100644
 +  row.append("}");
 +  producer->SendAsset(std::move(row), ref.content_path,
 +                      ref.captured ? source.Utf8() : std::string());
-+}
-+
+ }
+ 
+-mojom::blink::XTraceHost* GetXTraceHost() {
+-  thread_local mojo::Remote<mojom::blink::XTraceHost> host;
+-  if (!host.is_bound()) {
+-    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
+-        host.BindNewPipeAndPassReceiver());
 +bool IsActivationTerminal(const char* phase, const char* api) {
 +  if (!phase || !api ||
 +      (std::string_view(phase) != "return" &&
@@ -345,13 +381,8 @@ index b2a722741b..1cd0f31503 100644
 +  }
 +  const std::vector<XTraceActivation>& stack = ActivationStack();
 +  return !stack.empty() && stack.back().api == api;
- }
- 
--mojom::blink::XTraceHost* GetXTraceHost() {
--  thread_local mojo::Remote<mojom::blink::XTraceHost> host;
--  if (!host.is_bound()) {
--    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
--        host.BindNewPipeAndPassReceiver());
++}
++
 +CausalityFields CurrentCausalityFields(const XTraceConfig& config,
 +                                       const char* phase,
 +                                       const char* api,
@@ -431,7 +462,8 @@ index b2a722741b..1cd0f31503 100644
 +               const char* asset_kind = nullptr,
 +               const String* asset_url = nullptr,
 +               const String* asset_source = nullptr,
-+               std::string_view extra_top_fields = std::string_view()) {
++               std::string_view extra_top_fields = std::string_view(),
++               const std::string& config_generation = std::string()) {
 +  xtrace::XTraceThreadProducer* producer =
 +      xtrace::XTraceThreadProducer::Current();
 +  if (!producer) {
@@ -484,7 +516,8 @@ index b2a722741b..1cd0f31503 100644
 -  line.append(base::NumberToString(wall_time_us));
 -  line.append(",\"mono_time_us\":");
 +  line.append("{\"schema_version\":3");
-+  line.append(",\"config_generation\":\"0\"");
++  // config_generation is stamped ONCE, in the identity tail appended by
++  // AcceptEvent from the caller's effective-config snapshot (F1/B7).
 +  line.append(",\"mono_time_us\":\"");
    line.append(base::NumberToString(mono_time_us));
 +  line.append("\",\"wall_time_us\":\"");
@@ -544,7 +577,8 @@ index b2a722741b..1cd0f31503 100644
 -  // LogBatch is intentionally not used yet; per-event Log keeps current
 -  // ordering/compatibility until renderer-side buffering lands.
 -  GetXTraceHost()->Log(String::FromUtf8(line));
-+  std::optional<uint64_t> seq = producer->AcceptEvent(std::move(line));
++  std::optional<uint64_t> seq =
++      producer->AcceptEvent(std::move(line), config_generation);
 +  if (seq && has_asset_ref && !AssetAlreadySent(asset_ref.asset_id)) {
 +    SendScriptAssetRow(producer, asset_kind, *asset_url, *asset_source,
 +                       asset_ref, *seq);
@@ -552,7 +586,7 @@ index b2a722741b..1cd0f31503 100644
  }
  
  }  // namespace
-@@ -411,6 +557,115 @@ bool XTraceLogger::Enabled() {
+@@ -411,6 +569,123 @@ bool XTraceLogger::Enabled() {
    return GetCachedConfig().enabled;
  }
  
@@ -578,7 +612,11 @@ index b2a722741b..1cd0f31503 100644
 +                                    uint32_t bytecode_offset,
 +                                    const String& activation_ref) {
 +  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, "reverse")) {
++  if (!config.enabled) {
++    return;
++  }
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, "reverse")) {
 +    return;
 +  }
 +  // Schema v3 §2 / design DP2: the six fields live in a top-level
@@ -602,7 +640,7 @@ index b2a722741b..1cd0f31503 100644
 +  EmitEvent(config, "reverse", "call", "Ignition.execute", String("[]"),
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
 +            nullptr, /*asset_kind=*/nullptr, /*asset_url=*/nullptr,
-+            /*asset_source=*/nullptr, ignition);
++            /*asset_source=*/nullptr, ignition, snapshot->generation);
 +}
 +
 +bool XTraceLogger::CausalitySyncEnabled() {
@@ -615,8 +653,11 @@ index b2a722741b..1cd0f31503 100644
 +                                       const String& frame_url,
 +                                       const String& origin) {
 +  const XTraceConfig& config = GetCachedConfig();
-+  if (!blink::CausalitySyncEnabled(config) ||
-+      !CategoryEnabled(config, category)) {
++  if (!blink::CausalitySyncEnabled(config)) {
++    return 0;
++  }
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return 0;
 +  }
 +
@@ -639,7 +680,8 @@ index b2a722741b..1cd0f31503 100644
 +  fields.has_parent = activation.parent_token != 0;
 +  EmitEvent(config, category, "call", api, args_json,
 +            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(),
-+            &fields);
++            &fields, nullptr, nullptr, nullptr, std::string_view(),
++            snapshot->generation);
 +  stack.push_back(std::move(activation));
 +  // P4: bytecode observation is scoped to this activation (bridge no-ops
 +  // unless the observer was requested at startup).
@@ -668,8 +710,12 @@ index b2a722741b..1cd0f31503 100644
  String XTraceLogger::QuoteJson(const String& value) {
    return String::FromUtf8(QuoteJsonString(value.Utf8()));
  }
-@@ -448,11 +703,9 @@ void XTraceLogger::LogEvent(const char* category,
-   if (!CategoryEnabled(config, category)) {
+@@ -445,14 +720,17 @@ void XTraceLogger::LogEvent(const char* category,
+                             const char* api,
+                             const String& args_json) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
@@ -677,14 +723,23 @@ index b2a722741b..1cd0f31503 100644
 -  LogEventWithSequence(config, category, phase, api, args_json, seq,
 -                       std::string_view(), true, std::string_view(),
 -                       std::string_view());
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/true, std::string_view(), std::string_view(),
-+            nullptr);
++            nullptr, nullptr, nullptr, nullptr, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogEventWithContext(const char* category,
-@@ -465,12 +718,8 @@ void XTraceLogger::LogEventWithContext(const char* category,
-   if (!CategoryEnabled(config, category)) {
+@@ -462,15 +740,17 @@ void XTraceLogger::LogEventWithContext(const char* category,
+                                        const String& frame_url,
+                                        const String& origin) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
@@ -693,13 +748,23 @@ index b2a722741b..1cd0f31503 100644
 -  const uint64_t seq = NextSequenceNumber();
 -  LogEventWithSequence(config, category, phase, api, args_json, seq,
 -                       std::string_view(), true, frame_url_utf8, origin_utf8);
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  EmitEvent(config, category, phase, api, args_json,
-+            /*capture_stack=*/true, frame_url.Utf8(), origin.Utf8(), nullptr);
++            /*capture_stack=*/true, frame_url.Utf8(), origin.Utf8(), nullptr,
++            nullptr, nullptr, nullptr, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogEventNoStack(const char* category,
-@@ -481,11 +730,9 @@ void XTraceLogger::LogEventNoStack(const char* category,
-   if (!CategoryEnabled(config, category)) {
+@@ -478,14 +758,17 @@ void XTraceLogger::LogEventNoStack(const char* category,
+                                    const char* api,
+                                    const String& args_json) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
@@ -707,14 +772,23 @@ index b2a722741b..1cd0f31503 100644
 -  LogEventWithSequence(config, category, phase, api, args_json, seq,
 -                       std::string_view(), false, std::string_view(),
 -                       std::string_view());
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
-+            nullptr);
++            nullptr, nullptr, nullptr, nullptr, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogEventNoStackWithContext(const char* category,
-@@ -498,12 +745,8 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
-   if (!CategoryEnabled(config, category)) {
+@@ -495,15 +778,17 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+                                               const String& frame_url,
+                                               const String& origin) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
@@ -723,12 +797,29 @@ index b2a722741b..1cd0f31503 100644
 -  const uint64_t seq = NextSequenceNumber();
 -  LogEventWithSequence(config, category, phase, api, args_json, seq,
 -                       std::string_view(), false, frame_url_utf8, origin_utf8);
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  EmitEvent(config, category, phase, api, args_json,
-+            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr);
++            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr,
++            nullptr, nullptr, nullptr, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogAssetEvent(const char* category,
-@@ -520,13 +763,9 @@ void XTraceLogger::LogAssetEvent(const char* category,
+@@ -514,19 +799,20 @@ void XTraceLogger::LogAssetEvent(const char* category,
+                                  const String& url,
+                                  const String& source) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
++    return;
++  }
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
+     return;
+   }
    if (IsInternalScriptUrl(url)) {
      return;
    }
@@ -741,17 +832,26 @@ index b2a722741b..1cd0f31503 100644
 -                       std::string_view());
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/true, std::string_view(), std::string_view(),
-+            nullptr, kind, &url, &source);
++            nullptr, kind, &url, &source, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-@@ -540,15 +779,17 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-   if (!CategoryEnabled(config, category)) {
+@@ -537,18 +823,25 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+                                              const String& url,
+                                              const String& source) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
 -  const uint64_t seq = NextSequenceNumber();
 -  std::string extra_fields;
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  const char* asset_kind = nullptr;
 +  const String* asset_url = nullptr;
 +  const String* asset_source = nullptr;
@@ -766,12 +866,17 @@ index b2a722741b..1cd0f31503 100644
 -                       std::string_view());
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
-+            nullptr, asset_kind, asset_url, asset_source);
++            nullptr, asset_kind, asset_url, asset_source, std::string_view(),
++            snapshot->generation);
  }
  
  void XTraceLogger::LogEventWithOptionalAssetAndContext(
-@@ -565,16 +806,34 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
-   if (!CategoryEnabled(config, category)) {
+@@ -562,19 +855,42 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+     const String& frame_url,
+     const String& origin) {
+   const XTraceConfig& config = GetCachedConfig();
+-  if (!CategoryEnabled(config, category)) {
++  if (!config.enabled) {
      return;
    }
 -
@@ -779,6 +884,10 @@ index b2a722741b..1cd0f31503 100644
 -  std::string origin_utf8 = origin.Utf8();
 -  const uint64_t seq = NextSequenceNumber();
 -  std::string extra_fields;
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, category)) {
++    return;
++  }
 +  const char* asset_kind = nullptr;
 +  const String* asset_url = nullptr;
 +  const String* asset_source = nullptr;
@@ -792,7 +901,8 @@ index b2a722741b..1cd0f31503 100644
 -                       extra_fields, false, frame_url_utf8, origin_utf8);
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr,
-+            asset_kind, asset_url, asset_source);
++            asset_kind, asset_url, asset_source, std::string_view(),
++            snapshot->generation);
 +}
 +
 +XTraceActivationScope::XTraceActivationScope(const char* category,

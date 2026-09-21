@@ -56,14 +56,15 @@ class Pipe {
 }
 
 const marker = label => `JSON.stringify({reviewMarker:${JSON.stringify(label)}});`;
-const makePage = nested => '<!doctype html><body><script>' +
+const makePage = (nested, fp) => '<!doctype html><body><script>' +
   'function calc(n){let s=0;for(let i=0;i<n;i++)s+=i;return s;}' + marker('before') + 'calc(20);' +
   (nested ? 'let s=document.createElement("script");s.textContent="window.reviewInner=17";document.body.appendChild(s);' : 'window.reviewInner=17;') +
-  marker('after-nested') + 'window.reviewAnswer=calc(200);' + marker('after-calc') + 'window.reviewDone=true;</script>';
+  marker('after-nested') + 'window.reviewAnswer=calc(200);' + marker('after-calc') +
+  (fp ? 'crypto.getRandomValues(new Uint8Array(8));' : '') + 'window.reviewDone=true;</script>';
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
-  res.end(makePage(req.url === '/nested'));
+  res.end(makePage(req.url === '/nested', req.url === '/fp'));
 });
 
 async function run(name, flags, page, extra) {
@@ -98,6 +99,21 @@ async function run(name, flags, page, extra) {
       result.update = await pipe.send('XTrace.updateCapture', { categories: 'fingerprint' });
       await new Promise(r => setTimeout(r, 300));
       result.afterUpdate = await pipe.send('Runtime.evaluate', { expression: 'JSON.stringify({reviewCategoryMarker:7341}); navigator.platform', returnByValue: true }, sessionId);
+      // F1: a Worker created AFTER the update inherits the new snapshot
+      // (same process hub) — its fingerprint events carry the new generation.
+      result.workerProbe = await pipe.send('Runtime.evaluate', {
+        expression: "(async()=>{const src='onmessage=()=>{crypto.getRandomValues(new Uint8Array(8));postMessage(1)};crypto.getRandomValues(new Uint8Array(8))';const w=new Worker(URL.createObjectURL(new Blob([src],{type:'text/javascript'})));w.postMessage(0);await new Promise(r=>w.onmessage=()=>r());return 'ok'})()",
+        returnByValue: true, awaitPromise: true
+      }, sessionId).catch(e => String(e));
+      // F1: a renderer spawned after the update (localhost is a different
+      // site than 127.0.0.1 -> own process) must receive the config
+      // backfill via its startup control-endpoint registration.
+      const { targetId: t2 } = await pipe.send('Target.createTarget', { url: 'about:blank' });
+      const { sessionId: s2 } = await pipe.send('Target.attachToTarget', { targetId: t2, flatten: true });
+      await new Promise(r => setTimeout(r, 500));
+      await pipe.send('Page.enable', {}, s2);
+      await pipe.send('Page.navigate', { url: `http://localhost:${server.address().port}/fp` }, s2);
+      await new Promise(r => setTimeout(r, 800));
       result.statusAfterUpdate = await pipe.send('XTrace.getCaptureStatus');
     }
     result.stop = await pipe.send('XTrace.stopCapture');
@@ -114,6 +130,10 @@ async function run(name, flags, page, extra) {
         result.categoryMarkers = events.map((e, i) => ({ e, i })).filter(({ e }) => e.api === 'JSON.stringify' && JSON.stringify(e.args).includes('reviewCategoryMarker'))
           .map(({ e, i }) => ({ i, category: e.category, generation: e.config_generation }));
         result.platformEvents = events.filter(e => e.api === 'Navigator.platform').map(e => ({ category: e.category, generation: e.config_generation }));
+        const random = events.filter(e => e.api === 'Crypto.getRandomValues').map(e => ({ producer: e.producer_id, category: e.category, generation: e.config_generation }));
+        result.workerRandom = random.filter(r => r.producer.startsWith('rtw:'));
+        const mainEpochs = new Set(events.filter(e => e.api === 'JSON.stringify').map(e => (e.producer_id.split(':')[1] || '')));
+        result.newRendererRandom = random.filter(r => r.producer.startsWith('rtx:') && !mainEpochs.has(r.producer.split(':')[1] || ''));
       }
     }
   } catch (e) { result.probeError = e.stack; }
@@ -159,6 +179,10 @@ function categoryContracts(cat) {
   const status = cat?.statusAfterUpdate;
   const config = status?.config || {};
   contract('B7.status-reports-config', 'getCaptureStatus discloses the applied categories alongside the generation', String(config.generation ?? '') === gen && String(config.categories || '').includes('fingerprint'), { config, gen });
+  const workerRandom = cat?.workerRandom || [];
+  contract('B7.worker-inherits-update', 'a Worker created after the update emits fingerprint events on the new generation (same-process hub snapshot)', cat?.workerProbe?.result?.value === 'ok' && workerRandom.length > 0 && workerRandom.every(r => String(r.generation) === gen && r.category === 'fingerprint'), { workerProbe: cat?.workerProbe?.result?.value ?? cat?.workerProbe, workerRandom, gen });
+  const newRendererRandom = cat?.newRendererRandom || [];
+  contract('B7.new-renderer-inherits-update', 'a renderer spawned after the update (own process) observes under the backfilled config, not generation 0', newRendererRandom.length > 0 && newRendererRandom.every(r => String(r.generation) === gen && r.category === 'fingerprint'), { newRendererRandom, gen });
 }
 
 (async () => {
