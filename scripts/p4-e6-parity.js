@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs'); const path = require('node:path');
-const d8 = '/Users/luoyy/work/github/GitHub/xtrace/chromium/src/out/XTraceP4D8/d8';
+const d8 = require('node:path').resolve(__dirname, '../chromium/src/out/XTraceP4D8/d8');
 const outDir = path.join(path.dirname(d8), 'validation', 'p4-e6-parity');
 fs.mkdirSync(outDir, { recursive: true });
 

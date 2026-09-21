@@ -142,10 +142,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..69f2adf1f3
+index 0000000000..e738891214
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,380 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -170,21 +170,14 @@ index 0000000000..69f2adf1f3
 +#include "content/browser/devtools/protocol/xtrace.h"
 +#include "content/browser/xtrace/xtrace_capture_controller.h"
 +
-+// V8-internal header is off Blink paths; the browser-side link pulls the
-+// gate globals from libv8 directly when the observer is compiled in.
++// F2 (review B2-4/B5): the single supported V8 boundary — function
++// declarations with primitive signatures. No V8 struct layout is mirrored
++// in content; compile truth is the RETURN VALUE of IgnitionObserverIs
++// Compiled(), never a symbol's address.
 +namespace v8 {
 +namespace internal {
 +namespace xtrace {
-+// Layout-compatible mirror of the V8-internal observer globals (the real
-+// header is off-limits from content); the symbol links from libv8 only
-+// when the observer GN flag compiled it in — presence IS the compile
-+// truth for getCapabilities.
-+struct IgnitionObserverLinkProbe {
-+  std::atomic<unsigned int> gate;
-+  unsigned int padding;
-+  std::atomic<void*> callback;
-+};
-+extern IgnitionObserverLinkProbe g_ignition_observer;
++bool IgnitionObserverIsCompiled();
 +}  // namespace xtrace
 +}  // namespace internal
 +}  // namespace v8
@@ -242,10 +235,10 @@ index 0000000000..69f2adf1f3
 +  const bool observer_switch = cmd->HasSwitch("xtrace-ignition-observer");
 +  const bool tier_conflict = cmd->HasSwitch("sparkplug") ||
 +                             cmd->HasSwitch("always-sparkplug");
-+  // Observer compiled: the V8 dylib exports the gate globals when the
-+  // GN flag was on (link-time truth, not a header define).
++  // Observer compiled: the boundary function's return value is the
++  // compile macro's truth (F2; link-presence proved nothing).
 +  const bool observer_compiled =
-+      &v8::internal::xtrace::g_ignition_observer != nullptr;
++      v8::internal::xtrace::IgnitionObserverIsCompiled();
 +  limits->Set("ignitionObserverCompiled",
 +              base::Value(observer_compiled ? "true" : "false"));
 +  limits->Set("ignitionObserverSwitch", base::Value(
@@ -13717,10 +13710,10 @@ index 0f8b2defe6..e6eb79a824 100644
      "animation/timing_function_test.cc",
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..62f2a42db4
+index 0000000000..1bc179c704
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,230 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -13728,37 +13721,34 @@ index 0000000000..62f2a42db4
 +#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +
 +#include <atomic>
-+#include "base/logging.h"
++#include <optional>
++#include <set>
 +#include <string_view>
++#include <vector>
 +
 +#include "base/command_line.h"
 +#include "base/environment.h"
-+#include "base/strings/string_number_conversions.h"
++#include "base/memory/raw_ptr.h"
++#include "base/no_destructor.h"
++#include "base/synchronization/lock.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
++#include "v8/include/v8.h"
 +
 +namespace v8 {
 +namespace internal {
-+class Isolate;
 +namespace xtrace {
-+// Mirror of v8/src/interpreter/xtrace-ignition-observer.h — the V8 header
-+// is internal (not on Blink's include path); the definitions link from
-+// the V8 archive and the layouts are asserted by the E2 unit build.
-+struct IgnitionEvent {
-+  uint32_t script_id;
-+  uint32_t bytecode_version;
-+  uint32_t bytecode_offset;
-+  uint8_t tier;
-+  uint8_t padding[3];
-+  uint64_t activation_token;
-+};
-+using IgnitionObserverCallback = void (*)(Isolate* isolate,
-+                                          const IgnitionEvent* event);
-+struct IgnitionObserverGlobals {
-+  std::atomic<uint32_t> gate{0};
-+  uint32_t padding{0};
-+  std::atomic<IgnitionObserverCallback> callback{nullptr};
-+};
-+extern IgnitionObserverGlobals g_ignition_observer;
++// F2 single supported boundary: primitive-arg C signatures only — no V8
++// struct layout is mirrored in Blink (review B5). Definitions link from
++// the V8 archive; IgnitionObserverIsCompiled()'s return value (never a
++// symbol's address) is the compile truth.
++using IgnitionObserverCallback = void (*)(Isolate*, uint32_t, uint32_t,
++                                          uint32_t, uint32_t);
++bool IgnitionObserverIsCompiled();
++const char* IgnitionOpcodeName(uint32_t opcode);
++void IgnitionObserverSetCallback(Isolate*, IgnitionObserverCallback);
++void IgnitionObserverSetGate(Isolate*, uint32_t);
 +}  // namespace xtrace
 +}  // namespace internal
 +}  // namespace v8
@@ -13783,22 +13773,114 @@ index 0000000000..62f2a42db4
 +
 +std::atomic<bool> g_installed{false};
 +
-+void OnIgnitionEvent(v8::internal::Isolate* isolate,
-+                     const v8::internal::xtrace::IgnitionEvent* event) {
-+  // P4 scope: observe only inside an active tracked activation (the script
-+  // evaluate activation that activation_ref bridges to). Bytecode outside
-+  // observed scripts short-circuits at the gate; this check is the second
-+  // line for activations opened before the bridge was consulted.
-+  if (XTraceLogger::CurrentActivationToken() == 0) {
-+    return;
++// F2 v1 script scope: page scripts only. Internal schemes never open the
++// gate — their bytecode short-circuits in generated code.
++bool IsSelectableUrl(const char* frame_url) {
++  if (!frame_url) {
++    return true;  // no URL known: attribute to the page, not an extension
 +  }
-+  // Emission goes through the logger's standard v3 envelope — the bridge
-+  // never hand-rolls event JSON (a hand-rolled line once shipped without
-+  // schema_version and the matrix's v3 assertion caught it).
++  std::string_view url(frame_url);
++  return !url.starts_with("chrome-extension://") &&
++         !url.starts_with("devtools://") && !url.starts_with("chrome://") &&
++         !url.starts_with("chrome-untrusted://");
++}
++
++// Per-isolate observation scope (V8PerIsolateData::UserData owns the
++// lifetime; WillBeDestroyed unregisters the callback before anything
++// downstream dies).
++class IgnitionScope final : public V8PerIsolateData::UserData {
++ public:
++  ~IgnitionScope() override = default;
++
++  void WillBeDestroyed() override {
++    // Destruction-order contract (F2): null the callback FIRST (a racing
++    // event then no-ops), then close the gate, then leave the registry.
++    v8::Isolate* raw = isolate_.ExtractAsDangling().get();
++    v8::internal::Isolate* i_isolate =
++        reinterpret_cast<v8::internal::Isolate*>(raw);
++    v8::internal::xtrace::IgnitionObserverSetCallback(i_isolate, nullptr);
++    v8::internal::xtrace::IgnitionObserverSetGate(i_isolate, 0);
++    base::AutoLock lock(*scopes_lock());
++    scopes()->erase(this);
++  }
++
++  void Trace(Visitor*) const override {}
++
++  struct Activation {
++    bool selected;
++  };
++
++  raw_ptr<v8::Isolate> isolate_ = nullptr;
++  std::vector<Activation> stack;
++  bool closed = false;  // capture stop: never reopens
++
++  static std::set<IgnitionScope*>* scopes() {
++    static base::NoDestructor<std::set<IgnitionScope*>> scopes;
++    return scopes.get();
++  }
++  static base::Lock* scopes_lock() {
++    static base::NoDestructor<base::Lock> lock;
++    return lock.get();
++  }
++};
++
++void RecomputeGate(v8::Isolate* isolate, IgnitionScope* scope) {
++  const bool open = !scope->closed && !scope->stack.empty() &&
++                    scope->stack.back().selected;
++  v8::internal::xtrace::IgnitionObserverSetGate(
++      reinterpret_cast<v8::internal::Isolate*>(isolate), open ? 1 : 0);
++}
++
++IgnitionScope* ScopeFor(v8::Isolate* isolate) {
++  return static_cast<IgnitionScope*>(V8PerIsolateData::From(isolate)
++                                         ->GetUserData(
++                                             V8PerIsolateData::UserData::
++                                                 Key::kXTraceIgnitionObserver));
++}
++
++void OnIgnitionEvent(v8::internal::Isolate* i_isolate, uint32_t script_id,
++                     uint32_t bytecode_version, uint32_t bytecode_offset,
++                     uint32_t opcode);
++
++IgnitionScope* InstallScope(v8::Isolate* isolate) {
++  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
++    return nullptr;  // V8 dylib compiled without the observer
++  }
++  V8PerIsolateData* data = V8PerIsolateData::From(isolate);
++  if (IgnitionScope* existing = ScopeFor(isolate)) {
++    return existing;
++  }
++  auto* scope = MakeGarbageCollected<IgnitionScope>();
++  scope->isolate_ = isolate;
++  data->SetUserData(
++      V8PerIsolateData::UserData::Key::kXTraceIgnitionObserver, scope);
++  {
++    base::AutoLock lock(*IgnitionScope::scopes_lock());
++    IgnitionScope::scopes()->insert(scope);
++  }
++  v8::internal::xtrace::IgnitionObserverSetCallback(
++      reinterpret_cast<v8::internal::Isolate*>(isolate), &OnIgnitionEvent);
++  return scope;
++}
++
++void OnIgnitionEvent(v8::internal::Isolate* i_isolate, uint32_t script_id,
++                     uint32_t bytecode_version, uint32_t bytecode_offset,
++                     uint32_t opcode) {
++  v8::Isolate* isolate = reinterpret_cast<v8::Isolate*>(i_isolate);
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->closed || scope->stack.empty() ||
++      !scope->stack.back().selected) {
++    return;  // second line: scope state beyond the generated-code gate
++  }
++  if (XTraceLogger::CurrentActivationToken() == 0) {
++    return;  // outside a tracked (sync-causality) activation
++  }
 +  XTraceLogger::LogIgnitionEvent(
-+      event->script_id, event->bytecode_version, event->bytecode_offset,
++      script_id, bytecode_version, bytecode_offset,
++      v8::internal::xtrace::IgnitionOpcodeName(opcode),
 +      XTraceLogger::CurrentActivationCallId());
 +}
++
 +}  // namespace
 +
 +bool IgnitionBridge::ObserverRequested() {
@@ -13810,69 +13892,69 @@ index 0000000000..62f2a42db4
 +    return;
 +  }
 +  bool expected = false;
-+  if (!g_installed.compare_exchange_strong(expected, true)) {
-+    return;  // already installed
-+  }
-+  // Install the callback but keep the gate CLOSED: it opens/closes with
-+  // each tracked activation, so bytecode outside observed scripts never
-+  // even reaches the runtime call (generated-code load+branch decides).
-+  v8::internal::xtrace::g_ignition_observer.callback.store(
-+      &OnIgnitionEvent, std::memory_order_release);
++  g_installed.compare_exchange_strong(expected, true);
 +}
 +
 +void IgnitionBridge::Close() {
-+  v8::internal::xtrace::g_ignition_observer.gate.store(0,
-+                                                       std::memory_order_release);
++  // Capture stop: every live isolate closes permanently. Writing the
++  // per-isolate gate word from here is safe (plain atomic store).
++  base::AutoLock lock(*IgnitionScope::scopes_lock());
++  for (IgnitionScope* scope : *IgnitionScope::scopes()) {
++    scope->closed = true;
++    v8::Isolate* raw = scope->isolate_.ExtractAsDangling().get();
++    v8::internal::xtrace::IgnitionObserverSetGate(
++        reinterpret_cast<v8::internal::Isolate*>(raw), 0);
++  }
 +}
-+
-+namespace {
-+void OpenGateForActivation() {
-+  v8::internal::xtrace::g_ignition_observer.gate.store(1,
-+                                                        std::memory_order_release);
-+}
-+void CloseGateAfterActivation() {
-+  v8::internal::xtrace::g_ignition_observer.gate.store(0,
-+                                                        std::memory_order_release);
-+}
-+}  // namespace
 +
 +void IgnitionBridge::OnActivationBegin(const char* frame_url) {
 +  if (!g_installed.load(std::memory_order_acquire)) {
 +    return;
 +  }
-+  // v1 scope: page scripts only. Internal schemes (chrome-extension://,
-+  // devtools://, chrome://) keep the gate closed — their bytecode short-
-+  // circuits in generated code and never reaches the runtime call. The
-+  // control-plane script-range scoping (P4-E5) replaces this heuristic.
-+  if (frame_url) {
-+    std::string_view url(frame_url);
-+    if (url.starts_with("chrome-extension://") ||
-+        url.starts_with("devtools://") || url.starts_with("chrome://") ||
-+        url.starts_with("chrome-untrusted://")) {
-+      return;
-+    }
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  if (!isolate) {
++    return;
 +  }
-+  OpenGateForActivation();
++  IgnitionScope* scope = InstallScope(isolate);
++  if (!scope) {
++    return;
++  }
++  // Always push (selected or not): end must have a pair to pop, and an
++  // unselected inner explicitly suppresses only ITSELF (review B1/B8-B).
++  scope->stack.push_back({IsSelectableUrl(frame_url)});
++  RecomputeGate(isolate, scope);
 +}
 +
 +void IgnitionBridge::OnActivationEnd() {
-+  if (g_installed.load(std::memory_order_acquire)) {
-+    CloseGateAfterActivation();
++  if (!g_installed.load(std::memory_order_acquire)) {
++    return;
 +  }
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  if (!isolate) {
++    return;
++  }
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->stack.empty()) {
++    return;
++  }
++  scope->stack.pop_back();
++  // Restores the OUTER activation's state — end is not close (review B1:
++  // the nested counterexample must keep the outer 2224 events).
++  RecomputeGate(isolate, scope);
 +}
 +
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
 new file mode 100644
-index 0000000000..8ceaf3f87d
+index 0000000000..0059684fbc
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
-+#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_BRIDGE_H_
 +#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_BRIDGE_H_
 +
 +#include "third_party/blink/renderer/platform/platform_export.h"
@@ -13885,29 +13967,31 @@ index 0000000000..8ceaf3f87d
 +
 +namespace blink::xtrace {
 +
-+// P4-E3: embedder side of the structured Ignition observer. Installs the
-+// V8-side callback once per process and opens/closes the process-global
-+// gate with the capture lifecycle. Events land on the current thread's
-+// XTraceThreadProducer as schema-v3 `ignition` records (six-field design,
++// F2 (review B1): embedder side of the structured Ignition observer, owned
++// PER ISOLATE through V8PerIsolateData::UserData. Each activation pushes a
++// scope frame; end pops and restores the outer state — a nested
++// sub-activation ending never closes the enclosing one, and no isolate's
++// lifecycle can close another's gate. Events land on the current thread's
++// XTraceThreadProducer as schema-v3 `ignition` records (six fields,
 +// activation_ref bridged to the active causality call_id).
 +class PLATFORM_EXPORT IgnitionBridge {
 + public:
 +  // Reads the runtime configuration (switch/env). Returns true when the
-+  // observer is requested for this capture (P4-E5 wires the CDP control
-+  // path onto the same gate).
++  // observer is requested for this capture.
 +  static bool ObserverRequested();
 +
-+  // Installs the callback (process-wide) if requested and opens the gate.
-+  // Called when capture configuration is known (first producer activity /
-+  // control-plane UpdateConfig). Idempotent.
++  // Marks the observer as requested for this capture; per-isolate wiring
++  // happens lazily at the first activation begin (the isolate is current
++  // there). Idempotent.
 +  static void EnsureInstalled();
 +
-+  // Closes the gate (stops new events; in-flight POD callbacks return).
++  // Capture stop: every live isolate's observer closes permanently — new
++  // activations no longer reopen the gate (review B1).
 +  static void Close();
 +
-+  // Activation-scoped gate: opens when a tracked script activation begins
-+  // (the callback then knows token != 0) and closes at its terminal —
-+  // bytecode outside observed scripts short-circuits in generated code.
++  // Activation-scoped gate: pushes a scope frame (selected or not) so end
++  // always has a pair to pop; the gate reflects the innermost SELECTED
++  // activation of THIS isolate.
 +  static void OnActivationBegin(const char* frame_url);
 +  static void OnActivationEnd();
 +};
@@ -14036,10 +14120,10 @@ index 0000000000..308d0c56bc
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..0a92f21fc6
+index 0000000000..72367f1c02
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,465 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14226,6 +14310,9 @@ index 0000000000..0a92f21fc6
 +
 +void XTraceProducerHub::BeginStop() {
 +  stopping_.store(true, std::memory_order_release);
++  // F2 (review B1): stop closes every live isolate's Ignition observer —
++  // no later activation may reopen it.
++  IgnitionBridge::Close();
 +  // Draft V09: the number of forwarded settle tasks is NOT an
 +  // acknowledgement. Settlement evidence is each producer's watermark on
 +  // its own XTraceHost pipe; the browser side counts only watermarks.
