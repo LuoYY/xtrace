@@ -52,6 +52,20 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
   }
   // activation_ref bridging: with sync causality at least one event should
   // carry a non-null activation (script ran inside a ClassicScript.evaluate).
+  // Envelope contract: the ignition lines must be full v3 records (a
+  // hand-rolled line once shipped without schema_version; the validator is
+  // the permanent guard).
+  const { spawnSync } = require('node:child_process');
+  const val = spawnSync('python3', [
+      '/Users/luoyy/work/github/GitHub/xtrace/scripts/validate_trace.py',
+      '--schema-version', '3', '--profile', 'generic-vmp',
+      '--expect', 'TextEncoder.encode', '--expect', 'fetch',
+      '--expect', 'ClassicScript.evaluate', '--expect', 'Ignition.execute',
+      trace], { encoding: 'utf8', timeout: 120000 });
+  fs.writeFileSync(path.join(runDir, 'validator.log'),
+      (val.stdout || '') + (val.stderr || ''));
+  assert.equal(val.status, 0, `v3 validator failed: ${val.stdout} ${val.stderr}`);
+  report.validatorPass = true;
   const bridged = ignition.filter(e => e.ignition.activation_ref !== null);
   report.bridged = bridged.length;
   assert(bridged.length > 0, 'no activation_ref bridge observed');

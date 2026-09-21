@@ -6,8 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
-const root = path.resolve(__dirname, '../../../../..');
-const executable = path.resolve(path.join(__dirname, '../chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium'));
+const root = path.resolve(__dirname, '..');
+const executable = path.resolve(path.join(__dirname, '../ChromiumX.app/Contents/MacOS/Chromium'));
 const runDir = fs.mkdtempSync(path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/validation', 'p2-fault-'));
 const save = (n, v) => fs.writeFileSync(path.join(runDir, n), JSON.stringify(v, null, 2));
 
@@ -116,7 +116,7 @@ async function main() {
     await client.send('Page.crash', {}, sessionId).catch(() => {});
     await new Promise(r => setTimeout(r, 5000));
     await client.send('XTrace.stopCapture');
-    await new Promise(r => setTimeout(r, 12000));    // stop-after + 2s deadline
+    await new Promise(r => setTimeout(r, 12000));    // domain stop settle window
     const manifest = manifestFor(trace);
     assert.equal(manifest.terminal.state, 'incomplete');
     assert.match(manifest.terminal.reason, /stop-timeout|producer-unconfirmed|renderer/);
@@ -166,7 +166,7 @@ async function main() {
   //    teardown settles only what reached the writer and reports
   //    browser-shutdown, never complete.
   await scenario('browser-shutdown-midcapture', async dir => {
-    const { child, trace, client } = await launch(dir, []);  // no stop-after
+    const { child, trace, client } = await launch(dir, []);  // shutdown path: no stop request
     await openPage(client, url);
     await new Promise(r => setTimeout(r, 6000));
     await client.send('Browser.close');  // graceful shutdown mid-capture

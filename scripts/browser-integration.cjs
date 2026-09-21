@@ -4,10 +4,10 @@ const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 
-const root = path.resolve(__dirname, '../../../../..');
-const executable = path.resolve(process.argv[2] || path.join(__dirname, '../chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium'));
+const root = path.resolve(__dirname, '..');
+const executable = path.resolve(process.argv[2] || path.join(__dirname, '../ChromiumX.app/Contents/MacOS/Chromium'));
 const selected = new Set(process.argv.slice(3));
-const runDir = fs.mkdtempSync(path.join(__dirname, 'browser-run-'));
+const runDir = fs.mkdtempSync(path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/validation', 'browser-run-'));
 const save = (name, value) => fs.writeFileSync(path.join(runDir, name), JSON.stringify(value, null, 2));
 
 class PipeClient {
@@ -113,6 +113,10 @@ async function runCase(test, origin) {
   if (test.mode !== 'off') {
     const causality = test.mode.startsWith('v2') ? 'sync' : 'off';
     args.push('--xtrace-enable', `--xtrace-file=${trace}`, '--xtrace-categories=reverse,fingerprint', '--xtrace-capture-values=full', '--xtrace-capture-assets=full', `--xtrace-causality=${causality}`);
+    // P4-E8: P4X_OBSERVER=1 runs the whole matrix with the structured
+    // Ignition observer on, proving the P2 count/terminal contracts hold
+    // under observer load (handoff §8).
+    if (process.env.P4X_OBSERVER === '1') args.push('--xtrace-ignition-observer');
     if (test.mode !== 'v2-switch') Object.assign(env, { XTRACE_ENABLE: '1', XTRACE_FILE: trace, XTRACE_CATEGORIES: 'reverse,fingerprint', XTRACE_CAPTURE_VALUES: 'full', XTRACE_CAPTURE_ASSETS: 'full', XTRACE_CAUSALITY: causality });
   }
   args.push('about:blank');

@@ -1085,10 +1085,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..d1207a5d83
+index 0000000000..8aedd177f1
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,382 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1101,6 +1101,7 @@ index 0000000000..d1207a5d83
 +#include <utility>
 +#include <vector>
 +
++#include "base/command_line.h"
 +#include "base/files/file_util.h"
 +#include "base/logging.h"
 +#include "base/functional/bind.h"
@@ -1111,6 +1112,25 @@ index 0000000000..d1207a5d83
 +#include "base/values.h"
 +#include "content/browser/devtools/protocol/xtrace.h"
 +#include "content/browser/xtrace/xtrace_capture_controller.h"
++
++// V8-internal header is off Blink paths; the browser-side link pulls the
++// gate globals from libv8 directly when the observer is compiled in.
++namespace v8 {
++namespace internal {
++namespace xtrace {
++// Layout-compatible mirror of the V8-internal observer globals (the real
++// header is off-limits from content); the symbol links from libv8 only
++// when the observer GN flag compiled it in — presence IS the compile
++// truth for getCapabilities.
++struct IgnitionObserverLinkProbe {
++  std::atomic<unsigned int> gate;
++  unsigned int padding;
++  std::atomic<void*> callback;
++};
++extern IgnitionObserverLinkProbe g_ignition_observer;
++}  // namespace xtrace
++}  // namespace internal
++}  // namespace v8
 +
 +namespace content::protocol {
 +
@@ -1159,6 +1179,29 @@ index 0000000000..d1207a5d83
 +    limits->Set("producerBufferEvents", base::Value("4096"));
 +    limits->Set("overflowPolicy", base::Value("drop-newest"));
 +  }
++  // P4-E5 (A.3): the precise mode exists only in environments launched
++  // for it — Hosts learn this from the browser, not from docs.
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  const bool observer_switch = cmd->HasSwitch("xtrace-ignition-observer");
++  const bool tier_conflict = cmd->HasSwitch("sparkplug") ||
++                             cmd->HasSwitch("always-sparkplug");
++  // Observer compiled: the V8 dylib exports the gate globals when the
++  // GN flag was on (link-time truth, not a header define).
++  const bool observer_compiled =
++      &v8::internal::xtrace::g_ignition_observer != nullptr;
++  limits->Set("ignitionObserverCompiled",
++              base::Value(observer_compiled ? "true" : "false"));
++  limits->Set("ignitionObserverSwitch", base::Value(
++      observer_switch ? "true" : "false"));
++  limits->Set("preciseModeAvailable", base::Value(
++      (observer_compiled && observer_switch && !tier_conflict)
++          ? "true" : "false"));
++  limits->Set("codeCachePolicy", base::Value(
++      "precise-mode-disables-and-discloses"));
++  // Precise mode is only meaningful in a launch environment that carries
++  // sync causality; Hosts learn the requirement from the browser (A.3).
++  limits->Set("preciseModeRequires",
++              base::Value(std::string("xtrace-causality=sync")));
 +  protocol::Array<String> modes;
 +  modes.emplace_back("reverse");
 +  modes.emplace_back("fingerprint");
@@ -1191,6 +1234,8 @@ index 0000000000..d1207a5d83
 +    std::optional<String> in_captureValues,
 +    std::optional<String> in_captureAssets,
 +    std::optional<String> in_causality,
++    std::optional<String> in_mode,
++    std::optional<String> in_tier,
 +    std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback) {
 +  XTraceCaptureController* controller = XTraceCaptureController::Get();
 +  if (!controller) {
@@ -1198,13 +1243,79 @@ index 0000000000..d1207a5d83
 +        "capture disabled: no launch-time trace configuration"));
 +    return;
 +  }
-+  // The P2 contract ties capture setup to launch-time configuration; the
-+  // domain currently reports the running capture's identity (P3-E3 wires
-+  // runtime creation semantics onto the controller state machine).
++  // P4-E4 rejection matrix (design §4; browser is the authoritative
++  // layer). jitless stays closed in P4 (declared boundary).
++  const std::string mode = in_mode ? *in_mode : "semantic";
++  const std::string tier = in_tier ? *in_tier : "";
++  if (mode == "jitless-experiment") {
++    callback->sendFailure(Response::InvalidRequest(
++        "jitless-experiment is not available in P4 (declared boundary)"));
++    return;
++  }
++  if (mode != "semantic" && mode != "ignition-precise") {
++    callback->sendFailure(Response::InvalidRequest(
++        "mode must be semantic or ignition-precise"));
++    return;
++  }
++  if (mode == "semantic" && in_tier && !tier.empty()) {
++    callback->sendFailure(Response::InvalidRequest(
++        "semantic mode does not accept a tier parameter"));
++    return;
++  }
++  if (mode == "ignition-precise" && tier != "ignition") {
++    callback->sendFailure(Response::InvalidRequest(
++        "ignition-precise mode requires tier=ignition"));
++    return;
++  }
++  if (mode == "ignition-precise") {
++    // The observer's activation scoping and its activation_ref field both
++    // ride on the sync-causality activation stack (design §2): with
++    // causality=off no activation exists, so nothing would be observed.
++    // Require it at launch and say so machine-readably.
++    const std::string causality =
++        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++            "xtrace-causality");
++    if (causality != "sync") {
++      callback->sendFailure(Response::InvalidRequest(
++          "ignition-precise requires launch-time --xtrace-causality=sync "
++          "(observer scoping and activation_ref ride the sync activation "
++          "stack)"));
++      return;
++    }
++    // V14: explicit tier flags override max_opt's weak implications —
++    // reject precise mode on a browser launched with them.
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    for (const char* conflict :
++         {"sparkplug", "always-sparkplug"}) {
++      if (cmd->HasSwitch(conflict)) {
++        callback->sendFailure(Response::InvalidRequest(
++            std::string("ignition-precise conflicts with launch flag ") +
++            conflict));
++        return;
++      }
++    }
++  }
++  // Effective config: what actually governs execution — launch flags and
++  // the observer switch (tier truth comes from events, not names).
++  auto effective = std::make_unique<protocol::DictionaryValue>();
++  effective->Set("mode", base::Value(mode));
++  effective->Set("observerRequested",
++                 base::Value(controller->DomainObserverRequested()
++                                 ? std::string("true")
++                                 : std::string("false")));
++  effective->Set("codeCache",
++                 base::Value(mode == "ignition-precise"
++                                 ? std::string("disabled-and-disclosed")
++                                 : std::string("default")));
++  effective->Set("tierParam",
++                 base::Value(tier.empty() ? std::string("none") : tier));
++  // The P2 contract ties capture setup to launch-time configuration;
++  // startCapture reports the running capture's identity.
 +  callback->sendSuccess(
 +      String(controller->capture_id()),
 +      String(controller->current_generation()),
-+      String(controller->DomainStateName()));
++      String(controller->DomainStateName()),
++      std::move(effective));
 +}
 +
 +void XTraceHandler::UpdateCapture(
@@ -1362,10 +1473,10 @@ index 0000000000..d1207a5d83
 +}  // namespace content::protocol
 diff --git a/content/browser/devtools/protocol/xtrace_handler.h b/content/browser/devtools/protocol/xtrace_handler.h
 new file mode 100644
-index 0000000000..211898c9f1
+index 0000000000..4a921b6e84
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,75 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1412,6 +1523,8 @@ index 0000000000..211898c9f1
 +      std::optional<String> in_captureValues,
 +      std::optional<String> in_captureAssets,
 +      std::optional<String> in_causality,
++      std::optional<String> in_mode,
++      std::optional<String> in_tier,
 +      std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback)
 +      override;
 +  void UpdateCapture(
@@ -1487,10 +1600,10 @@ index db280b0576..cea936ae91 100644
  
 diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
 new file mode 100644
-index 0000000000..1474ac28ce
+index 0000000000..d77c3baec1
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace.pdl
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,110 @@
 +# Copyright 2026 The XTrace Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in Chromium's LICENSE file.
@@ -1561,10 +1674,17 @@ index 0000000000..1474ac28ce
 +      optional string captureValues
 +      optional string captureAssets
 +      optional string causality
++      # P4-E4 (design §4): mode/tier; conflict matrix enforced by the
++      # browser (authoritative layer).
++      optional string mode
++      optional string tier
 +    returns
 +      string captureId
 +      string generation
 +      CaptureState state
++      # The ACTUALLY effective configuration — machine-readable V14
++      # lesson (flag names are not tier truth).
++      object effectiveConfig
 +
 +  # Runtime filter update; serially allocated generation from "1".
 +  # Confirmation evidence is each event's config_generation field; a
@@ -1596,10 +1716,10 @@ index 0000000000..1474ac28ce
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..d5a6e211a2
+index 0000000000..a6d4fd18d9
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1092 @@
+@@ -0,0 +1,1098 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2371,6 +2491,12 @@ index 0000000000..d5a6e211a2
 +}
 +
 +
++bool XTraceCaptureController::DomainObserverRequested() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  return command_line->HasSwitch("xtrace-ignition-observer");
++}
++
 +base::FilePath XTraceCaptureController::DomainManifestPath() {
 +  return trace_file_path_.DirName().Append(
 +      trace_file_path_.BaseName().RemoveExtension().AddExtension(
@@ -2694,10 +2820,10 @@ index 0000000000..d5a6e211a2
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..5bbbbfe517
+index 0000000000..db5ac620eb
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,244 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2791,6 +2917,10 @@ index 0000000000..5bbbbfe517
 +  std::string DomainTerminalState();   // "unsettled" while not final
 +  std::string DomainTerminalReason();
 +  std::vector<std::string> DomainUnconfirmedProducers();
++
++  // P4-E4: whether the renderer-side ignition observer was requested at
++  // launch (--xtrace-ignition-observer forwarded to renderers).
++  bool DomainObserverRequested();
 +
 +  // P3-E3: manifest path for the IO stream (valid once settled).
 +  base::FilePath DomainManifestPath();
@@ -14587,14 +14717,15 @@ index dda4e09728..a5c0f2978d 100644
    if (!channel_)
      return;
 diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
-index 0f8b2defe6..2c924b7dfe 100644
+index 0f8b2defe6..e6eb79a824 100644
 --- a/third_party/blink/renderer/platform/BUILD.gn
 +++ b/third_party/blink/renderer/platform/BUILD.gn
-@@ -1681,6 +1681,12 @@ component("platform") {
+@@ -1681,6 +1681,13 @@ component("platform") {
      "widget/widget_base.h",
      "widget/widget_base_client.h",
      "windows_keyboard_codes.h",
 +    "xtrace/xtrace_control_impl.cc",
++    "xtrace/xtrace-ignition-bridge.cc",
 +    "xtrace/xtrace_control_impl.h",
 +    "xtrace/xtrace_logger.cc",
 +    "xtrace/xtrace_logger.h",
@@ -14603,7 +14734,7 @@ index 0f8b2defe6..2c924b7dfe 100644
    ]
  
    sources -= blink_platform_avx_files
-@@ -2197,6 +2203,7 @@ source_set("blink_platform_unittests_sources") {
+@@ -2197,6 +2204,7 @@ source_set("blink_platform_unittests_sources") {
    testonly = true
  
    sources = [
@@ -14611,6 +14742,206 @@ index 0f8b2defe6..2c924b7dfe 100644
      "animation/animation_translation_util_test.cc",
      "animation/compositor_animation_test.cc",
      "animation/timing_function_test.cc",
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
+new file mode 100644
+index 0000000000..62f2a42db4
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
+@@ -0,0 +1,141 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
++
++#include <atomic>
++#include "base/logging.h"
++#include <string_view>
++
++#include "base/command_line.h"
++#include "base/environment.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
++
++namespace v8 {
++namespace internal {
++class Isolate;
++namespace xtrace {
++// Mirror of v8/src/interpreter/xtrace-ignition-observer.h — the V8 header
++// is internal (not on Blink's include path); the definitions link from
++// the V8 archive and the layouts are asserted by the E2 unit build.
++struct IgnitionEvent {
++  uint32_t script_id;
++  uint32_t bytecode_version;
++  uint32_t bytecode_offset;
++  uint8_t tier;
++  uint8_t padding[3];
++  uint64_t activation_token;
++};
++using IgnitionObserverCallback = void (*)(Isolate* isolate,
++                                          const IgnitionEvent* event);
++struct IgnitionObserverGlobals {
++  std::atomic<uint32_t> gate{0};
++  uint32_t padding{0};
++  std::atomic<IgnitionObserverCallback> callback{nullptr};
++};
++extern IgnitionObserverGlobals g_ignition_observer;
++}  // namespace xtrace
++}  // namespace internal
++}  // namespace v8
++
++namespace blink::xtrace {
++
++namespace {
++
++constexpr char kObserverSwitch[] = "xtrace-ignition-observer";
++constexpr char kObserverEnv[] = "XTRACE_IGNITION_OBSERVER";
++
++bool ObserverRequestedImpl() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(kObserverSwitch)) {
++    return true;
++  }
++  std::unique_ptr<base::Environment> env = base::Environment::Create();
++  std::optional<std::string> value = env->GetVar(kObserverEnv);
++  return value && *value == "1";
++}
++
++std::atomic<bool> g_installed{false};
++
++void OnIgnitionEvent(v8::internal::Isolate* isolate,
++                     const v8::internal::xtrace::IgnitionEvent* event) {
++  // P4 scope: observe only inside an active tracked activation (the script
++  // evaluate activation that activation_ref bridges to). Bytecode outside
++  // observed scripts short-circuits at the gate; this check is the second
++  // line for activations opened before the bridge was consulted.
++  if (XTraceLogger::CurrentActivationToken() == 0) {
++    return;
++  }
++  // Emission goes through the logger's standard v3 envelope — the bridge
++  // never hand-rolls event JSON (a hand-rolled line once shipped without
++  // schema_version and the matrix's v3 assertion caught it).
++  XTraceLogger::LogIgnitionEvent(
++      event->script_id, event->bytecode_version, event->bytecode_offset,
++      XTraceLogger::CurrentActivationCallId());
++}
++}  // namespace
++
++bool IgnitionBridge::ObserverRequested() {
++  return ObserverRequestedImpl();
++}
++
++void IgnitionBridge::EnsureInstalled() {
++  if (!ObserverRequestedImpl()) {
++    return;
++  }
++  bool expected = false;
++  if (!g_installed.compare_exchange_strong(expected, true)) {
++    return;  // already installed
++  }
++  // Install the callback but keep the gate CLOSED: it opens/closes with
++  // each tracked activation, so bytecode outside observed scripts never
++  // even reaches the runtime call (generated-code load+branch decides).
++  v8::internal::xtrace::g_ignition_observer.callback.store(
++      &OnIgnitionEvent, std::memory_order_release);
++}
++
++void IgnitionBridge::Close() {
++  v8::internal::xtrace::g_ignition_observer.gate.store(0,
++                                                       std::memory_order_release);
++}
++
++namespace {
++void OpenGateForActivation() {
++  v8::internal::xtrace::g_ignition_observer.gate.store(1,
++                                                        std::memory_order_release);
++}
++void CloseGateAfterActivation() {
++  v8::internal::xtrace::g_ignition_observer.gate.store(0,
++                                                        std::memory_order_release);
++}
++}  // namespace
++
++void IgnitionBridge::OnActivationBegin(const char* frame_url) {
++  if (!g_installed.load(std::memory_order_acquire)) {
++    return;
++  }
++  // v1 scope: page scripts only. Internal schemes (chrome-extension://,
++  // devtools://, chrome://) keep the gate closed — their bytecode short-
++  // circuits in generated code and never reaches the runtime call. The
++  // control-plane script-range scoping (P4-E5) replaces this heuristic.
++  if (frame_url) {
++    std::string_view url(frame_url);
++    if (url.starts_with("chrome-extension://") ||
++        url.starts_with("devtools://") || url.starts_with("chrome://") ||
++        url.starts_with("chrome-untrusted://")) {
++      return;
++    }
++  }
++  OpenGateForActivation();
++}
++
++void IgnitionBridge::OnActivationEnd() {
++  if (g_installed.load(std::memory_order_acquire)) {
++    CloseGateAfterActivation();
++  }
++}
++
++}  // namespace blink::xtrace
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
+new file mode 100644
+index 0000000000..8ceaf3f87d
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_BRIDGE_H_
++
++#include "third_party/blink/renderer/platform/platform_export.h"
++
++namespace v8 {
++namespace internal {
++class Isolate;
++}  // namespace internal
++}  // namespace v8
++
++namespace blink::xtrace {
++
++// P4-E3: embedder side of the structured Ignition observer. Installs the
++// V8-side callback once per process and opens/closes the process-global
++// gate with the capture lifecycle. Events land on the current thread's
++// XTraceThreadProducer as schema-v3 `ignition` records (six-field design,
++// activation_ref bridged to the active causality call_id).
++class PLATFORM_EXPORT IgnitionBridge {
++ public:
++  // Reads the runtime configuration (switch/env). Returns true when the
++  // observer is requested for this capture (P4-E5 wires the CDP control
++  // path onto the same gate).
++  static bool ObserverRequested();
++
++  // Installs the callback (process-wide) if requested and opens the gate.
++  // Called when capture configuration is known (first producer activity /
++  // control-plane UpdateConfig). Idempotent.
++  static void EnsureInstalled();
++
++  // Closes the gate (stops new events; in-flight POD callbacks return).
++  static void Close();
++
++  // Activation-scoped gate: opens when a tracked script activation begins
++  // (the callback then knows token != 0) and closes at its terminal —
++  // bytecode outside observed scripts short-circuits in generated code.
++  static void OnActivationBegin(const char* frame_url);
++  static void OnActivationEnd();
++};
++
++}  // namespace blink::xtrace
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
 new file mode 100644
 index 0000000000..8ac91911ee
@@ -15390,15 +15721,17 @@ index 0000000000..f621f4cc3f
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..6ccd9e7fe7
+index 0000000000..01f787b952
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,414 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +
 +#include <optional>
 +#include <utility>
@@ -15654,6 +15987,9 @@ index 0000000000..6ccd9e7fe7
 +}
 +
 +blink::mojom::XTraceHost* XTraceThreadProducer::host() {
++  // P4-E3: first real producer activity is the capture-lifecycle point to
++  // install the ignition observer (idempotent; no-op unless requested).
++  IgnitionBridge::EnsureInstalled();
 +  if (!HostFactorySlot().is_null()) {
 +    // Installed by the test before any producer exists (P3-E0).
 +    return HostFactorySlot().Run();

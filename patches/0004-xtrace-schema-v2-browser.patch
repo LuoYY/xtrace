@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index 89eb629e19..363eaa10e1 100644
+index 89eb629e19..e63d8f55b0 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -341,7 +341,7 @@
@@ -23,17 +23,18 @@ index 89eb629e19..363eaa10e1 100644
    sampling_profiler_.reset();
  }
  
-@@ -3144,6 +3149,9 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+@@ -3144,6 +3149,10 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
          "xtrace-capture-assets",
          "xtrace-categories",
          "xtrace-causality",
++        "xtrace-ignition-observer",
 +        // XTRACE_TEST_SCAFFOLDING (long-term, ruled keep): forwarded so the
 +        // fault-injection buffer-capacity override reaches renderers.
 +        "xtrace-test-buffer-capacity",
          "xtrace-enable",
          "xtrace-file",
          "xtrace-max-body-bytes",
-@@ -6033,13 +6041,13 @@ constexpr char kXTraceFileEnv[] = "XTRACE_FILE";
+@@ -6033,13 +6042,13 @@ constexpr char kXTraceFileEnv[] = "XTRACE_FILE";
  constexpr char kXTraceMaxBodyBytesEnv[] = "XTRACE_MAX_BODY_BYTES";
  constexpr char kXTraceMaxHeaderValueBytesEnv[] =
      "XTRACE_MAX_HEADER_VALUE_BYTES";
@@ -49,7 +50,7 @@ index 89eb629e19..363eaa10e1 100644
  
  std::optional<base::FilePath> ReadXTraceBrowserNetworkTraceFilePath() {
    const base::CommandLine* command_line =
-@@ -6069,6 +6077,32 @@ bool IsXTraceBrowserNetworkEnabled() {
+@@ -6069,6 +6078,32 @@ bool IsXTraceBrowserNetworkEnabled() {
    return ReadXTraceBrowserNetworkTraceFilePath().has_value();
  }
  
@@ -82,7 +83,7 @@ index 89eb629e19..363eaa10e1 100644
  uint64_t ReadXTraceBrowserNetworkUInt64(const char* switch_name,
                                          const char* env_name,
                                          uint64_t default_value) {
-@@ -6307,9 +6341,9 @@ std::string CreateXTraceBrowserNetworkEventJson(
+@@ -6307,9 +6342,9 @@ std::string CreateXTraceBrowserNetworkEventJson(
      const network::ResourceRequest& request,
      const GURL& url,
      std::string_view method) {
@@ -94,7 +95,7 @@ index 89eb629e19..363eaa10e1 100644
    const int64_t mono_time_us =
        base::TimeTicks::Now().since_origin().InMicroseconds();
    bool truncated = false;
-@@ -6361,35 +6395,27 @@ std::string CreateXTraceBrowserNetworkEventJson(
+@@ -6361,35 +6396,27 @@ std::string CreateXTraceBrowserNetworkEventJson(
    args.Append(std::move(arg));
  
    base::DictValue event;
@@ -142,7 +143,7 @@ index 89eb629e19..363eaa10e1 100644
  
    std::string json;
    base::JSONWriter::Write(event, &json);
-@@ -6400,9 +6426,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+@@ -6400,9 +6427,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
      const network::ResourceRequest& request,
      const GURL& response_url,
      const network::mojom::URLResponseHead& response_head) {
@@ -154,7 +155,7 @@ index 89eb629e19..363eaa10e1 100644
    const int64_t mono_time_us =
        base::TimeTicks::Now().since_origin().InMicroseconds();
    bool truncated = false;
-@@ -6447,35 +6473,27 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+@@ -6447,35 +6474,27 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
    args.Append(std::move(arg));
  
    base::DictValue event;
@@ -202,7 +203,7 @@ index 89eb629e19..363eaa10e1 100644
  
    std::string json;
    base::JSONWriter::Write(event, &json);
-@@ -6485,9 +6503,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
+@@ -6485,9 +6504,9 @@ std::string CreateXTraceBrowserNetworkResponseEventJson(
  std::string CreateXTraceBrowserNetworkCompleteEventJson(
      const network::ResourceRequest& request,
      const network::URLLoaderCompletionStatus& completion_status) {
@@ -214,7 +215,7 @@ index 89eb629e19..363eaa10e1 100644
    const int64_t mono_time_us =
        base::TimeTicks::Now().since_origin().InMicroseconds();
    const int64_t completion_time_us =
-@@ -6556,78 +6574,42 @@ std::string CreateXTraceBrowserNetworkCompleteEventJson(
+@@ -6556,78 +6575,42 @@ std::string CreateXTraceBrowserNetworkCompleteEventJson(
    args.Append(std::move(arg));
  
    base::DictValue event;

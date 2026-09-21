@@ -8,9 +8,9 @@ org.chromium.Chromium, UA/UA-CH brands) is untouched.
 - build/config/mac/rules.gni: mac_app_bundle gains an optional bundle_name
   (bundle directory only; executable keeps output_name).
 - chrome/BUILD.gn: chrome_app sets bundle_name = "ChromiumX"; the release
-  verify_libraries_chrome_app action input follows the ChromiumX.app path
-  (surfaces only in non-component full graphs; found by P4-E0).
+  verify_libraries_chrome_app action input follows the ChromiumX.app path.
 - chrome/app/app-Info.plist: CFBundleDisplayName = ChromiumX.
+
 diff --git a/build/config/mac/rules.gni b/build/config/mac/rules.gni
 index 52478f4086..faa91a5895 100644
 --- a/build/config/mac/rules.gni

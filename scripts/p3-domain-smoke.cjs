@@ -91,6 +91,14 @@ async function main() {
     assert.equal(caps2.capabilities.limits.preciseModeAvailable, 'true');
     assert.equal(caps2.capabilities.limits.codeCachePolicy,
         'precise-mode-disables-and-discloses');
+    assert.equal(caps2.capabilities.limits.preciseModeRequires,
+        'xtrace-causality=sync');
+    // This run launches with causality=sync, so precise mode is accepted;
+    // the negative case (causality off) is covered by p4-precise-reject.
+    const preciseOK = await client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'ignition-precise', tier: 'ignition' });
+    assert.equal(preciseOK.effectiveConfig.mode, 'ignition-precise');
+    assert.equal(preciseOK.effectiveConfig.codeCache, 'disabled-and-disclosed');
 
     // P3-E4: runtime update — generation allocates serially from "1";
     // subsequent events carry the new generation.

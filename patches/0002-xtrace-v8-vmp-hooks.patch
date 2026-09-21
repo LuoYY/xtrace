@@ -1,5 +1,40 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 03938a26..daf455d9 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -196,6 +196,12 @@ declare_args() {
+   v8_enable_trace_ignition = false
+   v8_enable_trace_baseline_exec = false
+ 
++  # XTRACE P4-E2: structured pre-execution Ignition observer. Compile-time
++  # switch (default OFF = zero bytecode-path change, the P0 baseline
++  # semantics); embedder scripts must set it explicitly. Requires
++  # v8_enable_trace_unoptimized for the upstream facilities it builds on.
++  v8_enable_xtrace_ignition_observer = false
++
+   # Sets -DV8_TRACE_FEEDBACK_UPDATES.
+   v8_enable_trace_feedback_updates = false
+ 
+@@ -1343,6 +1349,9 @@ config("features") {
+   if (v8_enable_trace_unoptimized) {
+     defines += [ "V8_TRACE_UNOPTIMIZED" ]
+   }
++  if (v8_enable_xtrace_ignition_observer) {
++    defines += [ "V8_XTRACE_IGNITION_OBSERVER" ]
++  }
+   if (v8_enable_trace_feedback_updates) {
+     defines += [ "V8_TRACE_FEEDBACK_UPDATES" ]
+   }
+@@ -6120,6 +6129,7 @@ v8_cluster_source_set("v8_base_without_compiler") {
+     "src/interpreter/bytecode-array-iterator.cc",
+     "src/interpreter/bytecode-array-random-iterator.cc",
+     "src/interpreter/bytecode-array-writer.cc",
++      "src/interpreter/xtrace-ignition-observer.cc",
+     "src/interpreter/bytecode-decoder.cc",
+     "src/interpreter/bytecode-flags-and-tokens.cc",
+     "src/interpreter/bytecode-generator.cc",
 diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
-index f7c9c32e61d..edc466704cd 100644
+index f7c9c32e..edc46670 100644
 --- a/src/builtins/arm64/builtins-arm64.cc
 +++ b/src/builtins/arm64/builtins-arm64.cc
 @@ -49,6 +49,67 @@ namespace internal {
@@ -171,7 +206,7 @@ index f7c9c32e61d..edc466704cd 100644
  
    // Push receiver (undefined).
 diff --git a/src/builtins/array-at.tq b/src/builtins/array-at.tq
-index f323032a105..d9415988d93 100644
+index f323032a..d9415988 100644
 --- a/src/builtins/array-at.tq
 +++ b/src/builtins/array-at.tq
 @@ -3,14 +3,6 @@
@@ -232,7 +267,7 @@ index f323032a105..d9415988d93 100644
  }
  }
 diff --git a/src/builtins/array-copywithin.tq b/src/builtins/array-copywithin.tq
-index 12a0ce1fdc2..ef629d5f63a 100644
+index 12a0ce1f..ef629d5f 100644
 --- a/src/builtins/array-copywithin.tq
 +++ b/src/builtins/array-copywithin.tq
 @@ -4,14 +4,14 @@
@@ -285,7 +320,7 @@ index 12a0ce1fdc2..ef629d5f63a 100644
  }
  }
 diff --git a/src/builtins/array-every.tq b/src/builtins/array-every.tq
-index d045de1ea14..10e133b87c7 100644
+index d045de1e..10e133b8 100644
 --- a/src/builtins/array-every.tq
 +++ b/src/builtins/array-every.tq
 @@ -129,11 +129,19 @@ transitioning javascript builtin ArrayEvery(
@@ -311,7 +346,7 @@ index d045de1ea14..10e133b87c7 100644
    } label TypeError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-filter.tq b/src/builtins/array-filter.tq
-index 76658cc518b..45ca04e0a50 100644
+index 76658cc5..45ca04e0 100644
 --- a/src/builtins/array-filter.tq
 +++ b/src/builtins/array-filter.tq
 @@ -178,6 +178,9 @@ transitioning javascript builtin ArrayFilter(
@@ -339,7 +374,7 @@ index 76658cc518b..45ca04e0a50 100644
      ThrowCalledNonCallable(arguments[0]);
    }
 diff --git a/src/builtins/array-find.tq b/src/builtins/array-find.tq
-index b8e96dd81f9..709f90b2953 100644
+index b8e96dd8..709f90b2 100644
 --- a/src/builtins/array-find.tq
 +++ b/src/builtins/array-find.tq
 @@ -136,10 +136,19 @@ transitioning javascript builtin ArrayPrototypeFind(
@@ -365,7 +400,7 @@ index b8e96dd81f9..709f90b2953 100644
    } label NotCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-findindex.tq b/src/builtins/array-findindex.tq
-index 461f7c4c90f..74aad30c542 100644
+index 461f7c4c..74aad30c 100644
 --- a/src/builtins/array-findindex.tq
 +++ b/src/builtins/array-findindex.tq
 @@ -136,10 +136,19 @@ transitioning javascript builtin ArrayPrototypeFindIndex(
@@ -391,7 +426,7 @@ index 461f7c4c90f..74aad30c542 100644
    } label NotCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-findlast.tq b/src/builtins/array-findlast.tq
-index b856aff8553..1b7157a03f8 100644
+index b856aff8..1b7157a0 100644
 --- a/src/builtins/array-findlast.tq
 +++ b/src/builtins/array-findlast.tq
 @@ -99,10 +99,18 @@ transitioning javascript builtin ArrayPrototypeFindLast(
@@ -416,7 +451,7 @@ index b856aff8553..1b7157a03f8 100644
    } label NotCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-findlastindex.tq b/src/builtins/array-findlastindex.tq
-index 33a32ba45d9..9282cd83a46 100644
+index 33a32ba4..9282cd83 100644
 --- a/src/builtins/array-findlastindex.tq
 +++ b/src/builtins/array-findlastindex.tq
 @@ -98,10 +98,19 @@ transitioning javascript builtin ArrayPrototypeFindLastIndex(
@@ -442,7 +477,7 @@ index 33a32ba45d9..9282cd83a46 100644
    } label NotCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-flat.tq b/src/builtins/array-flat.tq
-index a40b8a0d8e8..c792da22adf 100644
+index a40b8a0d..c792da22 100644
 --- a/src/builtins/array-flat.tq
 +++ b/src/builtins/array-flat.tq
 @@ -620,7 +620,11 @@ transitioning javascript builtin ArrayPrototypeFlat(
@@ -479,7 +514,7 @@ index a40b8a0d8e8..c792da22adf 100644
  }
  }
 diff --git a/src/builtins/array-foreach.tq b/src/builtins/array-foreach.tq
-index 1d75478aa16..74480bddd45 100644
+index 1d75478a..74480bdd 100644
 --- a/src/builtins/array-foreach.tq
 +++ b/src/builtins/array-foreach.tq
 @@ -111,14 +111,22 @@ transitioning javascript builtin ArrayForEach(
@@ -508,7 +543,7 @@ index 1d75478aa16..74480bddd45 100644
      ThrowCalledNonCallable(arguments[0]);
    }
 diff --git a/src/builtins/array-from-async.tq b/src/builtins/array-from-async.tq
-index ecc9145cbda..504e3257878 100644
+index ecc9145c..504e3257 100644
 --- a/src/builtins/array-from-async.tq
 +++ b/src/builtins/array-from-async.tq
 @@ -334,6 +334,10 @@ transitioning macro CreateArrayFromIterableAsynchronously(
@@ -556,7 +591,7 @@ index ecc9145cbda..504e3257878 100644
      return promise;
  
 diff --git a/src/builtins/array-from.tq b/src/builtins/array-from.tq
-index 9e1cbe9229b..ba37410423a 100644
+index 9e1cbe92..ba374104 100644
 --- a/src/builtins/array-from.tq
 +++ b/src/builtins/array-from.tq
 @@ -9,22 +9,25 @@ transitioning javascript builtin ArrayFrom(
@@ -611,7 +646,7 @@ index 9e1cbe9229b..ba37410423a 100644
    } label IteratorNotCallable(_value: JSAny) deferred {
      ThrowTypeError(
 diff --git a/src/builtins/array-isarray.tq b/src/builtins/array-isarray.tq
-index 2162bc08712..5707f109163 100644
+index 2162bc08..5707f109 100644
 --- a/src/builtins/array-isarray.tq
 +++ b/src/builtins/array-isarray.tq
 @@ -13,13 +13,23 @@ javascript builtin ArrayIsArray(
@@ -640,7 +675,7 @@ index 2162bc08712..5707f109163 100644
      }
    }
 diff --git a/src/builtins/array-join.tq b/src/builtins/array-join.tq
-index c9ec15e06ea..a47e567a94d 100644
+index c9ec15e0..a47e567a 100644
 --- a/src/builtins/array-join.tq
 +++ b/src/builtins/array-join.tq
 @@ -841,7 +841,11 @@ transitioning javascript builtin ArrayPrototypeJoin(
@@ -673,7 +708,7 @@ index c9ec15e06ea..a47e567a94d 100644
  
  // https://tc39.es/ecma262/#sec-%typedarray%.prototype.tolocalestring
 diff --git a/src/builtins/array-lastindexof.tq b/src/builtins/array-lastindexof.tq
-index bd718039423..ea8ed3202ea 100644
+index bd718039..ea8ed320 100644
 --- a/src/builtins/array-lastindexof.tq
 +++ b/src/builtins/array-lastindexof.tq
 @@ -142,19 +142,34 @@ transitioning javascript builtin ArrayPrototypeLastIndexOf(
@@ -717,7 +752,7 @@ index bd718039423..ea8ed3202ea 100644
  }
  }
 diff --git a/src/builtins/array-map.tq b/src/builtins/array-map.tq
-index 10ae93df5d4..a7185bf0c9a 100644
+index 10ae93df..a7185bf0 100644
 --- a/src/builtins/array-map.tq
 +++ b/src/builtins/array-map.tq
 @@ -280,13 +280,17 @@ transitioning javascript builtin ArrayMap(
@@ -755,7 +790,7 @@ index 10ae93df5d4..a7185bf0c9a 100644
      ThrowCalledNonCallable(arguments[0]);
    }
 diff --git a/src/builtins/array-of.tq b/src/builtins/array-of.tq
-index d2536e67b50..9053c489764 100644
+index d2536e67..9053c489 100644
 --- a/src/builtins/array-of.tq
 +++ b/src/builtins/array-of.tq
 @@ -56,6 +56,9 @@ transitioning javascript builtin ArrayOf(
@@ -769,7 +804,7 @@ index d2536e67b50..9053c489764 100644
  }
  }
 diff --git a/src/builtins/array-reduce-right.tq b/src/builtins/array-reduce-right.tq
-index 6e92aefe66a..51d6fa5bab9 100644
+index 6e92aefe..51d6fa5b 100644
 --- a/src/builtins/array-reduce-right.tq
 +++ b/src/builtins/array-reduce-right.tq
 @@ -176,13 +176,25 @@ transitioning javascript builtin ArrayReduceRight(
@@ -801,7 +836,7 @@ index 6e92aefe66a..51d6fa5bab9 100644
    } label NoCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-reduce.tq b/src/builtins/array-reduce.tq
-index 7255508b7b8..9b179cdce20 100644
+index 7255508b..9b179cdc 100644
 --- a/src/builtins/array-reduce.tq
 +++ b/src/builtins/array-reduce.tq
 @@ -176,13 +176,25 @@ transitioning javascript builtin ArrayReduce(
@@ -833,7 +868,7 @@ index 7255508b7b8..9b179cdce20 100644
    } label NoCallableError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-reverse.tq b/src/builtins/array-reverse.tq
-index 1e9ed5ad9f8..e19221c406d 100644
+index 1e9ed5ad..e19221c4 100644
 --- a/src/builtins/array-reverse.tq
 +++ b/src/builtins/array-reverse.tq
 @@ -124,6 +124,9 @@ transitioning macro GenericArrayReverse(context: Context, receiver: JSAny):
@@ -858,7 +893,7 @@ index 1e9ed5ad9f8..e19221c406d 100644
  
  // https://tc39.es/ecma262/#sec-array.prototype.reverse
 diff --git a/src/builtins/array-shift.tq b/src/builtins/array-shift.tq
-index 2cd01632c5e..727f24a1ce1 100644
+index 2cd01632..727f24a1 100644
 --- a/src/builtins/array-shift.tq
 +++ b/src/builtins/array-shift.tq
 @@ -15,11 +15,16 @@ macro TryFastArrayShift(implicit context: Context)(receiver: JSAny): JSAny
@@ -918,7 +953,7 @@ index 2cd01632c5e..727f24a1ce1 100644
  }
  
 diff --git a/src/builtins/array-slice.tq b/src/builtins/array-slice.tq
-index 354751410a3..e233b60d3a2 100644
+index 35475141..e233b60d 100644
 --- a/src/builtins/array-slice.tq
 +++ b/src/builtins/array-slice.tq
 @@ -193,10 +193,15 @@ transitioning javascript builtin ArrayPrototypeSlice(
@@ -949,7 +984,7 @@ index 354751410a3..e233b60d3a2 100644
  }
  }
 diff --git a/src/builtins/array-some.tq b/src/builtins/array-some.tq
-index 53b902170d9..1827adb1a68 100644
+index 53b90217..1827adb1 100644
 --- a/src/builtins/array-some.tq
 +++ b/src/builtins/array-some.tq
 @@ -129,11 +129,19 @@ transitioning javascript builtin ArraySome(
@@ -975,7 +1010,7 @@ index 53b902170d9..1827adb1a68 100644
    } label TypeError deferred {
      ThrowCalledNonCallable(arguments[0]);
 diff --git a/src/builtins/array-splice.tq b/src/builtins/array-splice.tq
-index ae5b56cb9d7..27a35668c74 100644
+index ae5b56cb..27a35668 100644
 --- a/src/builtins/array-splice.tq
 +++ b/src/builtins/array-splice.tq
 @@ -193,6 +193,10 @@ transitioning macro FastArraySplice(
@@ -1015,7 +1050,7 @@ index ae5b56cb9d7..27a35668c74 100644
  }
  
 diff --git a/src/builtins/array-unshift.tq b/src/builtins/array-unshift.tq
-index 39068dd5088..a2f646fea7f 100644
+index 39068dd5..a2f646fe 100644
 --- a/src/builtins/array-unshift.tq
 +++ b/src/builtins/array-unshift.tq
 @@ -18,9 +18,12 @@ transitioning macro GenericArrayUnshift(
@@ -1042,7 +1077,7 @@ index 39068dd5088..a2f646fea7f 100644
    // 6. Return length + argCount.
    return newLength;
 diff --git a/src/builtins/array-with.tq b/src/builtins/array-with.tq
-index b45fbe825e7..db60cc753df 100644
+index b45fbe82..db60cc75 100644
 --- a/src/builtins/array-with.tq
 +++ b/src/builtins/array-with.tq
 @@ -70,9 +70,8 @@ transitioning javascript builtin ArrayPrototypeWith(
@@ -1058,7 +1093,7 @@ index b45fbe825e7..db60cc753df 100644
      try {
        return TryFastPackedArrayWith(object, len, actualIndex, value)
 diff --git a/src/builtins/array.tq b/src/builtins/array.tq
-index 4a43b1a8756..b45cb3d394c 100644
+index 4a43b1a8..b45cb3d3 100644
 --- a/src/builtins/array.tq
 +++ b/src/builtins/array.tq
 @@ -118,6 +118,9 @@ transitioning macro ArraySortContinueFromSnapshot(
@@ -1072,7 +1107,7 @@ index 4a43b1a8756..b45cb3d394c 100644
  }
  
 diff --git a/src/builtins/base.tq b/src/builtins/base.tq
-index 1c63e43de9c..8be755f3b45 100644
+index 1c63e43d..8be755f3 100644
 --- a/src/builtins/base.tq
 +++ b/src/builtins/base.tq
 @@ -70,6 +70,7 @@ extern macro IsWeakOrCleared(MaybeObject): bool;
@@ -1084,7 +1119,7 @@ index 1c63e43de9c..8be755f3b45 100644
  macro StrongToWeak<T: type>(x: T): Weak<T> {
    return %RawDownCast<Weak<T>>(MakeWeak(x));
 diff --git a/src/builtins/builtins-array-gen.cc b/src/builtins/builtins-array-gen.cc
-index b81aac4b842..111030a927a 100644
+index b81aac4b..111030a9 100644
 --- a/src/builtins/builtins-array-gen.cc
 +++ b/src/builtins/builtins-array-gen.cc
 @@ -282,6 +282,14 @@ TF_BUILTIN(ArrayPrototypePop, CodeStubAssembler) {
@@ -1442,7 +1477,7 @@ index b81aac4b842..111030a927a 100644
    }
  }
 diff --git a/src/builtins/builtins-array.cc b/src/builtins/builtins-array.cc
-index ae7dbcef108..2f00e05882e 100644
+index ae7dbcef..2f00e058 100644
 --- a/src/builtins/builtins-array.cc
 +++ b/src/builtins/builtins-array.cc
 @@ -2,6 +2,10 @@
@@ -1698,7 +1733,7 @@ index ae7dbcef108..2f00e05882e 100644
  }
  
 diff --git a/src/builtins/builtins-arraybuffer.cc b/src/builtins/builtins-arraybuffer.cc
-index 7561ffdb592..b0bb6c200c8 100644
+index 7561ffdb..b0bb6c20 100644
 --- a/src/builtins/builtins-arraybuffer.cc
 +++ b/src/builtins/builtins-arraybuffer.cc
 @@ -2,6 +2,10 @@
@@ -1819,7 +1854,7 @@ index 7561ffdb592..b0bb6c200c8 100644
  }
  
 diff --git a/src/builtins/builtins-async-function-gen.cc b/src/builtins/builtins-async-function-gen.cc
-index 98822e008de..5b214cec5c1 100644
+index 98822e00..5b214cec 100644
 --- a/src/builtins/builtins-async-function-gen.cc
 +++ b/src/builtins/builtins-async-function-gen.cc
 @@ -38,6 +38,16 @@ void AsyncFunctionBuiltinsAssembler::AsyncFunctionAwaitResumeClosure(
@@ -1888,7 +1923,7 @@ index 98822e008de..5b214cec5c1 100644
    // protector and no hooks/debug active, skip closures entirely and enqueue
    // an AsyncResumeTask directly.  This eliminates the AwaitContext, closure
 diff --git a/src/builtins/builtins-async-generator-gen.cc b/src/builtins/builtins-async-generator-gen.cc
-index 367787614c0..857e8b9383e 100644
+index 36778761..857e8b93 100644
 --- a/src/builtins/builtins-async-generator-gen.cc
 +++ b/src/builtins/builtins-async-generator-gen.cc
 @@ -119,6 +119,8 @@ class AsyncGeneratorBuiltinsAssembler : public AsyncBuiltinsAssembler {
@@ -1957,7 +1992,7 @@ index 367787614c0..857e8b9383e 100644
  }
  
 diff --git a/src/builtins/builtins-bigint.cc b/src/builtins/builtins-bigint.cc
-index 36cc472d357..b05a8e99bb3 100644
+index 36cc472d..b05a8e99 100644
 --- a/src/builtins/builtins-bigint.cc
 +++ b/src/builtins/builtins-bigint.cc
 @@ -2,6 +2,10 @@
@@ -2085,7 +2120,7 @@ index 36cc472d357..b05a8e99bb3 100644
  
  }  // namespace
 diff --git a/src/builtins/builtins-collections-gen.cc b/src/builtins/builtins-collections-gen.cc
-index d36e0553cd7..d223804bfc3 100644
+index d36e0553..d223804b 100644
 --- a/src/builtins/builtins-collections-gen.cc
 +++ b/src/builtins/builtins-collections-gen.cc
 @@ -1624,9 +1624,17 @@ TF_BUILTIN(MapPrototypeGet, CollectionsBuiltinsAssembler) {
@@ -2711,7 +2746,7 @@ index d36e0553cd7..d223804bfc3 100644
  }
  
 diff --git a/src/builtins/builtins-collections.cc b/src/builtins/builtins-collections.cc
-index d201091a617..8a89f2dfac8 100644
+index d201091a..8a89f2df 100644
 --- a/src/builtins/builtins-collections.cc
 +++ b/src/builtins/builtins-collections.cc
 @@ -2,19 +2,159 @@
@@ -2886,7 +2921,7 @@ index d201091a617..8a89f2dfac8 100644
    return ReadOnlyRoots(isolate).undefined_value();
  }
 diff --git a/src/builtins/builtins-console.cc b/src/builtins/builtins-console.cc
-index 4048fe28e4f..776315cf042 100644
+index 4048fe28..776315cf 100644
 --- a/src/builtins/builtins-console.cc
 +++ b/src/builtins/builtins-console.cc
 @@ -2,7 +2,9 @@
@@ -2946,7 +2981,7 @@ index 4048fe28e4f..776315cf042 100644
        return ReadOnlyRoots(isolate).exception();               \
      }                                                          \
 diff --git a/src/builtins/builtins-date.cc b/src/builtins/builtins-date.cc
-index 191d34a9265..448dfe4538a 100644
+index 191d34a9..448dfe45 100644
 --- a/src/builtins/builtins-date.cc
 +++ b/src/builtins/builtins-date.cc
 @@ -2,6 +2,9 @@
@@ -2996,7 +3031,7 @@ index 191d34a9265..448dfe4538a 100644
  
  // ES6 section 20.3.3.2 Date.parse ( string )
 diff --git a/src/builtins/builtins-error.cc b/src/builtins/builtins-error.cc
-index 6f4d6169899..224a98a9fb9 100644
+index 6f4d6169..224a98a9 100644
 --- a/src/builtins/builtins-error.cc
 +++ b/src/builtins/builtins-error.cc
 @@ -2,6 +2,9 @@
@@ -3090,7 +3125,7 @@ index 6f4d6169899..224a98a9fb9 100644
    // Collect the stack trace and install the stack accessors.
    RETURN_FAILURE_ON_EXCEPTION(
 diff --git a/src/builtins/builtins-function.cc b/src/builtins/builtins-function.cc
-index b511c42836f..390dc98438d 100644
+index b511c428..390dc984 100644
 --- a/src/builtins/builtins-function.cc
 +++ b/src/builtins/builtins-function.cc
 @@ -2,6 +2,10 @@
@@ -3228,7 +3263,7 @@ index b511c42836f..390dc98438d 100644
    THROW_NEW_ERROR_RETURN_FAILURE(
        isolate, NewTypeError(MessageTemplate::kNotGeneric,
 diff --git a/src/builtins/builtins-generator-gen.cc b/src/builtins/builtins-generator-gen.cc
-index acb2951e161..06b85a8a30f 100644
+index acb2951e..06b85a8a 100644
 --- a/src/builtins/builtins-generator-gen.cc
 +++ b/src/builtins/builtins-generator-gen.cc
 @@ -30,10 +30,13 @@ class GeneratorBuiltinsAssembler : public CodeStubAssembler {
@@ -3364,7 +3399,7 @@ index acb2951e161..06b85a8a30f 100644
  }
  
 diff --git a/src/builtins/builtins-global.cc b/src/builtins/builtins-global.cc
-index 89be05c0b3e..09e55be4b52 100644
+index 89be05c0..09e55be4 100644
 --- a/src/builtins/builtins-global.cc
 +++ b/src/builtins/builtins-global.cc
 @@ -2,6 +2,10 @@
@@ -3589,7 +3624,7 @@ index 89be05c0b3e..09e55be4b52 100644
        isolate, Execution::Call(isolate, function, target_global_proxy, {}));
  }
 diff --git a/src/builtins/builtins-intl-gen.cc b/src/builtins/builtins-intl-gen.cc
-index c30c582c8f0..f8fbba9b9ad 100644
+index c30c582c..f8fbba9b 100644
 --- a/src/builtins/builtins-intl-gen.cc
 +++ b/src/builtins/builtins-intl-gen.cc
 @@ -105,7 +105,13 @@ TF_BUILTIN(StringPrototypeToLowerCaseIntl, IntlBuiltinsAssembler) {
@@ -3608,7 +3643,7 @@ index c30c582c8f0..f8fbba9b9ad 100644
  
  // https://tc39.es/ecma402/#sup-string.prototype.tolocalelowercase
 diff --git a/src/builtins/builtins-intl.cc b/src/builtins/builtins-intl.cc
-index bbfdb2c5505..3039d39030b 100644
+index bbfdb2c5..3039d390 100644
 --- a/src/builtins/builtins-intl.cc
 +++ b/src/builtins/builtins-intl.cc
 @@ -7,8 +7,10 @@
@@ -3770,7 +3805,7 @@ index bbfdb2c5505..3039d39030b 100644
        args, isolate, v8::Isolate::UseCounterFeature::kDateTimeFormat,
        isolate->intl_date_time_format_function(), "Intl.DateTimeFormat");
 diff --git a/src/builtins/builtins-json.cc b/src/builtins/builtins-json.cc
-index 1ed282fb9bf..edd4112f263 100644
+index 1ed282fb..edd4112f 100644
 --- a/src/builtins/builtins-json.cc
 +++ b/src/builtins/builtins-json.cc
 @@ -2,6 +2,11 @@
@@ -4049,7 +4084,7 @@ index 1ed282fb9bf..edd4112f263 100644
  
  // https://tc39.es/proposal-json-parse-with-source/#sec-json.rawjson
 diff --git a/src/builtins/builtins-microtask-queue-gen.cc b/src/builtins/builtins-microtask-queue-gen.cc
-index 971826c71c1..4851602577b 100644
+index 971826c7..48516025 100644
 --- a/src/builtins/builtins-microtask-queue-gen.cc
 +++ b/src/builtins/builtins-microtask-queue-gen.cc
 @@ -498,6 +498,13 @@ void MicrotaskQueueBuiltinsAssembler::RunSingleMicrotask(
@@ -4067,7 +4102,7 @@ index 971826c71c1..4851602577b 100644
                                       offsetof(JSGeneratorObject, resume_mode_),
                                       SmiConstant(JSGeneratorObject::kNext));
 diff --git a/src/builtins/builtins-number-gen.cc b/src/builtins/builtins-number-gen.cc
-index 84bf3995a24..d0b6fe05b85 100644
+index 84bf3995..d0b6fe05 100644
 --- a/src/builtins/builtins-number-gen.cc
 +++ b/src/builtins/builtins-number-gen.cc
 @@ -16,6 +16,16 @@ namespace internal {
@@ -4265,7 +4300,7 @@ index 84bf3995a24..d0b6fe05b85 100644
  
  }  // namespace internal
 diff --git a/src/builtins/builtins-object-gen.cc b/src/builtins/builtins-object-gen.cc
-index 40b92befc45..276eba260bc 100644
+index 40b92bef..276eba26 100644
 --- a/src/builtins/builtins-object-gen.cc
 +++ b/src/builtins/builtins-object-gen.cc
 @@ -56,6 +56,11 @@ class ObjectEntriesValuesBuiltinsAssembler : public ObjectBuiltinsAssembler {
@@ -4602,7 +4637,7 @@ index 40b92befc45..276eba260bc 100644
  }
  
 diff --git a/src/builtins/builtins-object.cc b/src/builtins/builtins-object.cc
-index 7677d9c3f99..c4542c7b841 100644
+index 7677d9c3..c4542c7b 100644
 --- a/src/builtins/builtins-object.cc
 +++ b/src/builtins/builtins-object.cc
 @@ -12,12 +12,390 @@
@@ -5100,7 +5135,7 @@ index 7677d9c3f99..c4542c7b841 100644
  }
  
 diff --git a/src/builtins/builtins-reflect.cc b/src/builtins/builtins-reflect.cc
-index 4281d4e3957..cf016b1cf6d 100644
+index 4281d4e3..cf016b1c 100644
 --- a/src/builtins/builtins-reflect.cc
 +++ b/src/builtins/builtins-reflect.cc
 @@ -10,9 +10,331 @@
@@ -5469,7 +5504,7 @@ index 4281d4e3957..cf016b1cf6d 100644
  
  }  // namespace internal
 diff --git a/src/builtins/builtins-string-gen.cc b/src/builtins/builtins-string-gen.cc
-index 0d36a8af6ac..d5f7c2f4b84 100644
+index 0d36a8af..d5f7c2f4 100644
 --- a/src/builtins/builtins-string-gen.cc
 +++ b/src/builtins/builtins-string-gen.cc
 @@ -1048,6 +1048,14 @@ TF_BUILTIN(StringFromCharCode, StringBuiltinsAssembler) {
@@ -5700,7 +5735,7 @@ index 0d36a8af6ac..d5f7c2f4b84 100644
    }
  }
 diff --git a/src/builtins/builtins-string.cc b/src/builtins/builtins-string.cc
-index ccb5ca65560..c27fde9e675 100644
+index ccb5ca65..c27fde9e 100644
 --- a/src/builtins/builtins-string.cc
 +++ b/src/builtins/builtins-string.cc
 @@ -2,7 +2,10 @@
@@ -6017,7 +6052,7 @@ index ccb5ca65560..c27fde9e675 100644
  #endif  // !V8_INTL_SUPPORT
  
 diff --git a/src/builtins/builtins-string.tq b/src/builtins/builtins-string.tq
-index 7bc2bde0c7b..eaf68db7ade 100644
+index 7bc2bde0..eaf68db7 100644
 --- a/src/builtins/builtins-string.tq
 +++ b/src/builtins/builtins-string.tq
 @@ -167,8 +167,16 @@ transitioning javascript builtin StringPrototypeCharAt(
@@ -6100,7 +6135,7 @@ index 7bc2bde0c7b..eaf68db7ade 100644
  }
  
 diff --git a/src/builtins/builtins-typed-array.cc b/src/builtins/builtins-typed-array.cc
-index 105920d9564..9153c9b2ca3 100644
+index 105920d9..9153c9b2 100644
 --- a/src/builtins/builtins-typed-array.cc
 +++ b/src/builtins/builtins-typed-array.cc
 @@ -2,6 +2,11 @@
@@ -6614,7 +6649,7 @@ index 105920d9564..9153c9b2ca3 100644
  }
  
 diff --git a/src/builtins/data-view.tq b/src/builtins/data-view.tq
-index 4293aed6108..2e1789b2f1a 100644
+index 4293aed6..2e1789b2 100644
 --- a/src/builtins/data-view.tq
 +++ b/src/builtins/data-view.tq
 @@ -497,47 +497,75 @@ transitioning macro DataViewGet(
@@ -6947,7 +6982,7 @@ index 4293aed6108..2e1789b2f1a 100644
  }
  }
 diff --git a/src/builtins/math.tq b/src/builtins/math.tq
-index 98dab8e9b8c..42a90700794 100644
+index 98dab8e9..42a90700 100644
 --- a/src/builtins/math.tq
 +++ b/src/builtins/math.tq
 @@ -295,7 +295,11 @@ transitioning javascript builtin MathImul(
@@ -6990,7 +7025,7 @@ index 98dab8e9b8c..42a90700794 100644
  }
  }
 diff --git a/src/builtins/number.tq b/src/builtins/number.tq
-index b2ea79bc67b..8d9d558da0b 100644
+index b2ea79bc..8d9d558d 100644
 --- a/src/builtins/number.tq
 +++ b/src/builtins/number.tq
 @@ -176,6 +176,30 @@ macro IntToString(x: int32, radix: uint32): String {
@@ -7246,7 +7281,7 @@ index b2ea79bc67b..8d9d558da0b 100644
      tail bigint::BigIntBitwiseXor(left, right);
    }
 diff --git a/src/builtins/object.tq b/src/builtins/object.tq
-index 5858aa8b412..5a0682b1979 100644
+index 5858aa8b..5a0682b1 100644
 --- a/src/builtins/object.tq
 +++ b/src/builtins/object.tq
 @@ -135,19 +135,33 @@ transitioning builtin CreateObjectWithoutProperties(
@@ -7314,7 +7349,7 @@ index 5858aa8b412..5a0682b1979 100644
  
  // https://tc39.es/ecma262/#sec-object.prototype.valueof
 diff --git a/src/builtins/promise-abstract-operations.tq b/src/builtins/promise-abstract-operations.tq
-index 9265da58004..e0e8c20293b 100644
+index 9265da58..e0e8c202 100644
 --- a/src/builtins/promise-abstract-operations.tq
 +++ b/src/builtins/promise-abstract-operations.tq
 @@ -540,6 +540,10 @@ transitioning javascript builtin PromiseReject(
@@ -7340,7 +7375,7 @@ index 9265da58004..e0e8c20293b 100644
    }
  }
 diff --git a/src/builtins/promise-all.tq b/src/builtins/promise-all.tq
-index d8069119890..38ae5ba2891 100644
+index d8069119..38ae5ba2 100644
 --- a/src/builtins/promise-all.tq
 +++ b/src/builtins/promise-all.tq
 @@ -375,18 +375,28 @@ transitioning macro GeneratePromiseAll<F1: type, F2: type>(
@@ -7375,7 +7410,7 @@ index d8069119890..38ae5ba2891 100644
  
  extern macro MakeFixedArrayCOW(FixedArray): void;
 diff --git a/src/builtins/promise-any.tq b/src/builtins/promise-any.tq
-index 427d31c2840..bde4c595364 100644
+index 427d31c2..bde4c595 100644
 --- a/src/builtins/promise-any.tq
 +++ b/src/builtins/promise-any.tq
 @@ -378,10 +378,15 @@ transitioning javascript builtin PromiseAny(
@@ -7407,7 +7442,7 @@ index 427d31c2840..bde4c595364 100644
    }
  }
 diff --git a/src/builtins/promise-constructor.tq b/src/builtins/promise-constructor.tq
-index 50677631b53..d7a4b56a802 100644
+index 50677631..d7a4b56a 100644
 --- a/src/builtins/promise-constructor.tq
 +++ b/src/builtins/promise-constructor.tq
 @@ -94,7 +94,11 @@ transitioning javascript builtin PromisePrototypeCatch(
@@ -7424,7 +7459,7 @@ index 50677631b53..d7a4b56a802 100644
  }
  }
 diff --git a/src/builtins/promise-finally.tq b/src/builtins/promise-finally.tq
-index bdeebb086bb..3eca0993411 100644
+index bdeebb08..3eca0993 100644
 --- a/src/builtins/promise-finally.tq
 +++ b/src/builtins/promise-finally.tq
 @@ -216,8 +216,13 @@ transitioning javascript builtin PromisePrototypeFinally(
@@ -7443,7 +7478,7 @@ index bdeebb086bb..3eca0993411 100644
  
  extern macro PromiseCatchFinallySharedFunConstant(): SharedFunctionInfo;
 diff --git a/src/builtins/promise-race.tq b/src/builtins/promise-race.tq
-index 4e3b9529b5e..ae3e778cdc3 100644
+index 4e3b9529..ae3e778c 100644
 --- a/src/builtins/promise-race.tq
 +++ b/src/builtins/promise-race.tq
 @@ -61,7 +61,7 @@ transitioning javascript builtin PromiseRace(
@@ -7476,7 +7511,7 @@ index 4e3b9529b5e..ae3e778cdc3 100644
    }
    unreachable;
 diff --git a/src/builtins/promise-resolve.tq b/src/builtins/promise-resolve.tq
-index 202180adbba..e441b0769b7 100644
+index 202180ad..e441b076 100644
 --- a/src/builtins/promise-resolve.tq
 +++ b/src/builtins/promise-resolve.tq
 @@ -21,7 +21,12 @@ transitioning javascript builtin PromiseResolveTrampoline(
@@ -7494,7 +7529,7 @@ index 202180adbba..e441b0769b7 100644
  
  transitioning builtin PromiseResolve(
 diff --git a/src/builtins/promise-then.tq b/src/builtins/promise-then.tq
-index e4d81d54124..b16ca9e5048 100644
+index e4d81d54..b16ca9e5 100644
 --- a/src/builtins/promise-then.tq
 +++ b/src/builtins/promise-then.tq
 @@ -74,6 +74,10 @@ transitioning javascript builtin PromisePrototypeThen(
@@ -7509,7 +7544,7 @@ index e4d81d54124..b16ca9e5048 100644
    // Async instrumentation for Promise#then(), Promise#catch() and
    // Promise#finally(), where the latter two both call eventually
 diff --git a/src/builtins/promise-try.tq b/src/builtins/promise-try.tq
-index f08df498552..c3dd60f6622 100644
+index f08df498..c3dd60f6 100644
 --- a/src/builtins/promise-try.tq
 +++ b/src/builtins/promise-try.tq
 @@ -18,20 +18,28 @@ transitioning javascript builtin PromiseTry(
@@ -7558,7 +7593,7 @@ index f08df498552..c3dd60f6622 100644
    // 7. Return promiseCapability.[[Promise]].
    return capability.promise;
 diff --git a/src/builtins/promise-withresolvers.tq b/src/builtins/promise-withresolvers.tq
-index f53e69abd34..7066d738dce 100644
+index f53e69ab..7066d738 100644
 --- a/src/builtins/promise-withresolvers.tq
 +++ b/src/builtins/promise-withresolvers.tq
 @@ -27,8 +27,13 @@ transitioning javascript builtin PromiseWithResolvers(
@@ -7577,7 +7612,7 @@ index f53e69abd34..7066d738dce 100644
  
  }  // namespace promise
 diff --git a/src/builtins/proxy-delete-property.tq b/src/builtins/proxy-delete-property.tq
-index 06c8383d645..3bb39515621 100644
+index 06c8383d..3bb39515 100644
 --- a/src/builtins/proxy-delete-property.tq
 +++ b/src/builtins/proxy-delete-property.tq
 @@ -41,6 +41,9 @@ transitioning builtin ProxyDeleteProperty(
@@ -7601,7 +7636,7 @@ index 06c8383d645..3bb39515621 100644
    } label TrapUndefined(target: JSAny) {
      // 7.a. Return ? target.[[Delete]](P).
 diff --git a/src/builtins/proxy-get-property.tq b/src/builtins/proxy-get-property.tq
-index b73e5969da3..46a737a2e33 100644
+index b73e5969..46a737a2 100644
 --- a/src/builtins/proxy-get-property.tq
 +++ b/src/builtins/proxy-get-property.tq
 @@ -58,6 +58,9 @@ transitioning builtin ProxyGetProperty(
@@ -7615,7 +7650,7 @@ index b73e5969da3..46a737a2e33 100644
  }
  }
 diff --git a/src/builtins/proxy-has-property.tq b/src/builtins/proxy-has-property.tq
-index f6b474ddd91..0841f53cf88 100644
+index f6b474dd..0841f53c 100644
 --- a/src/builtins/proxy-has-property.tq
 +++ b/src/builtins/proxy-has-property.tq
 @@ -41,9 +41,15 @@ transitioning builtin ProxyHasProperty(
@@ -7635,7 +7670,7 @@ index f6b474ddd91..0841f53cf88 100644
    } label TrapUndefined(target: JSAny) {
      // 7.a. Return ? target.[[HasProperty]](P).
 diff --git a/src/builtins/proxy-set-property.tq b/src/builtins/proxy-set-property.tq
-index 52dd3396dc4..9b596e83d5c 100644
+index 52dd3396..9b596e83 100644
 --- a/src/builtins/proxy-set-property.tq
 +++ b/src/builtins/proxy-set-property.tq
 @@ -70,8 +70,14 @@ transitioning builtin ProxySetProperty(
@@ -7654,7 +7689,7 @@ index 52dd3396dc4..9b596e83d5c 100644
          SmiConstant(MessageTemplate::kProxyTrapReturnedFalsishFor), 'set',
          name);
 diff --git a/src/builtins/reflect.tq b/src/builtins/reflect.tq
-index 0a39c9f4e41..63d0f2106ac 100644
+index 0a39c9f4..63d0f210 100644
 --- a/src/builtins/reflect.tq
 +++ b/src/builtins/reflect.tq
 @@ -9,7 +9,12 @@ transitioning javascript builtin ReflectIsExtensible(
@@ -7779,7 +7814,7 @@ index 0a39c9f4e41..63d0f2106ac 100644
  }
  }  // namespace reflect
 diff --git a/src/builtins/regexp-exec.tq b/src/builtins/regexp-exec.tq
-index 867a8855797..32a8c3916de 100644
+index 867a8855..32a8c391 100644
 --- a/src/builtins/regexp-exec.tq
 +++ b/src/builtins/regexp-exec.tq
 @@ -37,8 +37,13 @@ transitioning javascript builtin RegExpPrototypeExec(
@@ -7798,7 +7833,7 @@ index 867a8855797..32a8c3916de 100644
  }
  }
 diff --git a/src/builtins/regexp-match-all.tq b/src/builtins/regexp-match-all.tq
-index fa777e4cf7c..b2268e2115d 100644
+index fa777e4c..b2268e21 100644
 --- a/src/builtins/regexp-match-all.tq
 +++ b/src/builtins/regexp-match-all.tq
 @@ -95,8 +95,13 @@ transitioning macro RegExpPrototypeMatchAllImpl(
@@ -7874,7 +7909,7 @@ index fa777e4cf7c..b2268e2115d 100644
  }
  }
 diff --git a/src/builtins/regexp-match.tq b/src/builtins/regexp-match.tq
-index be942bfba6a..e10baae0aa2 100644
+index be942bfb..e10baae0 100644
 --- a/src/builtins/regexp-match.tq
 +++ b/src/builtins/regexp-match.tq
 @@ -145,11 +145,23 @@ transitioning javascript builtin RegExpPrototypeMatch(
@@ -7908,7 +7943,7 @@ index be942bfba6a..e10baae0aa2 100644
  }
  }
 diff --git a/src/builtins/regexp-replace.tq b/src/builtins/regexp-replace.tq
-index 2e3eb3d6af5..b7d7719971c 100644
+index 2e3eb3d6..b7d77199 100644
 --- a/src/builtins/regexp-replace.tq
 +++ b/src/builtins/regexp-replace.tq
 @@ -246,10 +246,18 @@ transitioning javascript builtin RegExpPrototypeReplace(
@@ -7933,7 +7968,7 @@ index 2e3eb3d6af5..b7d7719971c 100644
  }
  }
 diff --git a/src/builtins/regexp-search.tq b/src/builtins/regexp-search.tq
-index f6e9e415804..2c94eab1279 100644
+index f6e9e415..2c94eab1 100644
 --- a/src/builtins/regexp-search.tq
 +++ b/src/builtins/regexp-search.tq
 @@ -98,8 +98,16 @@ transitioning javascript builtin RegExpPrototypeSearch(
@@ -7956,7 +7991,7 @@ index f6e9e415804..2c94eab1279 100644
  }
  }
 diff --git a/src/builtins/regexp-split.tq b/src/builtins/regexp-split.tq
-index 84d69317d31..5b80cf9cee0 100644
+index 84d69317..5b80cf9c 100644
 --- a/src/builtins/regexp-split.tq
 +++ b/src/builtins/regexp-split.tq
 @@ -65,8 +65,19 @@ transitioning javascript builtin RegExpPrototypeSplit(
@@ -7983,7 +8018,7 @@ index 84d69317d31..5b80cf9cee0 100644
  }
  }
 diff --git a/src/builtins/regexp-test.tq b/src/builtins/regexp-test.tq
-index ff5188d4dd3..e0804581a59 100644
+index ff5188d4..e0804581 100644
 --- a/src/builtins/regexp-test.tq
 +++ b/src/builtins/regexp-test.tq
 @@ -17,13 +17,27 @@ transitioning javascript builtin RegExpPrototypeTest(
@@ -8020,7 +8055,7 @@ index ff5188d4dd3..e0804581a59 100644
  
  transitioning builtin RegExpPrototypeTestFast(
 diff --git a/src/builtins/string-at.tq b/src/builtins/string-at.tq
-index a85e4d52901..1a386fa2978 100644
+index a85e4d52..1a386fa2 100644
 --- a/src/builtins/string-at.tq
 +++ b/src/builtins/string-at.tq
 @@ -20,10 +20,17 @@ transitioning javascript builtin StringPrototypeAt(
@@ -8043,7 +8078,7 @@ index a85e4d52901..1a386fa2978 100644
  }
  }
 diff --git a/src/builtins/string-endswith.tq b/src/builtins/string-endswith.tq
-index 94861cfd074..db294de24c0 100644
+index 94861cfd..db294de2 100644
 --- a/src/builtins/string-endswith.tq
 +++ b/src/builtins/string-endswith.tq
 @@ -74,11 +74,23 @@ transitioning javascript builtin StringPrototypeEndsWith(
@@ -8073,7 +8108,7 @@ index 94861cfd074..db294de24c0 100644
 +  return result;
  }
 diff --git a/src/builtins/string-includes.tq b/src/builtins/string-includes.tq
-index ed0bd0bdb17..6fb4a6b6aa1 100644
+index ed0bd0bd..6fb4a6b6 100644
 --- a/src/builtins/string-includes.tq
 +++ b/src/builtins/string-includes.tq
 @@ -44,6 +44,10 @@ transitioning javascript builtin StringPrototypeIncludes(
@@ -8089,7 +8124,7 @@ index ed0bd0bdb17..6fb4a6b6aa1 100644
  }
  }
 diff --git a/src/builtins/string-indexof.tq b/src/builtins/string-indexof.tq
-index 1d57409610c..7408d23e1ad 100644
+index 1d574096..7408d23e 100644
 --- a/src/builtins/string-indexof.tq
 +++ b/src/builtins/string-indexof.tq
 @@ -33,6 +33,10 @@ transitioning javascript builtin StringPrototypeIndexOf(
@@ -8105,7 +8140,7 @@ index 1d57409610c..7408d23e1ad 100644
  }
  }
 diff --git a/src/builtins/string-iterator.tq b/src/builtins/string-iterator.tq
-index 1609d6e60f5..6cd64a98abb 100644
+index 1609d6e6..6cd64a98 100644
 --- a/src/builtins/string-iterator.tq
 +++ b/src/builtins/string-iterator.tq
 @@ -22,7 +22,12 @@ transitioning javascript builtin StringPrototypeIterator(
@@ -8150,7 +8185,7 @@ index 1609d6e60f5..6cd64a98abb 100644
  }
  }
 diff --git a/src/builtins/string-match-search.tq b/src/builtins/string-match-search.tq
-index 05564d3d2a6..05086ec1b6a 100644
+index 05564d3d..05086ec1 100644
 --- a/src/builtins/string-match-search.tq
 +++ b/src/builtins/string-match-search.tq
 @@ -34,7 +34,8 @@ struct StringSearchFunctor {
@@ -8223,7 +8258,7 @@ index 05564d3d2a6..05086ec1b6a 100644
  }
  }
 diff --git a/src/builtins/string-pad.tq b/src/builtins/string-pad.tq
-index dfe2743043a..3ebb23ebdb8 100644
+index dfe27430..3ebb23eb 100644
 --- a/src/builtins/string-pad.tq
 +++ b/src/builtins/string-pad.tq
 @@ -12,6 +12,23 @@ extern transitioning builtin StringSubstring(
@@ -8306,7 +8341,7 @@ index dfe2743043a..3ebb23ebdb8 100644
  
  // https://tc39.es/ecma262/#sec-string.prototype.padstart
 diff --git a/src/builtins/string-repeat.tq b/src/builtins/string-repeat.tq
-index 2335157d872..75c620257c3 100644
+index 2335157d..75c62025 100644
 --- a/src/builtins/string-repeat.tq
 +++ b/src/builtins/string-repeat.tq
 @@ -33,11 +33,13 @@ transitioning javascript builtin StringPrototypeRepeat(
@@ -8348,7 +8383,7 @@ index 2335157d872..75c620257c3 100644
    } label InvalidCount deferred {
      ThrowRangeError(MessageTemplate::kInvalidCountValue, count);
 diff --git a/src/builtins/string-replaceall.tq b/src/builtins/string-replaceall.tq
-index 250aa88cdc7..3619ff69309 100644
+index 250aa88c..3619ff69 100644
 --- a/src/builtins/string-replaceall.tq
 +++ b/src/builtins/string-replaceall.tq
 @@ -58,7 +58,12 @@ transitioning javascript builtin StringPrototypeReplaceAll(
@@ -8378,7 +8413,7 @@ index 250aa88cdc7..3619ff69309 100644
    return result;
  }
 diff --git a/src/builtins/string-slice.tq b/src/builtins/string-slice.tq
-index f81ccdb63e0..17fa71adcdb 100644
+index f81ccdb6..17fa71ad 100644
 --- a/src/builtins/string-slice.tq
 +++ b/src/builtins/string-slice.tq
 @@ -25,11 +25,21 @@ transitioning javascript builtin StringPrototypeSlice(
@@ -8405,7 +8440,7 @@ index f81ccdb63e0..17fa71adcdb 100644
  }
  }
 diff --git a/src/builtins/string-startswith.tq b/src/builtins/string-startswith.tq
-index 0be258c82a3..c6060751a87 100644
+index 0be258c8..c6060751 100644
 --- a/src/builtins/string-startswith.tq
 +++ b/src/builtins/string-startswith.tq
 @@ -41,12 +41,25 @@ transitioning javascript builtin StringPrototypeStartsWith(
@@ -8437,7 +8472,7 @@ index 0be258c82a3..c6060751a87 100644
  }
  }
 diff --git a/src/builtins/string-substr.tq b/src/builtins/string-substr.tq
-index a88e8edc392..0dd4475d892 100644
+index a88e8edc..0dd4475d 100644
 --- a/src/builtins/string-substr.tq
 +++ b/src/builtins/string-substr.tq
 @@ -34,10 +34,22 @@ transitioning javascript builtin StringPrototypeSubstr(
@@ -8466,7 +8501,7 @@ index a88e8edc392..0dd4475d892 100644
  }
  }
 diff --git a/src/builtins/string-substring.tq b/src/builtins/string-substring.tq
-index a3a9a00c372..8458249749c 100644
+index a3a9a00c..84582497 100644
 --- a/src/builtins/string-substring.tq
 +++ b/src/builtins/string-substring.tq
 @@ -25,6 +25,12 @@ transitioning javascript builtin StringPrototypeSubstring(
@@ -8484,7 +8519,7 @@ index a3a9a00c372..8458249749c 100644
  }
  }
 diff --git a/src/builtins/string-trim.tq b/src/builtins/string-trim.tq
-index 3d1b7dfaeaf..ceb4285ec43 100644
+index 3d1b7dfa..ceb4285e 100644
 --- a/src/builtins/string-trim.tq
 +++ b/src/builtins/string-trim.tq
 @@ -136,15 +136,24 @@ transitioning macro StringTrimBody<T: type>(
@@ -8548,7 +8583,7 @@ index 3d1b7dfaeaf..ceb4285ec43 100644
  }
  }
 diff --git a/src/builtins/typed-array-at.tq b/src/builtins/typed-array-at.tq
-index ae74389cf62..b8ff109a76f 100644
+index ae74389c..b8ff109a 100644
 --- a/src/builtins/typed-array-at.tq
 +++ b/src/builtins/typed-array-at.tq
 @@ -22,9 +22,16 @@ transitioning javascript builtin TypedArrayPrototypeAt(
@@ -8570,7 +8605,7 @@ index ae74389cf62..b8ff109a76f 100644
  }
  }
 diff --git a/src/builtins/typed-array-entries.tq b/src/builtins/typed-array-entries.tq
-index 1bc649f4d7a..1d7b4391d3a 100644
+index 1bc649f4..1d7b4391 100644
 --- a/src/builtins/typed-array-entries.tq
 +++ b/src/builtins/typed-array-entries.tq
 @@ -17,7 +17,12 @@ transitioning javascript builtin TypedArrayPrototypeEntries(
@@ -8588,7 +8623,7 @@ index 1bc649f4d7a..1d7b4391d3a 100644
      ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameEntries);
    } label IsDetached deferred {
 diff --git a/src/builtins/typed-array-every.tq b/src/builtins/typed-array-every.tq
-index c15fa7dfd06..4492eba4900 100644
+index c15fa7df..4492eba4 100644
 --- a/src/builtins/typed-array-every.tq
 +++ b/src/builtins/typed-array-every.tq
 @@ -65,7 +65,12 @@ transitioning javascript builtin TypedArrayPrototypeEvery(
@@ -8606,7 +8641,7 @@ index c15fa7dfd06..4492eba4900 100644
      ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameEvery);
    } label Fail deferred {
 diff --git a/src/builtins/typed-array-filter.tq b/src/builtins/typed-array-filter.tq
-index c8c4f2740b3..06be2536bf5 100644
+index c8c4f274..06be2536 100644
 --- a/src/builtins/typed-array-filter.tq
 +++ b/src/builtins/typed-array-filter.tq
 @@ -80,6 +80,10 @@ transitioning javascript builtin TypedArrayPrototypeFilter(
@@ -8621,7 +8656,7 @@ index c8c4f2740b3..06be2536bf5 100644
    } label Fail deferred {
      ThrowTypeError(
 diff --git a/src/builtins/typed-array-find.tq b/src/builtins/typed-array-find.tq
-index 42044777c71..8f7fd1affb3 100644
+index 42044777..8f7fd1af 100644
 --- a/src/builtins/typed-array-find.tq
 +++ b/src/builtins/typed-array-find.tq
 @@ -67,7 +67,11 @@ transitioning javascript builtin TypedArrayPrototypeFind(
@@ -8638,7 +8673,7 @@ index 42044777c71..8f7fd1affb3 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-findindex.tq b/src/builtins/typed-array-findindex.tq
-index f96580451ee..a52609941a8 100644
+index f9658045..a5260994 100644
 --- a/src/builtins/typed-array-findindex.tq
 +++ b/src/builtins/typed-array-findindex.tq
 @@ -61,7 +61,12 @@ transitioning javascript builtin TypedArrayPrototypeFindIndex(
@@ -8656,7 +8691,7 @@ index f96580451ee..a52609941a8 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-findlast.tq b/src/builtins/typed-array-findlast.tq
-index 274e0e8f301..d15a9085104 100644
+index 274e0e8f..d15a9085 100644
 --- a/src/builtins/typed-array-findlast.tq
 +++ b/src/builtins/typed-array-findlast.tq
 @@ -66,7 +66,12 @@ transitioning javascript builtin TypedArrayPrototypeFindLast(
@@ -8674,7 +8709,7 @@ index 274e0e8f301..d15a9085104 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-findlastindex.tq b/src/builtins/typed-array-findlastindex.tq
-index 2b408d0a112..a4b20c29cdd 100644
+index 2b408d0a..a4b20c29 100644
 --- a/src/builtins/typed-array-findlastindex.tq
 +++ b/src/builtins/typed-array-findlastindex.tq
 @@ -66,7 +66,12 @@ transitioning javascript builtin TypedArrayPrototypeFindLastIndex(
@@ -8692,7 +8727,7 @@ index 2b408d0a112..a4b20c29cdd 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-foreach.tq b/src/builtins/typed-array-foreach.tq
-index 2fddaebfcf1..4af7ceea788 100644
+index 2fddaebf..4af7ceea 100644
 --- a/src/builtins/typed-array-foreach.tq
 +++ b/src/builtins/typed-array-foreach.tq
 @@ -62,7 +62,13 @@ transitioning javascript builtin TypedArrayPrototypeForEach(
@@ -8711,7 +8746,7 @@ index 2fddaebfcf1..4af7ceea788 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-keys.tq b/src/builtins/typed-array-keys.tq
-index dfa45c2e90f..85c0040de01 100644
+index dfa45c2e..85c0040d 100644
 --- a/src/builtins/typed-array-keys.tq
 +++ b/src/builtins/typed-array-keys.tq
 @@ -17,7 +17,12 @@ transitioning javascript builtin TypedArrayPrototypeKeys(
@@ -8729,7 +8764,7 @@ index dfa45c2e90f..85c0040de01 100644
      ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameKeys);
    } label IsDetached deferred {
 diff --git a/src/builtins/typed-array-reduce.tq b/src/builtins/typed-array-reduce.tq
-index 3de66e9bbd7..f2d61709d16 100644
+index 3de66e9b..f2d61709 100644
 --- a/src/builtins/typed-array-reduce.tq
 +++ b/src/builtins/typed-array-reduce.tq
 @@ -62,7 +62,15 @@ transitioning javascript builtin TypedArrayPrototypeReduce(
@@ -8750,7 +8785,7 @@ index 3de66e9bbd7..f2d61709d16 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-reduceright.tq b/src/builtins/typed-array-reduceright.tq
-index 2dea2e2ab68..4978721ccf6 100644
+index 2dea2e2a..4978721c 100644
 --- a/src/builtins/typed-array-reduceright.tq
 +++ b/src/builtins/typed-array-reduceright.tq
 @@ -64,9 +64,16 @@ transitioning javascript builtin TypedArrayPrototypeReduceRight(
@@ -8772,7 +8807,7 @@ index 2dea2e2ab68..4978721ccf6 100644
      ThrowCalledNonCallable(arguments[0]);
    } label NotTypedArray deferred {
 diff --git a/src/builtins/typed-array-set.tq b/src/builtins/typed-array-set.tq
-index 6fe170ede86..0eab5401198 100644
+index 6fe170ed..0eab5401 100644
 --- a/src/builtins/typed-array-set.tq
 +++ b/src/builtins/typed-array-set.tq
 @@ -133,7 +133,13 @@ transitioning macro TypedArrayPrototypeSetArray(
@@ -8826,7 +8861,7 @@ index 6fe170ede86..0eab5401198 100644
  }
  }
 diff --git a/src/builtins/typed-array-slice.tq b/src/builtins/typed-array-slice.tq
-index ad10a45767d..637d24f0c3c 100644
+index ad10a457..637d24f0 100644
 --- a/src/builtins/typed-array-slice.tq
 +++ b/src/builtins/typed-array-slice.tq
 @@ -118,6 +118,10 @@ transitioning javascript builtin TypedArrayPrototypeSlice(
@@ -8852,7 +8887,7 @@ index ad10a45767d..637d24f0c3c 100644
  }
  }
 diff --git a/src/builtins/typed-array-some.tq b/src/builtins/typed-array-some.tq
-index d22f9c07f8d..630b114303c 100644
+index d22f9c07..630b1143 100644
 --- a/src/builtins/typed-array-some.tq
 +++ b/src/builtins/typed-array-some.tq
 @@ -67,7 +67,12 @@ transitioning javascript builtin TypedArrayPrototypeSome(
@@ -8870,7 +8905,7 @@ index d22f9c07f8d..630b114303c 100644
      ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameSome);
    } label Fail deferred {
 diff --git a/src/builtins/typed-array-sort.tq b/src/builtins/typed-array-sort.tq
-index f1000167937..b7966b4a4eb 100644
+index f1000167..b7966b4a 100644
 --- a/src/builtins/typed-array-sort.tq
 +++ b/src/builtins/typed-array-sort.tq
 @@ -169,6 +169,10 @@ transitioning javascript builtin TypedArrayPrototypeSort(
@@ -8886,7 +8921,7 @@ index f1000167937..b7966b4a4eb 100644
  }
  }
 diff --git a/src/builtins/typed-array-subarray.tq b/src/builtins/typed-array-subarray.tq
-index 820ed564aaf..a6915314ec4 100644
+index 820ed564..a6915314 100644
 --- a/src/builtins/typed-array-subarray.tq
 +++ b/src/builtins/typed-array-subarray.tq
 @@ -84,8 +84,13 @@ transitioning javascript builtin TypedArrayPrototypeSubArray(
@@ -8905,7 +8940,7 @@ index 820ed564aaf..a6915314ec4 100644
  }
  }
 diff --git a/src/builtins/typed-array-values.tq b/src/builtins/typed-array-values.tq
-index da7ee2c392d..1ae7b963cfd 100644
+index da7ee2c3..1ae7b963 100644
 --- a/src/builtins/typed-array-values.tq
 +++ b/src/builtins/typed-array-values.tq
 @@ -17,7 +17,12 @@ transitioning javascript builtin TypedArrayPrototypeValues(
@@ -8922,8 +8957,108 @@ index da7ee2c392d..1ae7b963cfd 100644
    } label NotTypedArray deferred {
      ThrowTypeError(MessageTemplate::kNotTypedArray, kBuiltinNameValues);
    } label IsDetached deferred {
+diff --git a/src/codegen/external-reference.cc b/src/codegen/external-reference.cc
+index 71da3f06..50a94ae3 100644
+--- a/src/codegen/external-reference.cc
++++ b/src/codegen/external-reference.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "src/interpreter/xtrace-ignition-observer.h"
+ #include "src/codegen/external-reference.h"
+ 
+ #include <optional>
+@@ -352,6 +353,14 @@ ExternalReference ExternalReference::interpreter_dispatch_table_address(
+   return ExternalReference(isolate->interpreter()->dispatch_table_address());
+ }
+ 
++ExternalReference ExternalReference::xtrace_ignition_observer_gate(
++    Isolate* isolate) {
++  // P4-E2: process-global gate word read by the interpreter entry code.
++  return ExternalReference(
++      reinterpret_cast<Address>(
++          &xtrace::g_ignition_observer.gate));
++}
++
+ ExternalReference
+ ExternalReference::address_of_interpreter_entry_trampoline_instruction_start(
+     Isolate* isolate) {
+diff --git a/src/codegen/external-reference.h b/src/codegen/external-reference.h
+index e9387c6d..f2651837 100644
+--- a/src/codegen/external-reference.h
++++ b/src/codegen/external-reference.h
+@@ -31,6 +31,7 @@ enum class IsolateFieldId : uint8_t;
+   V(address_of_interpreter_entry_trampoline_instruction_start,                 \
+     "Address of the InterpreterEntryTrampoline instruction start")             \
+   V(interpreter_dispatch_table_address, "Interpreter::dispatch_table_address") \
++  V(xtrace_ignition_observer_gate, "XTrace::ignition_observer_gate") \
+   V(force_slow_path, "Isolate::force_slow_path_address()")                     \
+   V(isolate_root, "Isolate::isolate_root()")                                   \
+   V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
+diff --git a/src/d8/d8.cc b/src/d8/d8.cc
+index fc6d62e2..49d61971 100644
+--- a/src/d8/d8.cc
++++ b/src/d8/d8.cc
+@@ -15,6 +15,7 @@
+ #include <iterator>
+ #include <limits>
+ #include <span>
++#include <set>
+ #include <string>
+ #include <string_view>
+ #include <tuple>
+@@ -40,6 +41,29 @@
+ #include "include/v8-profiler.h"
+ #include "include/v8-wasm.h"
+ #include "src/api/api-inl.h"
++#include "src/interpreter/xtrace-ignition-observer.h"
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++namespace {
++std::atomic<uint64_t> g_d8_observer_events{0};
++std::mutex g_pairs_mutex;
++std::set<std::pair<uint32_t, uint32_t>> g_version_pairs;
++void D8ObserverCallback(v8::internal::Isolate*,
++                        const v8::internal::xtrace::IgnitionEvent* event) {
++  g_d8_observer_events.fetch_add(1, std::memory_order_relaxed);
++  // Warm-profile evidence: distinct (script, bytecode_version) pairs.
++  std::lock_guard<std::mutex> lock(g_pairs_mutex);
++  g_version_pairs.emplace(event->script_id, event->bytecode_version);
++}
++void D8ObserverReportAtExit() {
++  printf("XTRACE-P4 d8 observer events=%llu\n",
++         static_cast<unsigned long long>(g_d8_observer_events.load()));
++  std::lock_guard<std::mutex> lock(g_pairs_mutex);
++  for (const auto& [script, version] : g_version_pairs) {
++    printf("XTRACE-P4 d8 pair script=%u version=%u\n", script, version);
++  }
++}
++}  // namespace
++#endif
+ #include "src/base/cpu/cpu.h"
+ #include "src/base/fpu.h"
+ #include "src/base/hashing.h"
+@@ -7037,6 +7061,18 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+                                   strlen(kStandaloneD8ShellFlag));
+   i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
+                                        HelpOptions(HelpOptions::kExit, usage));
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // XTRACE_TEST_SCAFFOLDING (P4-E2 d8 loop): counting callback + open gate
++  // to prove the observer chain end-to-end in d8.
++  if (i::v8_flags.xtrace_observer_smoke) {
++    v8::internal::xtrace::g_ignition_observer.callback.store(
++        &D8ObserverCallback, std::memory_order_release);
++    v8::internal::xtrace::g_ignition_observer.gate.store(
++        1, std::memory_order_release);
++    atexit(D8ObserverReportAtExit);
++    printf("XTRACE-P4 d8 observer gate OPEN\n");
++  }
++#endif
+   i::FlagList::ResolveContradictionsWhenFuzzing();
+ 
+   options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index d5b352a620a..65aaecf0b49 100644
+index d5b352a6..65aaecf0 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -2637,6 +2637,72 @@ void ReportBootstrappingException(DirectHandle<Object> exception,
@@ -9012,7 +9147,7 @@ index d5b352a620a..65aaecf0b49 100644
    if (v8_flags.print_all_exceptions) {
      PrintF("=========================================================\n");
 diff --git a/src/execution/messages.cc b/src/execution/messages.cc
-index 9a3a6de3c51..c092e2ba0a8 100644
+index 9a3a6de3..c092e2ba 100644
 --- a/src/execution/messages.cc
 +++ b/src/execution/messages.cc
 @@ -4,7 +4,9 @@
@@ -9088,8 +9223,161 @@ index 9a3a6de3c51..c092e2ba0a8 100644
  
    if (IsErrorStackData(*lookup.error_stack)) {
      auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
+diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
+index bf210a58..f457bc76 100644
+--- a/src/flags/flag-definitions.h
++++ b/src/flags/flag-definitions.h
+@@ -252,6 +252,10 @@
+ //
+ #define FLAG FLAG_FULL
+ 
++// XTRACE_TEST_SCAFFOLDING (P4-E2 d8 loop): open the ignition observer
++// gate in d8 with a counting callback (browser path uses its own switch).
++DEFINE_BOOL(xtrace_observer_smoke, false, "open the XTrace ignition observer gate")
++
+ // Experimental features: Features that are still considered experimental and
+ // which are not ready for fuzz testing should be defined using this macro. The
+ // feature will then imply --experimental, which will indicate to the user that
+@@ -1301,6 +1305,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
+ #undef FLAG
+ #if V8_ENABLE_SPARKPLUG
+ #define FLAG FLAG_FULL
++
++
+ #else
+ #define FLAG FLAG_READONLY
+ #endif
+@@ -1350,6 +1356,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+ #undef FLAG
+ #define FLAG FLAG_FULL
+ 
++
++
+ // Internalize into a shared string table in the shared isolate
+ DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
+ DEFINE_IMPLICATION(shared_strings, shared_heap)
+@@ -3899,6 +3907,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
+ #undef FLAG
+ #ifdef ENABLE_GDB_JIT_INTERFACE
+ #define FLAG FLAG_FULL
++
++
+ #else
+ #define FLAG FLAG_READONLY
+ #endif
+@@ -3928,6 +3938,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
+ #undef FLAG
+ #ifdef DEBUG
+ #define FLAG FLAG_FULL
++
++
+ #else
+ #define FLAG FLAG_READONLY
+ #endif
+@@ -3989,6 +4001,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
+ #undef FLAG
+ #define FLAG FLAG_FULL
+ 
++
++
+ // log.cc
+ DEFINE_STRING(logfile, "v8.log",
+               "Specify the name of the log file, use '-' for console, '+' for "
+@@ -4158,6 +4172,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
+ #undef FLAG
+ #ifdef ENABLE_DISASSEMBLER
+ #define FLAG FLAG_FULL
++
++
+ #else
+ #define FLAG FLAG_READONLY
+ #endif
+@@ -4191,6 +4207,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
+ #undef FLAG
+ #define FLAG FLAG_FULL
+ 
++
++
+ //
+ // Predictable mode related flags.
+ //
+@@ -4441,6 +4459,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
+ 
+ #ifdef VERIFY_PREDICTABLE
+ #define FLAG FLAG_FULL
++
++
+ #else
+ #define FLAG FLAG_READONLY
+ #endif
+diff --git a/src/interpreter/interpreter-assembler.cc b/src/interpreter/interpreter-assembler.cc
+index 024b7e92..45b88718 100644
+--- a/src/interpreter/interpreter-assembler.cc
++++ b/src/interpreter/interpreter-assembler.cc
+@@ -13,6 +13,7 @@
+ #include "src/codegen/interface-descriptors-inl.h"
+ #include "src/codegen/machine-type.h"
+ #include "src/interpreter/bytecodes.h"
++#include "src/interpreter/xtrace-ignition-observer.h"
+ #include "src/interpreter/interpreter.h"
+ #include "src/objects/objects-inl.h"
+ 
+@@ -48,6 +49,27 @@ InterpreterAssembler::InterpreterAssembler(CodeAssemblerState* state,
+       made_call_(false),
+       reloaded_frame_ptr_(false),
+       bytecode_array_valid_(true) {
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // P4-E2: pre-execution observer gate. One load + branch per bytecode
++  // when closed (the measured residual); the runtime call fires only when
++  // the embedder opened the gate.
++  {
++    Label observe(this, Label::kDeferred), skip_observe(this);
++    // Uint32 load produces a Word32 directly; compare in Word32 domain
++    // (no cross-representation Change is inserted).
++    TNode<Uint32T> gate = UncheckedCast<Uint32T>(
++        Load(MachineType::Uint32(),
++             ExternalConstant(ExternalReference::
++                                  xtrace_ignition_observer_gate(isolate()))));
++    Branch(Word32Equal(gate, Uint32Constant(0)), &skip_observe, &observe);
++    BIND(&observe);
++    CallRuntime(Runtime::kXTraceIgnitionObserve, GetContext(),
++                BytecodeArrayTaggedPointer(), SmiTag(BytecodeOffset()),
++                GetAccumulatorUnchecked());
++    Goto(&skip_observe);
++    BIND(&skip_observe);
++  }
++#endif  // V8_XTRACE_IGNITION_OBSERVER
+ #ifdef V8_TRACE_UNOPTIMIZED
+   TraceBytecode(Runtime::kTraceUnoptimizedBytecodeEntry);
+ #endif
+@@ -1370,6 +1392,25 @@ void InterpreterAssembler::InlineShortStar(TNode<WordT> target_bytecode) {
+   bytecode_ = Bytecode::kStar0;
+   implicit_register_use_ = ImplicitRegisterUse::kNone;
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // P4: the short-Star inline path bypasses the constructor Entry site —
++  // without this second gate one logical Entry per short Star is missed
++  // (found by the E6 d8 parity loop).
++  {
++    Label observe(this, Label::kDeferred), skip_observe(this);
++    TNode<Uint32T> gate = UncheckedCast<Uint32T>(
++        Load(MachineType::Uint32(),
++             ExternalConstant(ExternalReference::
++                                  xtrace_ignition_observer_gate(isolate()))));
++    Branch(Word32Equal(gate, Uint32Constant(0)), &skip_observe, &observe);
++    BIND(&observe);
++    CallRuntime(Runtime::kXTraceIgnitionObserve, GetContext(),
++                BytecodeArrayTaggedPointer(), SmiTag(BytecodeOffset()),
++                GetAccumulatorUnchecked());
++    Goto(&skip_observe);
++    BIND(&skip_observe);
++  }
++#endif  // V8_XTRACE_IGNITION_OBSERVER
+ #ifdef V8_TRACE_UNOPTIMIZED
+   TraceBytecode(Runtime::kTraceUnoptimizedBytecodeEntry);
+ #endif
 diff --git a/src/interpreter/interpreter-generator.cc b/src/interpreter/interpreter-generator.cc
-index 613869ff5a1..275da77f27a 100644
+index 613869ff..275da77f 100644
 --- a/src/interpreter/interpreter-generator.cc
 +++ b/src/interpreter/interpreter-generator.cc
 @@ -65,6 +65,11 @@ using Label = CodeStubAssembler::Label;
@@ -9176,8 +9464,100 @@ index 613869ff5a1..275da77f27a 100644
  
  }  // namespace
  
+diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
+new file mode 100644
+index 00000000..9f807fbb
+--- /dev/null
++++ b/src/interpreter/xtrace-ignition-observer.cc
+@@ -0,0 +1,15 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "src/interpreter/xtrace-ignition-observer.h"
++
++namespace v8 {
++namespace internal {
++namespace xtrace {
++
++IgnitionObserverGlobals g_ignition_observer{};
++
++}  // namespace xtrace
++}  // namespace internal
++}  // namespace v8
+diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
+new file mode 100644
+index 00000000..510cfbff
+--- /dev/null
++++ b/src/interpreter/xtrace-ignition-observer.h
+@@ -0,0 +1,65 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef V8_SRC_INTERPRETER_XTRACE_IGNITION_OBSERVER_H_
++#define V8_SRC_INTERPRETER_XTRACE_IGNITION_OBSERVER_H_
++
++#include <atomic>
++#include <cstdint>
++
++#include "src/base/macros.h"
++
++namespace v8 {
++namespace internal {
++
++class Isolate;
++
++namespace xtrace {
++
++
++// P4-E2: structured pre-execution Ignition observer — embedder boundary.
++//
++// Compiled in only when V8_XTRACE_IGNITION_OBSERVER is defined (GN:
++// v8_enable_xtrace_ignition_observer, default false). The interpreter
++// entry instrumentation loads `gate` once and branches: closed gate costs
++// a single load+branch per bytecode (measured in P4-E7); open gate calls
++// the runtime observer which builds the POD below and invokes `callback`.
++//
++// The gate is process-global so the generated code needs one absolute
++// load; per-isolate/per-script scoping lives at the embedder callback
++// (P4-E3 wires it into Blink's V8PerIsolateData), which receives the
++// current isolate via TLS and decides whether the event is in range.
++
++struct IgnitionEvent {
++  uint32_t script_id;        // v8::internal Script id
++  uint32_t bytecode_version; // per-(isolate, script) compile instance no.
++  uint32_t bytecode_offset;  // NORMALIZED logical offset (no prefix bytes)
++  uint8_t tier;              // 0 = Ignition (only value in P4)
++  uint8_t padding[3];
++  uint64_t activation_token; // 0 from V8; embedder fills (P3 causality)
++};
++
++using IgnitionObserverCallback = void (*)(Isolate* isolate,
++                                          const IgnitionEvent* event);
++
++// The process-global published state. The interpreter reads `gate`; the
++// runtime observer reads callback. The embedder publishes both before
++// enabling the gate (release ordering) and keeps them valid for the
++// process lifetime (ordering contract in the P4 design doc §6).
++struct V8_EXPORT_PRIVATE IgnitionObserverGlobals {
++  std::atomic<uint32_t> gate{0};      // 0 = closed, 1 = observing
++  uint32_t padding{0};
++  std::atomic<IgnitionObserverCallback> callback{nullptr};
++};
++
++// Definition lives in xtrace-ignition-observer.cc; the external reference
++// exposes &globals.gate to generated code. Exported so the embedder dylib
++// (component builds: libblink_platform) can link against it.
++extern V8_EXPORT_PRIVATE IgnitionObserverGlobals g_ignition_observer;
++
++}  // namespace xtrace
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_SRC_INTERPRETER_XTRACE_IGNITION_OBSERVER_H_
 diff --git a/src/objects/js-objects.cc b/src/objects/js-objects.cc
-index a3b0b130d7b..4914e90dfe6 100644
+index a3b0b130..4914e90d 100644
 --- a/src/objects/js-objects.cc
 +++ b/src/objects/js-objects.cc
 @@ -4,8 +4,11 @@
@@ -9528,7 +9908,7 @@ index a3b0b130d7b..4914e90dfe6 100644
  }
  
 diff --git a/src/objects/keys.cc b/src/objects/keys.cc
-index b53630ba7f2..b0766b60d82 100644
+index b53630ba..b0766b60 100644
 --- a/src/objects/keys.cc
 +++ b/src/objects/keys.cc
 @@ -5,6 +5,7 @@
@@ -9603,7 +9983,7 @@ index b53630ba7f2..b0766b60d82 100644
  
  Maybe<bool> KeyAccumulator::CollectOwnJSProxyTargetKeys(
 diff --git a/src/objects/objects.cc b/src/objects/objects.cc
-index 0563f0d73a2..1848e3fa442 100644
+index 0563f0d7..1848e3fa 100644
 --- a/src/objects/objects.cc
 +++ b/src/objects/objects.cc
 @@ -6,8 +6,10 @@
@@ -9822,7 +10202,7 @@ index 0563f0d73a2..1848e3fa442 100644
  }
  
 diff --git a/src/runtime/runtime-compiler.cc b/src/runtime/runtime-compiler.cc
-index 30bf249547c..db128f0ef1e 100644
+index 30bf2495..db128f0e 100644
 --- a/src/runtime/runtime-compiler.cc
 +++ b/src/runtime/runtime-compiler.cc
 @@ -2,7 +2,10 @@
@@ -9899,7 +10279,7 @@ index 30bf249547c..db128f0ef1e 100644
  }
  
 diff --git a/src/runtime/runtime-debug.cc b/src/runtime/runtime-debug.cc
-index 3e90a73ff93..db44f8feb65 100644
+index 3e90a73f..db44f8fe 100644
 --- a/src/runtime/runtime-debug.cc
 +++ b/src/runtime/runtime-debug.cc
 @@ -2,6 +2,8 @@
@@ -9952,7 +10332,7 @@ index 3e90a73ff93..db44f8feb65 100644
          kIgnoreIfTopFrameBlackboxed,
          v8::debug::BreakReasons({v8::debug::BreakReason::kDebuggerStatement}));
 diff --git a/src/runtime/runtime-strings.cc b/src/runtime/runtime-strings.cc
-index 86fafdb8698..484c9eb9c55 100644
+index 86fafdb8..484c9eb9 100644
 --- a/src/runtime/runtime-strings.cc
 +++ b/src/runtime/runtime-strings.cc
 @@ -2,6 +2,11 @@
@@ -10137,8 +10517,108 @@ index 86fafdb8698..484c9eb9c55 100644
    return *internalized;
  }
  
+diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
+index 1e3f6ed3..6949358b 100644
+--- a/src/runtime/runtime-trace.cc
++++ b/src/runtime/runtime-trace.cc
+@@ -2,6 +2,13 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <atomic>
++#include <mutex>
++#include <unordered_map>
++
++#include "src/base/macros.h"
++
++#include "src/interpreter/xtrace-ignition-observer.h"
+ #include <iomanip>
+ 
+ #include "src/execution/arguments-inl.h"
+@@ -277,5 +284,81 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+ 
+ #endif  //  V8_DUMPLING
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++namespace {
++// Per-bytecode-array compilation-instance registry: an unseen array is a
++// fresh compilation (or deserialization) and gets the next number; a
++// reused array keeps its number. Trusted-space bytecode arrays are the
++// stable identity for "same compiled unit" (recompilation produces a new
++// array; code-cache reuse deserializes the same array).
++// Leaky singletons (intentional: process-lifetime registry).
++std::mutex* g_version_mutex = new std::mutex();
++auto* g_version_by_array =
++    new std::unordered_map<uintptr_t, uint32_t>();
++uint32_t NextBytecodeVersion(uintptr_t array_key) {
++  std::lock_guard<std::mutex> lock(*g_version_mutex);
++  auto it = g_version_by_array->find(array_key);
++  if (it != g_version_by_array->end()) {
++    return it->second;
++  }
++  const uint32_t version =
++      static_cast<uint32_t>(g_version_by_array->size()) + 1;
++  g_version_by_array->emplace(array_key, version);
++  return version;
++}
++}  // namespace
++
++RUNTIME_FUNCTION(Runtime_XTraceIgnitionObserve) {
++  HandleScope scope(isolate);
++  DCHECK_EQ(3, args.length());
++  // (bytecode_array, bytecode_offset_smi, accumulator) — same shape as the
++  // upstream Entry trace; the gate check already happened in generated code.
++  Handle<BytecodeArray> bytecode_array =
++      CheckedCast<BytecodeArray>(args.at(0));
++  int raw_offset = args.smi_value_at(1);
++  Handle<Object> accumulator = args.at(2);
++  (void)accumulator;  // value capture is post-P4; keep the slot for parity
++
++  // Upstream semantics (AdvanceToOffsetForTracing): a prefixed instruction
++  // dispatches twice — once at the prefix position, once at the opcode
++  // position. The logical Entry is the PREFIX-position dispatch; the
++  // opcode-position duplicate is dropped. Mirror exactly that with the
++  // iterator, never a byte peek (peeks false-positive on operand bytes).
++  int offset = raw_offset - BytecodeArray::kHeaderSize + kHeapObjectTag;
++  interpreter::BytecodeArrayIterator bytecode_iterator(bytecode_array);
++  while (bytecode_iterator.current_offset() +
++             bytecode_iterator.current_bytecode_size() <=
++         offset) {
++    bytecode_iterator.Advance();
++  }
++  if (offset != bytecode_iterator.current_offset()) {
++    // Opcode-position duplicate dispatch of a prefixed instruction.
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++
++  // Script identity via the executing frame's function (same derivation
++  // the upstream trace uses for its disassembly context).
++  JavaScriptStackFrameIterator frame_iterator(isolate);
++  UnoptimizedJSFrame* frame =
++      reinterpret_cast<UnoptimizedJSFrame*>(frame_iterator.frame());
++  Tagged<JSFunction> function = frame->function();
++  Handle<Script> script(
++      Cast<Script>(function->shared()->script()), isolate);
++  xtrace::IgnitionEvent event{};
++  event.script_id = static_cast<uint32_t>(script->id());
++  event.bytecode_version = NextBytecodeVersion(
++      reinterpret_cast<uintptr_t>(bytecode_array->address()));
++  event.bytecode_offset = static_cast<uint32_t>(offset);
++  event.tier = 0;              // Ignition
++  event.activation_token = 0;  // embedder fills (P3 causality)
++  auto cb = xtrace::g_ignition_observer.callback.load(
++      std::memory_order_acquire);
++  if (cb) {
++    cb(isolate, &event);
++  }
++  return ReadOnlyRoots(isolate).undefined_value();
++}
++#endif  // V8_XTRACE_IGNITION_OBSERVER
++
+ }  // namespace internal
+ }  // namespace v8
 diff --git a/src/runtime/runtime-typedarray.cc b/src/runtime/runtime-typedarray.cc
-index 2725e04bc75..f89c03b857c 100644
+index 2725e04b..f89c03b8 100644
 --- a/src/runtime/runtime-typedarray.cc
 +++ b/src/runtime/runtime-typedarray.cc
 @@ -2,13 +2,31 @@
@@ -13073,10 +13553,34 @@ index 2725e04bc75..f89c03b857c 100644
    HandleScope scope(isolate);
    DCHECK_EQ(1, args.length());
 diff --git a/src/runtime/runtime.h b/src/runtime/runtime.h
-index 2d7628dd0f5..40d3ff91dc7 100644
+index 2d7628dd..12442c83 100644
 --- a/src/runtime/runtime.h
 +++ b/src/runtime/runtime.h
-@@ -702,6 +702,9 @@ constexpr bool CanTriggerGC(T... properties) {
+@@ -197,6 +197,15 @@ constexpr bool CanTriggerGC(T... properties) {
+ #define FOR_EACH_INTRINSIC_TRACE_UNOPTIMIZED(F, I)
+ #endif
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++// P4-E2: structured pre-execution observer (own gate; no upstream tracing
++// dependency — the Entry instrumentation is a separate compile block).
++#define FOR_EACH_INTRINSIC_XTRACE_OBSERVER(F, I) \
++  F(XTraceIgnitionObserve, 3, 1)
++#else
++#define FOR_EACH_INTRINSIC_XTRACE_OBSERVER(F, I)
++#endif
++
+ #ifdef V8_DUMPLING
+ #define FOR_EACH_INTRINSIC_TRACE_DUMPLING(F, I) F(DumpExecutionFrame, 3, 1)
+ #else
+@@ -212,6 +221,7 @@ constexpr bool CanTriggerGC(T... properties) {
+ 
+ #define FOR_EACH_INTRINSIC_TRACE(F, I)       \
+   FOR_EACH_INTRINSIC_TRACE_UNOPTIMIZED(F, I) \
++  FOR_EACH_INTRINSIC_XTRACE_OBSERVER(F, I) \
+   FOR_EACH_INTRINSIC_TRACE_FEEDBACK(F, I)    \
+   FOR_EACH_INTRINSIC_TRACE_DUMPLING(F, I)
+ 
+@@ -702,6 +712,9 @@ constexpr bool CanTriggerGC(T... properties) {
    F(GrowableSharedArrayBufferByteLength, 1, 1) \
    F(TypedArrayCopyElements, 3, 1)              \
    F(TypedArrayGetBuffer, 1, 1)                 \
@@ -13087,7 +13591,7 @@ index 2d7628dd0f5..40d3ff91dc7 100644
    F(TypedArraySortFast, 1, 1)
  
 diff --git a/src/wasm/wasm-js.cc b/src/wasm/wasm-js.cc
-index cdd3e16a393..09543f3e81c 100644
+index cdd3e16a..09543f3e 100644
 --- a/src/wasm/wasm-js.cc
 +++ b/src/wasm/wasm-js.cc
 @@ -7,7 +7,9 @@
@@ -13205,7 +13709,7 @@ index cdd3e16a393..09543f3e81c 100644
    if (!info.IsConstructCall()) {
      thrower.TypeError("WebAssembly.Memory must be invoked with 'new'");
 diff --git a/third_party/v8/builtins/array-sort.tq b/third_party/v8/builtins/array-sort.tq
-index 90e36b5cd08..053b90671cc 100644
+index 90e36b5c..053b9067 100644
 --- a/third_party/v8/builtins/array-sort.tq
 +++ b/third_party/v8/builtins/array-sort.tq
 @@ -1603,12 +1603,20 @@ transitioning javascript builtin ArrayPrototypeSort(

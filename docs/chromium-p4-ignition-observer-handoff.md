@@ -57,25 +57,35 @@
 
 ### P4-E2：V8 observer 核心
 
+> [x] 完成——GN 开关 `v8_enable_xtrace_ignition_observer`（默认 false；两构建脚本 + XTraceIntegration/XTrace-release args 显式 true，A.1 接线证据）；Entry 与 InlineShortStar 双插桩点（短 Star 缺口由 E6 d8 环发现并修复）；运行期 gate 为 Uint32 load+branch（Word32 域比较，跨域 Change 曾使 mksnapshot fatal）；`Runtime_XTraceIgnitionObserve` 归一化严格镜像上游 `AdvanceToOffsetForTracing`（丢弃前缀指令的 opcode 位重复 dispatch）；字节码元数据按 BytecodeArray 实例登记 `bytecode_version`（trusted-space 地址为身份，重编译=新版本）；证据：`out/XTraceP4D8` 观察者 d8 + `p4-e6-parity` 十样本
+
 - 编译期保留能力、运行期按范围启停；关闭时在进入观察 runtime 前经轻量 gate（不分配事件），残余分支开销列入性能验收。
 - 事件：执行前语义；规范化 offset；accumulator/寄存器输入可从现有设施验证获取；执行后值不在首版。
 - 字节码元数据按版本预解码缓存，不每事件从头扫描；遵守 bytecode offset/accumulator/寄存器保存/GC 不变量。
 
 ### P4-E3：embedder 边界
 
+> [x] 完成——`xtrace-ignition-bridge.{h,cc}`（platform 层）：callback 随首个 producer 管道安装（`EnsureInstalled` 幂等），gate 按**页面脚本激活**开合（`OnActivationBegin/End`；内部 scheme 保持关闭，生成代码层短路），事件走所属线程 P2 producer 有界缓冲；`CurrentActivationToken()` 使 `activation_ref` 承接 P3 因果身份；证据：`p4-observer-*`（complete + ignition 事件 + 桥接）
+
 - Blink 侧状态经 `V8PerIsolateData::UserData`（参考 `v8_per_isolate_data.h:217`）；V8 侧零 Blink 头依赖（沿用 event_logger 解耦先例）；跨边界回调注册/销毁顺序按设计文档。
 - 事件入所属线程 producer 的有界缓冲，经 P2 管道批量入 writer；计数/终态契约不变（含 `sampled_out` 单列）。
 
 ### P4-E4：执行层校验与模式
+
+> [x] 完成——`startCapture` 增 mode/tier 参数（只加不改）+ browser 权威拒绝矩阵（jitless 关闭、semantic 拒显式 tier、precise 强制 ignition 且拒 sparkplug 系启动参数=V14 教训）+ `effectiveConfig` 回报实际生效配置；`getCapabilities.limits` 携 `preciseModeAvailable`/`ignitionObserverCompiled`（链接期探针）/`codeCachePolicy`（A.3 机器可读条件）；证据：`p3-domain-smoke-Kqsf3o` 四负例 + 正例
 
 - `startCapture`/更新路径的 tier 参数校验：browser 权威拒绝冲突组合（如精细模式 + 显式 Sparkplug 参数）；回报实际生效配置与真实执行层（不能只看 `max_opt` 字符串——以 active-tier intrinsic/帧内状态为证）。
 - 精细模式的执行层约束与性能/时序差异写入能力表与 manifest。
 
 ### P4-E5：控制面接入
 
+> [x] 完成——CDP 域五命令已在 P3 落地，本期扩展 mode/tier/effectiveConfig；observer 启停当前由启动期开关 + 激活作用域 gate 承担（运行期 isolate/script 范围为 P5+ 扩展，设计 §6 已留位）；v3 字段只加不改（`ignition` 对象六字段）
+
 - `XTraceControl`/CDP 域扩展 observer 启停（范围：isolate/context/script）；配置快照进 manifest；v3 字段扩展只加不改。
 
 ### P4-E6：P0 对照验收矩阵
+
+> [x] 完成——`scripts/p4-e6-parity.js`：十样本同进程 observer 计数与上游逻辑 Entry 计数**逐一相等**（29/24/24/105/73/35/64/66/63/1918）且 JS 语义不变（async 用 `.then` 取值）；4 组 tier 检查沿用 `verify_tiers.py` 复跑 PASS；关闭/开启语义一致性由 parity 的 XTRES 断言覆盖；`scripts/p4-e6-warm.js`：warm 证以 **bytecode_version 每编译实例递增**为准（A.3 要求的判据，非 flag 名）——三次新编译各得不同版本、单次编译重放版本稳定
 
 - P0 的 10 组样本（短 Star、Wide、ExtraWide、分支循环、递归、throw/catch、rethrow/finally、generator、async/await、270 局部变量）在结构化 observer 下复跑：目标函数 offset/opcode 与字节码反汇编对照；无重复/漏记（分支/循环/暂停样本按"实际到达序列"断言，不把未执行分支误判为漏采）。
 - 4 组 tier 检查复跑（`--max-opt=0`、baseline、`--max-opt=0 --sparkplug --always-sparkplug` 覆盖、`--max-opt=1 + %CompileBaseline`）。
@@ -83,10 +93,19 @@
 
 ### P4-E7：性能验收（release 构建）
 
+> [x] 完成（含披露边界）——release 变体（`out/XTrace-release`，1830 步含 observer 编译）重建；浏览器矩阵四跑全 complete：gate 关 0 条 ignition、observer 开 12702 条且重跑字节级一致（46007 事件/23.5MB）；墙钟 10.9–12.2s（含固定 6s 页面等待）。**披露**：① 同配置跨跑总事件数波动（113k vs 13k）源于页面非确定性（定时器/动态脚本），非 observer 开销；② d8 确定性负载测得 gate 关 29.54s / 开 42.70s（+44.6%，全保真每字节码路径）；③ “gate 关 vs 无 observer 编译”的精确零差对照需 P0 基线 d8，已如实登记为边界而非省略
+
 - `scripts/build_xtrace_release.sh` 出 release 变体；测量：关闭时开销、启用时事件速率、批大小、峰值 RSS、队列占用、丢弃率、停止耗时；与 P1/P2 基线数据对比，口径注明构建变体。
 - 上游 trace-off 不是无插桩基线（V11）——对照必须是无 observer 编译能力与关闭 gate 的差值。
 
 ### P4-E8：证据包与终审提交
+
+> [x] 完成——五补丁回写（V8 侧改动**首次进入 0002**：GN 开关/外部引用/Entry+短 Star 插桩/runtime 归一化/版本登记/d8 脚手架；Blink bridge 与 CDP 域进 0001；logger 进 0003；ccbc 进 0004；命名进 0005）。**最终重放**：Chromium 栈 0001→0003→0004→0005 == 工作树（tree `3a9173df`，119 文件逐 blob 0 不符）；V8 0002 == 工作树（tree `361dc264`，135 文件 0 不符）。回归 338/28/211（run_tests.sh）+ 单测 5/5 + 4/4；矩阵**双跑** 12/12（observer 开 `browser-run-rYUfB3` / 关 `browser-run-CVpIbK`）+ 故障 4/4（`p2-fault-44mouo`）+ observer 冒烟含 v3 validator（`p4-observer-ho7guc`：163 ignition/163 桥接/99 offset）；摘要入 identity.json `p4E8Supplement`（含 release 变体 dylib）。
+>
+> **E8 期间发现并修复的三个真实缺陷**（均由矩阵/validator 断言抓出，非自测漏网）：
+> 1. **observer 事件缺 v3 envelope**：bridge 曾手搓 JSON（无 `schema_version`/时间/pid/tid/attribution/causality）——矩阵的 "non-v3 record" 断言抓到（observer 关时 12/12、开时 8/12）。修复：改走 logger 的 `EmitEvent` 标准信封，新增 `XTraceLogger::LogIgnitionEvent`；六字段置于**顶层 `ignition` 对象**（设计 DP2 形状，非 args 内）。
+> 2. **证据缺口**：observer 冒烟此前不跑 validator，故缺陷 1 未在该处暴露。修复：冒烟永久加入 `validate_trace.py --schema-version 3` 断言（`validatorPass`）。
+> 3. **精细模式与因果的隐含耦合**：observer 的激活作用域依赖 causality 激活栈（`BeginActivation` 在 causality=off 时早退），故 v1 模式案例 0 条 ignition。处置：`startCapture` 的 ignition-precise **要求启动期 `--xtrace-causality=sync`**，否则权威拒绝；`getCapabilities.limits.preciseModeRequires` 机器可读披露（A.3 口径）。**此为对已裁决设计 §4 矩阵的新增一行，请架构师追认**（与 `activation_ref → call_id` 承接语义一致，非新机制）。
 
 沿用既往纪律：补丁回写（V8 侧进 0002；Blink/content 侧进 0001/0003）+ 干净索引顺序复验 + 逐文件 blob 比对（P2 终审方法）；回归 338/28/211 + 单测 5/5+4/4 + 新增；文档与进度同步。
 

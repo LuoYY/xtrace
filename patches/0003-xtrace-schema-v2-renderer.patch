@@ -74,7 +74,7 @@ index 8da7876994..05e5e99341 100644
    };
  
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b..a1be1b8601 100644
+index b2a722741b..1cd0f31503 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -4,6 +4,7 @@
@@ -85,15 +85,16 @@ index b2a722741b..a1be1b8601 100644
  #include <atomic>
  #include <cctype>
  #include <memory>
-@@ -29,6 +30,7 @@
+@@ -29,6 +30,8 @@
  #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
  #include "third_party/blink/public/mojom/xtrace/xtrace.mojom-blink.h"
  #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
  #include "v8/include/v8.h"
  
  namespace blink {
-@@ -39,17 +41,20 @@ constexpr char kFileEnv[] = "XTRACE_FILE";
+@@ -39,17 +42,20 @@ constexpr char kFileEnv[] = "XTRACE_FILE";
  constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
  constexpr char kCaptureValuesEnv[] = "XTRACE_CAPTURE_VALUES";
  constexpr char kCaptureAssetsEnv[] = "XTRACE_CAPTURE_ASSETS";
@@ -114,7 +115,7 @@ index b2a722741b..a1be1b8601 100644
    std::string session_id;
    std::string trace_stem;
  };
-@@ -118,6 +123,8 @@ XTraceConfig ReadConfigFromRuntime() {
+@@ -118,6 +124,8 @@ XTraceConfig ReadConfigFromRuntime() {
    config.capture_assets =
        ReadRuntimeString(kCaptureAssetsSwitch, kCaptureAssetsEnv)
            .value_or("full");
@@ -123,7 +124,7 @@ index b2a722741b..a1be1b8601 100644
    config.session_id = MakeSessionId();
    if (trace_file_path) {
      config.trace_stem =
-@@ -155,11 +162,51 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
+@@ -155,11 +163,51 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
    return false;
  }
  
@@ -176,7 +177,7 @@ index b2a722741b..a1be1b8601 100644
  std::string Sha1Ref(std::string_view value) {
    return "sha1:" + base::HexEncode(base::SHA1HashString(value));
  }
-@@ -247,162 +294,253 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
+@@ -247,162 +295,260 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
    return safe.empty() ? "asset" : safe;
  }
  
@@ -429,7 +430,8 @@ index b2a722741b..a1be1b8601 100644
 +               const CausalityFields* causal_fields,
 +               const char* asset_kind = nullptr,
 +               const String* asset_url = nullptr,
-+               const String* asset_source = nullptr) {
++               const String* asset_source = nullptr,
++               std::string_view extra_top_fields = std::string_view()) {
 +  xtrace::XTraceThreadProducer* producer =
 +      xtrace::XTraceThreadProducer::Current();
 +  if (!producer) {
@@ -526,6 +528,12 @@ index b2a722741b..a1be1b8601 100644
 +  }
 +  line.append(",");
 +  AppendCausalityObject(&line, config, fields);
++  if (!extra_top_fields.empty()) {
++    if (!extra_fields.empty()) {
++      extra_fields.append(",");
++    }
++    extra_fields.append(extra_top_fields);
++  }
    if (!extra_fields.empty()) {
      line.append(",");
      line.append(extra_fields);
@@ -544,10 +552,59 @@ index b2a722741b..a1be1b8601 100644
  }
  
  }  // namespace
-@@ -411,6 +549,62 @@ bool XTraceLogger::Enabled() {
+@@ -411,6 +557,115 @@ bool XTraceLogger::Enabled() {
    return GetCachedConfig().enabled;
  }
  
++uint64_t XTraceLogger::CurrentActivationToken() {
++  const std::vector<XTraceActivation>& stack = ActivationStack();
++  return stack.empty() ? 0 : stack.back().token;
++}
++
++String XTraceLogger::CurrentActivationCallId() {
++  const XTraceConfig& config = GetCachedConfig();
++  const std::vector<XTraceActivation>& stack = ActivationStack();
++  if (stack.empty()) {
++    return String();
++  }
++  // Same construction as AppendCallId: session_id is numeric-derived and
++  // JSON-safe, so no escaping is needed.
++  return String::FromUtf8(config.session_id + ":" +
++                          base::NumberToString(stack.back().token));
++}
++
++void XTraceLogger::LogIgnitionEvent(uint32_t script_id,
++                                    uint32_t bytecode_version,
++                                    uint32_t bytecode_offset,
++                                    const String& activation_ref) {
++  const XTraceConfig& config = GetCachedConfig();
++  if (!CategoryEnabled(config, "reverse")) {
++    return;
++  }
++  // Schema v3 §2 / design DP2: the six fields live in a top-level
++  // `ignition` object (args stays an empty array — no per-event payload).
++  std::string ignition;
++  ignition.append("\"ignition\":{\"script_id\":");
++  ignition.append(QuoteJsonString(base::NumberToString(script_id)));
++  ignition.append(",\"bytecode_version\":");
++  ignition.append(QuoteJsonString(base::NumberToString(bytecode_version)));
++  ignition.append(",\"bytecode_offset\":");
++  ignition.append(QuoteJsonString(base::NumberToString(bytecode_offset)));
++  ignition.append(",\"tier\":\"ignition\",\"activation_ref\":");
++  ignition.append(activation_ref.empty()
++                      ? "null"
++                      : QuoteJsonString(activation_ref.Utf8()));
++  ignition.append("}");
++  // Hot path: no stack capture; attribution stays unresolved (schema v3
++  // §3.3 explicitly allows this for V8 paths — never guess from URL/time).
++  // Causality comes from the ambient activation stack: the event is a
++  // singleton child of the active script activation.
++  EmitEvent(config, "reverse", "call", "Ignition.execute", String("[]"),
++            /*capture_stack=*/false, std::string_view(), std::string_view(),
++            nullptr, /*asset_kind=*/nullptr, /*asset_url=*/nullptr,
++            /*asset_source=*/nullptr, ignition);
++}
++
 +bool XTraceLogger::CausalitySyncEnabled() {
 +  return blink::CausalitySyncEnabled(GetCachedConfig());
 +}
@@ -584,6 +641,9 @@ index b2a722741b..a1be1b8601 100644
 +            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(),
 +            &fields);
 +  stack.push_back(std::move(activation));
++  // P4: bytecode observation is scoped to this activation (bridge no-ops
++  // unless the observer was requested at startup).
++  xtrace::IgnitionBridge::OnActivationBegin(frame_url.Utf8().c_str());
 +  return stack.back().token;
 +}
 +
@@ -594,6 +654,7 @@ index b2a722741b..a1be1b8601 100644
 +  std::vector<XTraceActivation>& stack = ActivationStack();
 +  if (!stack.empty() && stack.back().token == token) {
 +    stack.pop_back();
++    xtrace::IgnitionBridge::OnActivationEnd();
 +  }
 +}
 +
@@ -607,7 +668,7 @@ index b2a722741b..a1be1b8601 100644
  String XTraceLogger::QuoteJson(const String& value) {
    return String::FromUtf8(QuoteJsonString(value.Utf8()));
  }
-@@ -448,11 +642,9 @@ void XTraceLogger::LogEvent(const char* category,
+@@ -448,11 +703,9 @@ void XTraceLogger::LogEvent(const char* category,
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -622,7 +683,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogEventWithContext(const char* category,
-@@ -465,12 +657,8 @@ void XTraceLogger::LogEventWithContext(const char* category,
+@@ -465,12 +718,8 @@ void XTraceLogger::LogEventWithContext(const char* category,
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -637,7 +698,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogEventNoStack(const char* category,
-@@ -481,11 +669,9 @@ void XTraceLogger::LogEventNoStack(const char* category,
+@@ -481,11 +730,9 @@ void XTraceLogger::LogEventNoStack(const char* category,
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -652,7 +713,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogEventNoStackWithContext(const char* category,
-@@ -498,12 +684,8 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+@@ -498,12 +745,8 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -667,7 +728,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogAssetEvent(const char* category,
-@@ -520,13 +702,9 @@ void XTraceLogger::LogAssetEvent(const char* category,
+@@ -520,13 +763,9 @@ void XTraceLogger::LogAssetEvent(const char* category,
    if (IsInternalScriptUrl(url)) {
      return;
    }
@@ -684,7 +745,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-@@ -540,15 +718,17 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+@@ -540,15 +779,17 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -709,7 +770,7 @@ index b2a722741b..a1be1b8601 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAssetAndContext(
-@@ -565,16 +745,34 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+@@ -565,16 +806,34 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
    if (!CategoryEnabled(config, category)) {
      return;
    }
@@ -753,7 +814,7 @@ index b2a722741b..a1be1b8601 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-index f621f4cc3f..c39f4f67b8 100644
+index f621f4cc3f..70067c10b1 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 @@ -5,6 +5,8 @@
@@ -765,11 +826,23 @@ index f621f4cc3f..c39f4f67b8 100644
  #include "third_party/blink/renderer/platform/platform_export.h"
  #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
  
-@@ -13,6 +15,16 @@ namespace blink {
+@@ -13,6 +15,28 @@ namespace blink {
  class PLATFORM_EXPORT XTraceLogger {
   public:
    static bool Enabled();
 +  static bool CausalitySyncEnabled();
++  // P4-E3: the ignition bridge bridges activation_ref to the current
++  // activation's causality token (0 when no activation is active).
++  static uint64_t CurrentActivationToken();
++  // P4: call_id string of the enclosing activation ("" when none) — the
++  // design's activation_ref carries the call_id, not the raw token.
++  static String CurrentActivationCallId();
++  // P4-E3: emit one structured pre-execution Ignition observation through
++  // the standard v3 envelope (no hand-rolled JSON at the bridge).
++  static void LogIgnitionEvent(uint32_t script_id,
++                               uint32_t bytecode_version,
++                               uint32_t bytecode_offset,
++                               const String& activation_ref);
 +  // Starts a paired renderer-side activation. The returned token is only
 +  // meaningful on the current thread and is consumed by CompleteActivation.
 +  static uint64_t BeginActivation(const char* category,
@@ -782,7 +855,7 @@ index f621f4cc3f..c39f4f67b8 100644
    static void LogCall(const char* api, const String& args_json);
    static void LogCall(const char* category,
                        const char* api,
-@@ -65,6 +77,28 @@ class PLATFORM_EXPORT XTraceLogger {
+@@ -65,6 +89,28 @@ class PLATFORM_EXPORT XTraceLogger {
    static String NetworkCorrelationKey(const String& method, const String& url);
  };
  
