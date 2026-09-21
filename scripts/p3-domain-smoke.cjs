@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
-const executable = path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/Chromium.app/Contents/MacOS/Chromium');
+const executable = path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
 const runDir = fs.mkdtempSync(path.resolve(__dirname, '../chromium/src/out/XTraceIntegration/validation', 'p3-domain-smoke-'));
 const trace = path.join(runDir, 'trace.ndjson');
 
@@ -54,7 +54,7 @@ async function main() {
   {
     const { child, client } = await launch([
       '--xtrace-enable', `--xtrace-file=${trace}`, '--xtrace-categories=reverse,fingerprint',
-      '--xtrace-causality=sync']);
+      '--xtrace-causality=sync', '--xtrace-ignition-observer']);
     const caps = await client.send('XTrace.getCapabilities');
     assert.equal(caps.capabilities.limits.captureEnabled, 'true');
     assert.equal(caps.capabilities.limits.overflowPolicy, 'drop-newest');
@@ -66,6 +66,31 @@ async function main() {
 
     const status = await client.send('XTrace.getCaptureStatus');
     assert.equal(status.generation, '0');
+
+    // P4-E4: rejection matrix (browser authoritative).
+    await assert.rejects(() => client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'jitless-experiment' }),
+        /not available in P4/, 'jitless must be rejected');
+    await assert.rejects(() => client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'semantic', tier: 'ignition' }),
+        /does not accept a tier/, 'semantic+tier must be rejected');
+    await assert.rejects(() => client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'ignition-precise', tier: 'sparkplug' }),
+        /requires tier=ignition/, 'precise+wrong tier must be rejected');
+    await assert.rejects(() => client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'bogus' }),
+        /mode must be/, 'unknown mode must be rejected');
+    const precise = await client.send('XTrace.startCapture',
+        { categories: 'reverse', mode: 'semantic' });
+    assert(precise.effectiveConfig, 'effectiveConfig expected');
+    assert.equal(precise.effectiveConfig.mode, 'semantic');
+    assert.equal(precise.effectiveConfig.tierParam, 'none');
+    // P4-E5: machine-readable precise-mode availability.
+    const caps2 = await client.send('XTrace.getCapabilities');
+    assert.equal(caps2.capabilities.limits.ignitionObserverSwitch, 'true');
+    assert.equal(caps2.capabilities.limits.preciseModeAvailable, 'true');
+    assert.equal(caps2.capabilities.limits.codeCachePolicy,
+        'precise-mode-disables-and-discloses');
 
     // P3-E4: runtime update — generation allocates serially from "1";
     // subsequent events carry the new generation.
