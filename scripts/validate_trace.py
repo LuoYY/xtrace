@@ -1980,6 +1980,56 @@ V3_IGNITION_SUPPORTED_TIERS = ("ignition",)
 V3_IGNITION_OPCODE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
 
 
+# Pinned-V8 bytecode mnemonic domain (N0/R7: fabricated names like
+# "NotARealOpcode" must be rejected). Generated from the fixed tree's
+# src/interpreter/bytecodes.h (BYTECODE_LIST_WITH_UNIQUE_HANDLERS_IMPL
+# + SHORT_STAR_BYTECODE_LIST), 208 entries.
+V3_IGNITION_OPCODES = frozenset((
+    "Abort", "Add", "AddSmi", "BitwiseAnd", "BitwiseAndSmi",
+    "BitwiseNot", "BitwiseOr", "BitwiseOrSmi", "BitwiseXor", "BitwiseXorSmi",
+    "CallAnyReceiver", "CallJSRuntime", "CallRuntime", "CallRuntimeForPair", "CallUndefinedReceiver",
+    "CallUndefinedReceiver0", "CallUndefinedReceiver1", "CallUndefinedReceiver2", "CallWithSpread", "CloneObject",
+    "Construct", "ConstructForwardAllArgs", "ConstructWithSpread", "CreateArrayFromIterable", "CreateArrayLiteral",
+    "CreateBlockContext", "CreateCatchContext", "CreateClosure", "CreateEmptyArrayLiteral", "CreateEmptyObjectLiteral",
+    "CreateEvalContext", "CreateFunctionContext", "CreateFunctionContextWithCells", "CreateMappedArguments", "CreateObjectLiteral",
+    "CreateRegExpLiteral", "CreateRestParameter", "CreateUnmappedArguments", "CreateWithContext", "DebugBreak0",
+    "DebugBreak1", "DebugBreak2", "DebugBreak3", "DebugBreak4", "DebugBreak5",
+    "DebugBreak6", "DebugBreakExtraWide", "DebugBreakWide", "Debugger", "Dec",
+    "DefineKeyedOwnProperty", "DefineKeyedOwnPropertyInLiteral", "DefineNamedOwnProperty", "DeletePropertySloppy", "DeletePropertyStrict",
+    "Div", "DivSmi", "Exp", "ExpSmi", "ExtraWide",
+    "FindNonDefaultConstructorOrConstruct", "ForInEnumerate", "ForInNext", "ForInPrepare", "ForInStep",
+    "ForOfNext", "GetEnumeratedKeyedProperty", "GetIterator", "GetKeyedProperty", "GetNamedProperty",
+    "GetNamedPropertyFromSuper", "GetPrivateField", "GetSuperConstructor", "GetTemplateObject", "Inc",
+    "IncBlockCounter", "InvokeIntrinsic", "Jump", "JumpConstant", "JumpIfFalse",
+    "JumpIfFalseConstant", "JumpIfForInDone", "JumpIfForInDoneConstant", "JumpIfJSReceiver", "JumpIfJSReceiverConstant",
+    "JumpIfNotNull", "JumpIfNotNullConstant", "JumpIfNotUndefined", "JumpIfNotUndefinedConstant", "JumpIfNull",
+    "JumpIfNullConstant", "JumpIfToBooleanFalse", "JumpIfToBooleanFalseConstant", "JumpIfToBooleanTrue", "JumpIfToBooleanTrueConstant",
+    "JumpIfTrue", "JumpIfTrueConstant", "JumpIfUndefined", "JumpIfUndefinedConstant", "JumpIfUndefinedOrNull",
+    "JumpIfUndefinedOrNullConstant", "JumpLoop", "LdaConstant", "LdaContextSlot", "LdaContextSlotNoCell",
+    "LdaCurrentContextSlot", "LdaCurrentContextSlotNoCell", "LdaFalse", "LdaGlobal", "LdaGlobalInsideTypeof",
+    "LdaImmutableContextSlot", "LdaImmutableCurrentContextSlot", "LdaLookupContextSlot", "LdaLookupContextSlotInsideTypeof", "LdaLookupContextSlotNoCell",
+    "LdaLookupContextSlotNoCellInsideTypeof", "LdaLookupGlobalSlot", "LdaLookupGlobalSlotInsideTypeof", "LdaLookupSlot", "LdaLookupSlotInsideTypeof",
+    "LdaModuleVariable", "LdaNull", "LdaSmi", "LdaTheHole", "LdaTrue",
+    "LdaUndefined", "LdaZero", "Ldar", "LogicalNot", "Mod",
+    "ModSmi", "Mov", "Mul", "MulSmi", "Negate",
+    "PopContext", "PushContext", "ReThrow", "ResumeGenerator", "Return",
+    "SetKeyedProperty", "SetNamedProperty", "SetPendingMessage", "SetPrivateField", "SetPrototypeProperties",
+    "ShiftLeft", "ShiftLeftSmi", "ShiftRight", "ShiftRightLogical", "ShiftRightLogicalSmi",
+    "ShiftRightSmi", "StaContextSlot", "StaContextSlotNoCell", "StaCurrentContextSlot", "StaCurrentContextSlotNoCell",
+    "StaGlobal", "StaInArrayLiteral", "StaLookupSlot", "StaModuleVariable", "Star",
+    "Star0", "Star1", "Star10", "Star11", "Star12",
+    "Star13", "Star14", "Star15", "Star2", "Star3",
+    "Star4", "Star5", "Star6", "Star7", "Star8",
+    "Star9", "Sub", "SubSmi", "SuspendGenerator", "SwitchOnGeneratorState",
+    "SwitchOnSmiNoFeedback", "TestEqual", "TestEqualStrict", "TestGreaterThan", "TestGreaterThanOrEqual",
+    "TestIn", "TestInstanceOf", "TestLessThan", "TestLessThanOrEqual", "TestNull",
+    "TestReferenceEqual", "TestTypeOf", "TestUndefined", "TestUndetectable", "Throw",
+    "ThrowIfNotSuperConstructor", "ThrowReferenceErrorIfHole", "ThrowSuperAlreadyCalledIfNotHole", "ThrowSuperNotCalledIfHole", "ToBoolean",
+    "ToBooleanLogicalNot", "ToName", "ToNumber", "ToNumeric", "ToObject",
+    "ToString", "TypeOf", "Wide",
+))
+
+
 def _decimal_string(value: object, field: str, index: int) -> int:
     if not isinstance(value, str) or not value.isdigit():
         raise TraceValidationError(
@@ -2089,6 +2139,13 @@ def validate_schema_v3_event(event: dict, index: int) -> None:
                 f"Event {index}: ignition.opcode must be a bytecode "
                 f"mnemonic, got {opcode!r}"
             )
+        if opcode not in V3_IGNITION_OPCODES:
+            # N0/R7: syntactic shape is not domain membership — fabricated
+            # names must fail even when they look like mnemonics.
+            raise TraceValidationError(
+                f"Event {index}: ignition.opcode {opcode!r} is not a "
+                "bytecode of the pinned V8 (fabricated or future opcode)"
+            )
         if ignition["tier"] not in V3_IGNITION_SUPPORTED_TIERS:
             raise TraceValidationError(
                 f"Event {index}: ignition.tier {ignition['tier']!r} not in "
@@ -2141,23 +2198,34 @@ def validate_v3_producer_sequences(
 
 def validate_v3_ignition_causality(events: list[dict]) -> None:
     """Every Ignition.execute activation_ref must resolve to a paired
-    activation (causality.call_id) inside the same producer scope."""
-    activations: set[tuple[str, str]] = set()
-    for event in events:
+    activation (causality.call_id) inside the same producer scope — and
+    TEMPORALLY BEFORE it: the referenced activation must already have
+    begun earlier in the file (N0/R7: a ref that only resolves to a
+    future record is a defect, not an activation)."""
+    first_seen: dict[tuple[str, str], int] = {}
+    for index, event in enumerate(events, start=1):
         causality = event.get("causality") or {}
         if causality.get("kind") == "paired":
             call_id = causality.get("call_id")
             if isinstance(call_id, str) and call_id:
-                activations.add((event.get("producer_id"), call_id))
+                first_seen.setdefault(
+                    (event.get("producer_id"), call_id), index)
     for index, event in enumerate(events, start=1):
         if event.get("api") != "Ignition.execute":
             continue
         key = (event.get("producer_id"), event["ignition"]["activation_ref"])
-        if key not in activations:
+        if key not in first_seen:
             raise TraceValidationError(
                 f"Event {index}: ignition.activation_ref "
                 f"{event['ignition']['activation_ref']!r} does not resolve to "
                 "a paired activation with the same producer_id"
+            )
+        if first_seen[key] > index:
+            raise TraceValidationError(
+                f"Event {index}: ignition.activation_ref "
+                f"{event['ignition']['activation_ref']!r} resolves only to a "
+                f"paired activation at record {first_seen[key]} — an "
+                "activation cannot be observed before it begins"
             )
 
 

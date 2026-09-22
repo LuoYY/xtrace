@@ -228,6 +228,29 @@ class V3ValidatorContractTest(unittest.TestCase):
         with self.assertRaises(validator.TraceValidationError):
             self.validate(path)
 
+    def test_ignition_fabricated_opcode_rejected(self):
+        # N0/R7: syntactically valid but not a bytecode of the pinned V8.
+        builder = V3TraceBuilder().standard()
+        builder.events[1]["ignition"] = ignition_field(opcode="NotARealOpcode")
+        path = builder.write(self.dir)
+        with self.assertRaises(validator.TraceValidationError):
+            self.validate(path)
+
+    def test_ignition_future_activation_ref_rejected(self):
+        # N0/R7: the ref resolves only to a paired activation that appears
+        # AFTER the ignition record — temporally impossible.
+        builder = V3TraceBuilder()
+        builder.add(producer_id="renderer-r1", api="Ignition.execute",
+                    ignition=ignition_field(activation_ref="late-call"))
+        builder.add(
+            producer_id="renderer-r1",
+            api="JSON.stringify",
+            causality={"kind": "paired", "call_id": "late-call"},
+        )
+        path = builder.write(self.dir)
+        with self.assertRaises(validator.TraceValidationError):
+            self.validate(path)
+
     def test_ignition_null_activation_ref_rejected(self):
         builder = V3TraceBuilder().standard()
         builder.events[1]["ignition"] = ignition_field(activation_ref=None)

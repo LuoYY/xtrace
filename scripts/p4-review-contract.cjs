@@ -15,6 +15,7 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { CdpPipe, closeBrowser } = require('./lib/cdp-pipe.cjs');
 
 const root = path.resolve(__dirname, '..');
 const args = Object.fromEntries(process.argv.slice(2).filter(a => a.startsWith('--')).map(a => {
@@ -31,28 +32,6 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.st
 if (!fs.existsSync(exe)) {
   console.error(`binary not found: ${exe} (pass --binary= or build out/XTraceIntegration)`);
   process.exit(2);
-}
-
-class Pipe {
-  constructor(child) {
-    this.child = child; this.id = 0; this.pending = new Map(); let buf = Buffer.alloc(0);
-    child.stdio[4].on('data', chunk => {
-      buf = Buffer.concat([buf, chunk]); let n;
-      while ((n = buf.indexOf(0)) >= 0) {
-        const raw = buf.subarray(0, n).toString(); buf = buf.subarray(n + 1); if (!raw) continue;
-        const msg = JSON.parse(raw), req = this.pending.get(msg.id);
-        if (req) { clearTimeout(req.timer); this.pending.delete(msg.id); msg.error ? req.reject(new Error(JSON.stringify(msg.error))) : req.resolve(msg.result); }
-      }
-    });
-    child.once('exit', () => { for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('browser exit')); } this.pending.clear(); });
-  }
-  send(method, params = {}, sessionId) {
-    return new Promise((resolve, reject) => {
-      const id = ++this.id; const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(method + ' timeout')); }, 30000);
-      this.pending.set(id, { resolve, reject, timer });
-      this.child.stdio[3].write(JSON.stringify({ id, method, params, sessionId }) + '\0');
-    });
-  }
 }
 
 const marker = label => `JSON.stringify({reviewMarker:${JSON.stringify(label)}});`;
@@ -77,7 +56,11 @@ async function run(name, flags, page, extra) {
   fs.writeFileSync(path.join(dir, 'command.json'), JSON.stringify({ exe, args: argv, cwd: root }, null, 2));
   const fd = fs.openSync(path.join(dir, 'stderr.log'), 'w');
   const child = spawn(exe, argv, { env, stdio: ['ignore', 'ignore', fd, 'pipe', 'pipe'] }); fs.closeSync(fd);
-  const exit = once(child, 'exit'), pipe = new Pipe(child), result = { name };
+  const crashEvents = [];
+  const pipe = new CdpPipe(child, {
+    onEvent: message => { if (message.method === 'Inspector.targetCrashed') crashEvents.push(message); }
+  });
+  const result = { name, crashEvents };
   try {
     result.caps = await pipe.send('XTrace.getCapabilities');
     try { result.precise = await pipe.send('XTrace.startCapture', { categories: 'reverse', mode: 'ignition-precise', tier: 'ignition' }); } catch (e) { result.rejection = e.message; }
@@ -95,6 +78,28 @@ async function run(name, flags, page, extra) {
       result.page = await pipe.send('Runtime.evaluate', { expression: '({answer:window.reviewAnswer,inner:window.reviewInner})', returnByValue: true }, sessionId);
     }
     if (extra) result.extra = await pipe.send('Runtime.evaluate', { expression: extra, returnByValue: true }, sessionId);
+    if (extra === 'lifecycle-stop-first' || extra === 'lifecycle-terminate-first') {
+      // R2: worker lifecycle vs capture stop, both orders. The crash
+      // (Inspector.targetCrashed) is collected by the CdpPipe event hook.
+      result.workerStarted = await pipe.send('Runtime.evaluate', {
+        expression: "(async()=>{window.xw=new Worker(URL.createObjectURL(new Blob(['onmessage=()=>postMessage(1)'],{type:'text/javascript'})));await new Promise(r=>window.xw.onmessage=()=>r());window.xw.postMessage(0);return 'ok'})()",
+        returnByValue: true, awaitPromise: true
+      }, sessionId).catch(e => ({ error: String(e) }));
+      const terminate = () => pipe.send('Runtime.evaluate',
+          { expression: 'window.xw.terminate(); "terminated"', returnByValue: true }, sessionId)
+          .catch(e => ({ error: String(e) }));
+      const stop = () => pipe.send('XTrace.stopCapture').catch(e => ({ error: String(e) }));
+      if (extra === 'lifecycle-terminate-first') {
+        result.terminated = await terminate();
+        result.stop = await stop();
+      } else {
+        result.stop = await stop();
+        result.terminated = await terminate();
+      }
+      await new Promise(r => setTimeout(r, 600));  // teardown settles; crash events land here
+      result.postLifecycle = await pipe.send('Runtime.evaluate',
+          { expression: '2+2', returnByValue: true }, sessionId).catch(e => ({ error: String(e) }));
+    }
     if (extra === 'category') {
       result.update = await pipe.send('XTrace.updateCapture', { categories: 'fingerprint' });
       await new Promise(r => setTimeout(r, 300));
@@ -117,7 +122,12 @@ async function run(name, flags, page, extra) {
       result.statusAfterUpdate = await pipe.send('XTrace.getCaptureStatus');
     }
     result.stop = await pipe.send('XTrace.stopCapture');
-    await pipe.send('Browser.close'); result.exit = await exit;
+    await pipe.send('Browser.close').catch(() => {});
+    await new Promise(r => {
+      if (child.exitCode !== null || child.signalCode !== null) r();
+      else { child.once('exit', () => r()); setTimeout(r, 5000); }
+    });
+    result.exit = { code: child.exitCode, signal: child.signalCode };
     if (fs.existsSync(trace)) {
       const events = fs.readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
       result.ignitionCount = events.filter(e => e.api === 'Ignition.execute').length;
@@ -138,7 +148,8 @@ async function run(name, flags, page, extra) {
     }
   } catch (e) { result.probeError = e.stack; }
   finally {
-    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exit; }
+    if (child.exitCode === null && child.signalCode === null) { await closeBrowser(child); }
+    result.exit = { code: child.exitCode, signal: child.signalCode };
     fs.writeFileSync(path.join(dir, 'result.json'), JSON.stringify(result, null, 2));
   }
   return result;
@@ -169,6 +180,31 @@ function preciseEnvContracts(withoutObserver, realConflict, causalityOff) {
   contract('B2c.causality-off-start-rejected', 'startCapture(ignition-precise) must fail without --xtrace-causality=sync', !!causalityOff?.rejection, { rejection: causalityOff?.rejection });
 }
 
+function preciseFlagContracts(negationConflict) {
+  // R3 (2026-09-22 re-review): the flags parser must keep each flag's
+  // state INDEPENDENT — `--sparkplug --no-always-sparkplug` still enables
+  // Sparkplug, so precise mode must reject. The merged-bool parser
+  // accepted it as ignition-locked while the real tier was baseline.
+  const tier = negationConflict?.extra?.result?.value;
+  const envIsBaseline = tier && tier.baseline === true && tier.ignition === false;
+  contract('R3.env-check-negation-still-baseline', 'environment proof: --sparkplug --no-always-sparkplug still runs baseline', envIsBaseline, tier);
+  contract('R3.precise-with-independent-negation-rejected', 'startCapture(ignition-precise) must reject when sparkplug is enabled even if a LATER flag negates a DIFFERENT one', !!negationConflict?.rejection, { startResult: negationConflict?.precise, rejection: negationConflict?.rejection, capsTierLock: negationConflict?.caps?.capabilities?.limits?.tierLock });
+}
+
+function lifecycleContracts(stopFirst, terminateFirst) {
+  // R2 (2026-09-22 re-review): stop must not corrupt the observer scope's
+  // isolate ownership — terminating a Worker after stopCapture (and the
+  // reverse order) must leave the renderer alive.
+  for (const [label, run] of [['stop-then-worker-terminate', stopFirst], ['worker-terminate-then-stop', terminateFirst]]) {
+    const noCrash = run && (run.crashEvents || []).length === 0;
+    const pageAlive = run && !run.probeError && run.postLifecycle?.result?.value === 4;
+    contract(`R2.${label}-no-renderer-crash`,
+        `no Inspector.targetCrashed and the page still evaluates after ${label} (re-review saw renderer SIGSEGV in IgnitionScope::WillBeDestroyed)`,
+        !!noCrash && !!pageAlive,
+        { crashEvents: run?.crashEvents?.length ?? 'no-run', postLifecycle: run?.postLifecycle?.result?.value, probeError: run?.probeError, exit: run?.exit });
+  }
+}
+
 function categoryContracts(cat) {
   const markers = cat?.categoryMarkers || [];
   const platform = cat?.platformEvents || [];
@@ -195,6 +231,11 @@ function categoryContracts(cat) {
         '(()=>{function f(x){return x+1}; %CompileBaseline(f); return {value:f(4),baseline:%ActiveTierIsSparkplug(f),ignition:%ActiveTierIsIgnition(f)};})()');
       const causalityOff = await run('causality-off-caps', ['--xtrace-causality=off', '--xtrace-ignition-observer']);
       preciseEnvContracts(withoutObserver, realConflict, causalityOff);
+      // R3: independent flag state — negating a DIFFERENT flag must not
+      // clear sparkplug's.
+      const negationConflict = await run('precise-flag-negation', ['--xtrace-causality=sync', '--xtrace-ignition-observer', '--js-flags=--allow-natives-syntax --max-opt=0 --sparkplug --no-always-sparkplug'], null,
+        '(()=>{function f(x){return x+1}; %CompileBaseline(f); return {value:f(4),baseline:%ActiveTierIsSparkplug(f),ignition:%ActiveTierIsIgnition(f)};})()');
+      preciseFlagContracts(negationConflict);
     }
     if (want('nested')) {
       const flat = await run('flat', ['--xtrace-causality=sync', '--xtrace-ignition-observer', '--js-flags=--max-opt=0'], 'flat');
@@ -204,6 +245,13 @@ function categoryContracts(cat) {
     if (want('category')) {
       const cat = await run('category-update', ['--xtrace-causality=sync'], 'flat', 'category');
       categoryContracts(cat);
+    }
+    if (want('lifecycle')) {
+      // R2: both orders of stop vs worker teardown must keep the renderer
+      // alive (re-review saw SIGSEGV in IgnitionScope::WillBeDestroyed).
+      const stopFirst = await run('lifecycle-stop-first', ['--xtrace-causality=sync', '--xtrace-ignition-observer', '--js-flags=--max-opt=0'], 'flat', 'lifecycle-stop-first');
+      const terminateFirst = await run('lifecycle-terminate-first', ['--xtrace-causality=sync', '--xtrace-ignition-observer', '--js-flags=--max-opt=0'], 'flat', 'lifecycle-terminate-first');
+      lifecycleContracts(stopFirst, terminateFirst);
     }
   } finally { server.close(); }
   const failed = contracts.filter(c => !c.pass);
