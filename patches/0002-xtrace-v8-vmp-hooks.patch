@@ -9005,7 +9005,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..7f8e4a2e 100644
+index fc6d62e2..3d371df1 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9016,7 +9016,7 @@ index fc6d62e2..7f8e4a2e 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,36 @@
+@@ -40,6 +41,40 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9031,12 +9031,16 @@ index fc6d62e2..7f8e4a2e 100644
 +                        uint32_t bytecode_version, uint32_t bytecode_offset,
 +                        uint32_t opcode) {
 +  g_d8_observer_events.fetch_add(1, std::memory_order_relaxed);
++  // F4: the PER-EVENT stream (offset + opcode, in execution order) is the
++  // coverage oracle — totals are only a quick metric.
++  printf("OBS script=%u version=%u offset=%u opcode=%s\n", script_id,
++         bytecode_version, bytecode_offset,
++         v8::internal::xtrace::IgnitionOpcodeName(opcode));
 +  // Warm-profile evidence: distinct (script, bytecode_version) pairs.
 +  std::lock_guard<std::mutex> lock(g_pairs_mutex);
 +  g_version_pairs.emplace(script_id, bytecode_version);
 +  g_d8_observer_opcodes.insert(
 +      v8::internal::xtrace::IgnitionOpcodeName(opcode));
-+  (void)bytecode_offset;
 +}
 +void D8ObserverReportAtExit() {
 +  printf("XTRACE-P4 d8 observer events=%llu\n",
@@ -9053,7 +9057,7 @@ index fc6d62e2..7f8e4a2e 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -7037,6 +7068,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7072,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9066,7 +9070,7 @@ index fc6d62e2..7f8e4a2e 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +7938,16 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +7942,16 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
