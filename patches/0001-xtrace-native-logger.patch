@@ -864,10 +864,10 @@ index 0000000000..d77c3baec1
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..08a9a40c5f
+index 0000000000..700a803676
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1175 @@
+@@ -0,0 +1,1202 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1199,6 +1199,24 @@ index 0000000000..08a9a40c5f
 +  }
 +  if (!base::CreateDirectory(trace_file_path_.DirName())) {
 +    return false;
++  }
++  // F5 (review B6): a non-empty trace file at the target path means a
++  // previous capture's records are there — appending would mix captures
++  // (validator rejects mixed identity, but the writer must not create
++  // the mess in the first place). Refuse instead of appending; the
++  // failure surfaces through the normal failed-write accounting.
++  {
++    base::File existing(trace_file_path_,
++                        base::File::FLAG_OPEN | base::File::FLAG_READ);
++    if (existing.IsValid()) {
++      const int64_t size = existing.GetLength();
++      if (size > 0) {
++        DLOG(WARNING) << "XTrace refusing to append to non-empty trace "
++                      << trace_file_path_.AsUTF8Unsafe() << " (" << size
++                      << " bytes from a previous capture)";
++        return false;
++      }
++    }
 +  }
 +  trace_file_.Initialize(trace_file_path_,
 +                         base::File::FLAG_OPEN_ALWAYS | base::File::FLAG_APPEND);
@@ -1849,6 +1867,15 @@ index 0000000000..08a9a40c5f
 +    build_json += base::GetQuotedJSONString(
 +        version_info::GetVersionNumber());
 +    build_json += ",\"is_debug\":";
++    // F5 (review B6): NDEBUG is the debug-build truth; DCHECK_IS_ON()
++    // conflated debug builds with dcheck-always-on release builds (this
++    // release reported is_debug=true via DCHECKs). Report both axes.
++#if defined(NDEBUG)
++    build_json += "false";
++#else
++    build_json += "true";
++#endif
++    build_json += ",\"dcheck_always_on\":";
 +    build_json += DCHECK_IS_ON() ? "true" : "false";
 +    build_json += ",\"component_build\":";
 +#if defined(COMPONENT_BUILD)
@@ -2317,10 +2344,10 @@ index 0000000000..48fd2197e8
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 new file mode 100644
-index 0000000000..0a04ba6f0c
+index 0000000000..5d5f725177
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,303 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2604,6 +2631,23 @@ index 0000000000..0a04ba6f0c
 +TEST_F(XTraceCaptureControllerTest, UpdateRejectedWhenStopping) {
 +  BeginStop();
 +  EXPECT_TRUE(controller_->DomainUpdateCapture("fingerprint").empty());
++}
++
++// F5 (review B6): a non-empty trace file at the target path is refused —
++// appending would mix captures; the writer never manufactures a mixed file.
++TEST_F(XTraceCaptureControllerTest, RefusesToAppendNonEmptyTrace) {
++  base::ScopedAllowBlockingForTesting allow_io;
++  ASSERT_TRUE(base::WriteFile(trace_, "{\"old\":1}\n"));
++  SendBatch(MakeBatch("rtx:1.1:1:1", 1, {"{\"api\":\"a\"}"}));
++  // The write path failed: nothing accepted, nothing written.
++  ProducerState* state = controller_->FindProducer("rtx:1.1:1:1");
++  ASSERT_TRUE(state);
++  EXPECT_EQ(state->accepted, 1u);
++  EXPECT_EQ(state->written, 0u);
++  EXPECT_EQ(state->failed, 1u);
++  std::string after;
++  base::ReadFileToString(trace_, &after);
++  EXPECT_EQ(after, "{\"old\":1}\n");  // previous capture untouched
 +}
 +
 +}  // namespace content
