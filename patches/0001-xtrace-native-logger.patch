@@ -2883,7 +2883,7 @@ index 0000000000..7dadfa3a09
 +
 +#endif  // THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc b/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
-index ee5692a0a0..b9a0639610 100644
+index ee5692a0a0..f703bc5bcd 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
 @@ -3,6 +3,8 @@
@@ -2895,7 +2895,7 @@ index ee5692a0a0..b9a0639610 100644
  
  #include <optional>
  
-@@ -316,14 +318,28 @@ V8CodeCache::GetCompileOptions(
+@@ -316,14 +318,31 @@ V8CodeCache::GetCompileOptions(
      bool might_generate_crowdsourced_compile_hints,
      bool can_use_crowdsourced_compile_hints,
      v8_compile_hints::MagicCommentMode magic_comment_mode) {
@@ -2918,11 +2918,14 @@ index ee5692a0a0..b9a0639610 100644
 +      can_use_crowdsourced_compile_hints);
 +  {
 +    const char* outcome =
-+        std::get<0>(decision) == v8::ScriptCompiler::kConsumeCodeCache
-+            ? "consume"
-+            : (std::get<1>(decision) != ProduceCacheOptions::kNoProduceCache
-+                   ? "produce"
-+                   : "skip");
++        blink::xtrace::IgnitionBridge::ObserverRequested()
++            ? "suppressed-observer-env"
++            : (std::get<0>(decision) == v8::ScriptCompiler::kConsumeCodeCache
++                   ? "consume"
++                   : (std::get<1>(decision) !=
++                                  ProduceCacheOptions::kNoProduceCache
++                          ? "produce"
++                          : "skip"));
 +    blink::XTraceLogger::LogEventNoStack(
 +        "internal", "lifecycle", "XTraceCodeCache.compileOptions",
 +        blink::String(std::string("[{\"outcome\":\"") + outcome +
@@ -2932,7 +2935,7 @@ index ee5692a0a0..b9a0639610 100644
  }
  
  std::tuple<v8::ScriptCompiler::CompileOptions,
-@@ -421,7 +437,17 @@ V8CodeCache::GetCompileOptionsInternal(
+@@ -421,7 +440,14 @@ V8CodeCache::GetCompileOptionsInternal(
    }
  #endif
  
@@ -2942,12 +2945,9 @@ index ee5692a0a0..b9a0639610 100644
 +      // environment forces the same kNone path — no compile-time cache
 +      // consumption, no production, honest NoCacheBecauseCachingDisabled.
 +      blink::xtrace::IgnitionBridge::ObserverRequested()) {
-+    // F3/B3 warm evidence: the observer environment's suppression is
-+    // OBSERVABLE (category "internal"), paired with consume events in
-+    // ordinary environments.
-+    blink::XTraceLogger::LogEventNoStack(
-+        "internal", "lifecycle", "XTraceCodeCache.compileOptions",
-+        blink::String("[{\"outcome\":\"suppressed-observer-env\"}]"));
++    // N4 (review R5): the CAUSE is classified at the single reporting
++    // choke point (GetCompileOptions) — observer-env suppression vs
++    // kNone-by-options are different outcomes, never conflated here.
      no_cache_reason = v8::ScriptCompiler::kNoCacheBecauseCachingDisabled;
      return std::make_tuple(no_code_cache_compile_options,
                             ProduceCacheOptions::kNoProduceCache,
