@@ -13942,10 +13942,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..a8977859f8
+index 0000000000..be2d1aeb3a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,246 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14005,6 +14005,13 @@ index 0000000000..a8977859f8
 +
 +std::atomic<bool> g_installed{false};
 +
++// Process-wide capture-stop latch (N2): published once by
++// IgnitionBridge::Close(); every isolate checks it on its own thread.
++std::atomic<bool>& StoppedLatch() {
++  static std::atomic<bool> stopped{false};
++  return stopped;
++}
++
 +// F2 v1 script scope: page scripts only. Internal schemes never open the
 +// gate — their bytecode short-circuits in generated code.
 +bool IsSelectableUrl(const char* frame_url) {
@@ -14025,13 +14032,15 @@ index 0000000000..a8977859f8
 +  ~IgnitionScope() override = default;
 +
 +  void WillBeDestroyed() override {
-+    // Destruction-order contract (F2): null the callback FIRST (a racing
-+    // event then no-ops), then close the gate, then leave the registry.
-+    v8::Isolate* raw = isolate_.ExtractAsDangling().get();
-+    v8::internal::Isolate* i_isolate =
-+        reinterpret_cast<v8::internal::Isolate*>(raw);
-+    v8::internal::xtrace::IgnitionObserverSetCallback(i_isolate, nullptr);
-+    v8::internal::xtrace::IgnitionObserverSetGate(i_isolate, 0);
++    // N2 (review R2): runs on the OWNING isolate thread during
++    // V8PerIsolateData teardown, serialized with worker teardown. The
++    // isolate pointer stays valid until unregistration completes — it is
++    // never extracted or nulled by the stop path. Callback first (a
++    // racing event then no-ops), then the gate, then leave the registry.
++    v8::internal::xtrace::IgnitionObserverSetCallback(
++        reinterpret_cast<v8::internal::Isolate*>(isolate_.get()), nullptr);
++    v8::internal::xtrace::IgnitionObserverSetGate(
++        reinterpret_cast<v8::internal::Isolate*>(isolate_.get()), 0);
 +    base::AutoLock lock(*scopes_lock());
 +    scopes()->erase(this);
 +  }
@@ -14043,8 +14052,12 @@ index 0000000000..a8977859f8
 +  };
 +
 +  raw_ptr<v8::Isolate> isolate_ = nullptr;
-+  std::vector<Activation> stack;
-+  bool closed = false;  // capture stop: never reopens
++  std::vector<Activation> stack;          // isolate thread only
++  std::atomic<bool> closed_{false};       // capture stop: never reopens
++
++  bool Stopped() const {
++    return closed_.load(std::memory_order_acquire) || StoppedLatch();
++  }
 +
 +  static std::set<IgnitionScope*>* scopes() {
 +    static base::NoDestructor<std::set<IgnitionScope*>> scopes;
@@ -14057,7 +14070,7 @@ index 0000000000..a8977859f8
 +};
 +
 +void RecomputeGate(v8::Isolate* isolate, IgnitionScope* scope) {
-+  const bool open = !scope->closed && !scope->stack.empty() &&
++  const bool open = !scope->Stopped() && !scope->stack.empty() &&
 +                    scope->stack.back().selected;
 +  v8::internal::xtrace::IgnitionObserverSetGate(
 +      reinterpret_cast<v8::internal::Isolate*>(isolate), open ? 1 : 0);
@@ -14100,7 +14113,7 @@ index 0000000000..a8977859f8
 +                     uint32_t opcode) {
 +  v8::Isolate* isolate = reinterpret_cast<v8::Isolate*>(i_isolate);
 +  IgnitionScope* scope = ScopeFor(isolate);
-+  if (!scope || scope->closed || scope->stack.empty() ||
++  if (!scope || scope->Stopped() || scope->stack.empty() ||
 +      !scope->stack.back().selected) {
 +    return;  // second line: scope state beyond the generated-code gate
 +  }
@@ -14131,15 +14144,15 @@ index 0000000000..a8977859f8
 +}
 +
 +void IgnitionBridge::Close() {
-+  // Capture stop: every live isolate closes permanently. Writing the
-+  // per-isolate gate word from here is safe (plain atomic store).
-+  base::AutoLock lock(*IgnitionScope::scopes_lock());
-+  for (IgnitionScope* scope : *IgnitionScope::scopes()) {
-+    scope->closed = true;
-+    v8::Isolate* raw = scope->isolate_.ExtractAsDangling().get();
-+    v8::internal::xtrace::IgnitionObserverSetGate(
-+        reinterpret_cast<v8::internal::Isolate*>(raw), 0);
-+  }
++  // N2 (review R2): the stop path only publishes a process-wide latch.
++  // It never mutates scope objects or isolate pointers from a foreign
++  // thread (the old ExtractAsDangling() nulled the pointer that
++  // WillBeDestroyed later dereferenced — the stop->terminate SIGSEGV).
++  // Each isolate observes the latch on its own thread: activation
++  // begin/end recompute the gate closed, the event callback drops, and
++  // WillBeDestroyed unregisters with a still-valid pointer. Scopes
++  // created after the stop inherit the closed state via the latch.
++  StoppedLatch().store(true, std::memory_order_release);
 +}
 +
 +void IgnitionBridge::OnActivationBegin(const char* frame_url) {
