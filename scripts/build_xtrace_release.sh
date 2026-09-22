@@ -9,14 +9,26 @@
 # The XTrace patches are applied to the source tree, not per-out-dir, so this
 # build is still fully instrumented.
 #
-# Usage:   scripts/build_xtrace_release.sh
+# Usage:   scripts/build_xtrace_release.sh                 # state B: observer compiled
+#          OBSERVER=off scripts/build_xtrace_release.sh    # state A: observer NOT compiled
 # Override out dir: OUT_DIR=out/XTrace-fast scripts/build_xtrace_release.sh
+#   (defaults: on -> out/XTrace-release, off -> out/XTrace-release-A)
+#
+# F5 (review B6): upstream per-bytecode print tracing is explicitly OFF in
+# these args — the perf baseline must not carry tracing cost. States A and
+# B are matched except for the observer compile flag.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPOT_TOOLS="$ROOT/depot_tools"
 SRC="$ROOT/chromium/src"
-OUT_DIR="${OUT_DIR:-out/XTrace-release}"
+OBSERVER="${OBSERVER:-on}"
+if [[ "$OBSERVER" != "on" && "$OBSERVER" != "off" ]]; then
+  echo "OBSERVER must be 'on' or 'off' (got: $OBSERVER)" >&2
+  exit 2
+fi
+DEFAULT_OUT="$([[ "$OBSERVER" == "on" ]] && echo out/XTrace-release || echo out/XTrace-release-A)"
+OUT_DIR="${OUT_DIR:-$DEFAULT_OUT}"
 NINJA_BIN="${NINJA_BIN:-$(command -v ninja || echo "$DEPOT_TOOLS/ninja")}"
 GN_BIN="${GN_BIN:-"$SRC/buildtools/mac/gn"}"
 # Prefer the tree-local ninja when present (same binary the debug build uses).
@@ -47,7 +59,7 @@ cd "$SRC"
 # Release args. Only is_debug/is_component_build differ from gn_gen_xtrace.sh;
 # codecs are kept so media-heavy sites render realistically. Flip
 # is_component_build=true if you want faster incremental relinks.
-"$GN_BIN" gen "$OUT_DIR" --args='
+"$GN_BIN" gen "$OUT_DIR" --args="
 is_debug=false
 is_component_build=false
 symbol_level=1
@@ -56,13 +68,15 @@ treat_warnings_as_errors=false
 use_siso=false
 use_reclient=false
 proprietary_codecs=true
-ffmpeg_branding="Chrome"
+ffmpeg_branding=\"Chrome\"
 rtc_use_h264=true
 
-# XTRACE P4-E2 (architect condition A.1): observer call sites compiled in;
-# upstream per-bytecode tracing stays OFF (observer has its own gate).
-v8_enable_xtrace_ignition_observer=true
-'
+# XTRACE F5 (B6): upstream print tracing OFF in the perf baseline; the
+# structured observer's compile state selects the A/B state pair.
+v8_enable_trace_unoptimized=false
+v8_enable_trace_ignition=false
+v8_enable_xtrace_ignition_observer=$([[ "$OBSERVER" == "on" ]] && echo true || echo false)
+"
 
 echo "==> gn gen done: $SRC/$OUT_DIR"
 echo "==> building (this takes a while on a first release build)…"
