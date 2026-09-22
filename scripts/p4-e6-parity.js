@@ -31,8 +31,9 @@ const entry = /^\s*(B->|->)\s*(0x[0-9a-f]+)\s+@\s*(\d+)\s*:/;
 // execution order and compared offset-by-offset and opcode-by-opcode —
 // totals stay as a quick metric only.
 function observerStream(stdout) {
-  return [...stdout.matchAll(/^OBS script=\d+ version=\d+ offset=(\d+) opcode=(\S+)$/gm)]
-      .map(m => ({ offset: Number(m[1]), opcode: m[2] }));
+  return [...stdout.matchAll(/^OBS script=(\d+) version=(\d+) offset=(\d+) opcode=(\S+)$/gm)]
+      .map(m => ({ script: Number(m[1]), version: Number(m[2]),
+                   offset: Number(m[3]), opcode: m[4] }));
 }
 function upstreamStream(stdout) {
   return [...stdout.matchAll(/^\s*->\s*0x[0-9a-f]+\s+@\s*(\d+)\s*:\s*(?:[0-9a-f]{2}\s+)*(\S+)/gm)]
@@ -71,27 +72,59 @@ for (const [name, [source, expression, expected]] of Object.entries(cases)) {
   // both instruments count every interpreted bytecode execution in the
   // process, so process-wide totals must match exactly.
   const awaited = name === 'async-await';
-  const run = spawnSync(d8, ['--max-opt=0', '--trace-ignition',
-    '--xtrace-observer-smoke', '-e',
-    awaited
+  const scriptText = awaited
       ? source + '\n' + expression + '.then(v => print("XTRES=" + JSON.stringify(v)))'
-      : source + '\nprint("XTRES=" + JSON.stringify(' + expression + '))'],
+      : source + '\nprint("XTRES=" + JSON.stringify(' + expression + '))';
+  const run = spawnSync(d8, ['--max-opt=0', '--trace-ignition',
+    '--xtrace-observer-smoke', '-e', scriptText],
     { encoding: 'utf8', timeout: 60000 });
+  // N4/R7: the run's exit status is asserted, not assumed.
+  assert.strictEqual(run.status, 0, `${name}: d8 exited ${run.status}`);
+  // N4/R7: independent on/off semantic control — same input, observer
+  // OFF, must produce the identical JS result.
+  const offRun = spawnSync(d8, ['--max-opt=0', '-e', scriptText],
+      { encoding: 'utf8', timeout: 60000 });
+  assert.strictEqual(offRun.status, 0, `${name}: off-control d8 exited ${offRun.status}`);
+  const offResult = (offRun.stdout.replace(/\u001b\[[0-9;]*m/g, '')
+      .match(/^XTRES=(.*)$/m) || [])[1];
+
   const obsCount = Number((run.stdout.match(/observer events=(\d+)/) || [])[1] || 0);
   const cleanOut = run.stdout
-    .replace(/\u001b\[[0-9;]*m/g, '')
-    .replace(/^OBS script=.*$/gm, '');
+      .replace(/\u001b\[[0-9;]*m/g, '')
+      .replace(/^OBS script=.*$/gm, '');
   const obsResult = (cleanOut.match(/^XTRES=(.*)$/m) || [])[1];
   const clean = run.stdout.replace(/\u001b\[[0-9;]*m/g, '');
   const upTotal = (clean.match(/^\s*(?:B->|->)\s*0x/gm) || []).length;
 
-  const row = { name, obsCount, upTotal, equal: obsCount === upTotal };
+  const row = { name, status: run.status, offControlStatus: offRun.status,
+                obsCount, upTotal, equal: obsCount === upTotal };
   // F4 per-event comparison: offsets must be deep-equal in execution
   // order; opcodes must match wherever upstream prints a bare mnemonic
   // (prefix markers are skipped on the upstream side).
   const clean2 = run.stdout.replace(/\u001b\[[0-9;]*m/g, '');
   const obsStream = observerStream(clean2);
   const upStream = upstreamStream(clean2);
+  // N4/R7: the COMPLETE streams are retained as evidence.
+  fs.writeFileSync(path.join(outDir, `${name}.obs.txt`),
+      obsStream.map(e => `${e.script}:${e.version} ${e.offset} ${e.opcode}`).join('\n') + '\n');
+  fs.writeFileSync(path.join(outDir, `${name}.upstream.txt`),
+      upStream.map(e => `${e.offset} ${e.opcode ?? '(prefix)'}`).join('\n') + '\n');
+  // N4/R7: script/version dimension — every (script, version) instance
+  // must map each offset to ONE opcode for the whole run. A registry
+  // alias (address reuse, stale index) would surface here as the same
+  // instance reporting contradictory opcodes at one offset.
+  const instanceOpcodes = new Map();
+  for (const e of obsStream) {
+    const key = `${e.script}:${e.version}:${e.offset}`;
+    const prev = instanceOpcodes.get(key);
+    if (prev !== undefined && prev !== e.opcode) {
+      assert.fail(`${name}: instance ${e.script}:${e.version} offset ${e.offset} ` +
+          `reports both ${prev} and ${e.opcode} (registry aliasing)`);
+    }
+    instanceOpcodes.set(key, e.opcode);
+  }
+  row.instances = new Set(obsStream.map(e => `${e.script}:${e.version}`)).size;
+  row.instanceOffsetOpcodes = instanceOpcodes.size;
   assert(obsStream.length === obsCount,
       `${name}: OBS stream ${obsStream.length} != counter ${obsCount}`);
   assert(upStream.length === upTotal,
@@ -115,6 +148,9 @@ for (const [name, [source, expression, expected]] of Object.entries(cases)) {
   const parsed = JSON.parse(obsResult);
   assert.deepStrictEqual(parsed, expected,
       `${name}: expected ${JSON.stringify(expected)}, got ${obsResult}`);
+  // on/off semantic agreement (independent control).
+  assert.deepStrictEqual(JSON.parse(offResult), expected,
+      `${name}: observer-off control diverged: ${offResult}`);
 }
 fs.writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(results, null, 2));
 console.log(`PASS: 10-case observer/upstream parity + semantics`);

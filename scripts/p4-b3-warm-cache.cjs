@@ -58,13 +58,13 @@ class Pipe {
   }
 }
 
-async function runOnce(name, flags, loads) {
-  const dir = path.join(outDir, name); fs.mkdirSync(dir);
+async function runOnce(name, flags, loads, profileDir) {
+  const dir = path.join(outDir, name); fs.mkdirSync(dir, { recursive: true });
   const trace = path.join(dir, 'trace.ndjson');
   const argv = ['--headless=new', '--remote-debugging-pipe', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--xtrace-enable', `--xtrace-file=${trace}`, '--xtrace-categories=reverse,fingerprint,internal',
-    ...flags, `--user-data-dir=${path.join(dir, 'profile')}`, 'about:blank'];
+    ...flags, `--user-data-dir=${profileDir || path.join(dir, 'profile')}`, 'about:blank'];
   fs.writeFileSync(path.join(dir, 'command.json'), JSON.stringify({ exe, argv }, null, 2));
   const child = spawn(exe, argv, { env, stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
   const exit = once(child, 'exit'), pipe = new Pipe(child);
@@ -134,7 +134,28 @@ async function runOnce(name, flags, loads) {
     assert(observer.every(d => d.outcome !== 'consume' && d.outcome !== 'produce'),
         'observer environment performed code-cache activity — disable not effective');
 
-    console.log('PASS: ordinary env consumes code cache; observer env suppresses it (A.3 dual evidence)');
+    // 3) SAME-PROFILE RESTART (N4/R5): a second browser process reusing
+    //    the ordinary run's profile must consume the persisted code cache
+    //    on its FIRST load (disk-cache-backed code cache survives the
+    //    process boundary).
+    const restart = await runOnce('normal-env-restart', ['--xtrace-causality=off'], 1,
+        path.join(outDir, 'normal-env', 'profile'));
+    console.log('restart decisions:', JSON.stringify(restart));
+    assert(restart.some(d => d.outcome === 'consume'),
+        'same-profile restart did not consume the persisted code cache');
+
+    // Identity binding: what was produced/consumed, from which script.
+    const { createHash } = require('node:crypto');
+    const binding = {
+      ts: new Date().toISOString(),
+      scriptUrl: `/warm.js (served from 127.0.0.1:${server.address().port})`,
+      scriptSourceSha256: createHash('sha256').update(scriptBody).digest('hex'),
+      expectedWarm: EXPECTED_WARM,
+      outcomes: { normal, observer, restart },
+    };
+    fs.writeFileSync(path.join(outDir, 'binding.json'), JSON.stringify(binding, null, 2));
+
+    console.log('PASS: ordinary env consumes code cache; observer env suppresses it; restart reuses it');
     console.log(`Evidence: ${outDir}`);
   } finally { server.close(); }
 })().catch(e => { console.error(e); server.close(); process.exitCode = 1; });
