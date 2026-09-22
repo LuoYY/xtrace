@@ -239,6 +239,7 @@ def main() -> int:
     stop_reason = None
     rss_over_since = None
     cpu_over_since = None
+    pressure_over_since = None
     swap_prev = swap_used_gib()
 
     def interrupt() -> None:
@@ -251,7 +252,8 @@ def main() -> int:
     done = threading.Event()
 
     def watchdog() -> None:
-        nonlocal stop_reason, rss_over_since, cpu_over_since, swap_prev
+        nonlocal stop_reason, rss_over_since, cpu_over_since, swap_prev, \
+        pressure_over_since
         while not done.wait(sample_secs):
             free_now = disk_free_gib(out_dir)
             if free_now < stop_floor:
@@ -262,10 +264,21 @@ def main() -> int:
                 return
             level = memory_pressure_level()
             if level in (2, 4):
-                stop_reason = f"memory pressure level {level} (warning/critical)"
-                emit(f"WATCHDOG STOP: {stop_reason}")
-                interrupt()
-                return
+                # Resource plan §4.2: SUSTAINED pressure stops the build —
+                # a single transient sample (e.g. during a heavy link) only
+                # logs; two consecutive samples stop.
+                if pressure_over_since is None:
+                    pressure_over_since = time.time()
+                    emit(f"WATCHDOG NOTE: memory pressure level {level} "
+                         "(first sample; sustained check next)")
+                elif time.time() - pressure_over_since >= sample_secs:
+                    stop_reason = (f"memory pressure level {level} sustained "
+                                   "(warning/critical)")
+                    emit(f"WATCHDOG STOP: {stop_reason}")
+                    interrupt()
+                    return
+            else:
+                pressure_over_since = None
             cpu, rss_kib = tree_stats(pgid)
             rss_gib = rss_kib / (1 << 20)
             if rss_gib > TREE_RSS_BUDGET_GIB:
