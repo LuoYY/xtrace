@@ -79,8 +79,19 @@ v8_enable_xtrace_ignition_observer=$([[ "$OBSERVER" == "on" ]] && echo true || e
 "
 
 echo "==> gn gen done: $SRC/$OUT_DIR"
-echo "==> building (this takes a while on a first release build)…"
-"$NINJA_BIN" -C "$OUT_DIR" chrome
+# N5 (resource plan §3/§4): every ninja invocation goes through the
+# project coordinator — two-tier throttling (interactive -j2/-l3/-k1
+# default, idle -j4/-l6), project-wide exclusive lock, QoS scheduling,
+# and the disk/pressure watchdog over the managed group only. NINJA_BIN,
+# BUILD_PROFILE, JOBS, LOAD_LIMIT and GEN_ONLY pass straight through;
+# RESUME=1 keeps the confirmed args (skips the gn gen above).
+if [[ "${RESUME:-0}" != "1" ]]; then :; fi
+echo "==> building via the resource coordinator (${BUILD_PROFILE:-interactive})…"
+python3 "$ROOT/scripts/xtrace_build_coordinator.py" "$SRC/$OUT_DIR" chrome \
+  --profile "${BUILD_PROFILE:-interactive}" \
+  ${NINJA_BIN:+--ninja-bin "$NINJA_BIN"} \
+  ${JOBS:+--jobs "$JOBS"} ${LOAD_LIMIT:+--load-limit "$LOAD_LIMIT"} \
+  ${GEN_ONLY:+--gen-only}
 
 # XTRACE P3-E9: the bundle directory is ChromiumX.app (executable inside
 # remains Contents/MacOS/Chromium).
