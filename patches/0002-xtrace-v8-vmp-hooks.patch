@@ -9212,6 +9212,49 @@ index d5b352a6..512d5552 100644
    bigint_processor_ = bigint::Processor::New(new BigIntPlatform(this));
  
    if (is_shared_space_isolate()) {
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 536cea91..97c79d76 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -43,6 +43,9 @@
+ #include "src/heap/heap.h"
+ #include "src/heap/read-only-heap.h"
+ #include "src/init/isolate-group.h"
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++#include "src/interpreter/xtrace-ignition-observer.h"
++#endif
+ #include "src/objects/code.h"
+ #include "src/objects/contexts.h"
+ #include "src/objects/debug-objects.h"
+@@ -2034,6 +2037,17 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   interpreter::Interpreter* interpreter() const { return interpreter_; }
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // F2 (review B1/B5): per-isolate Ignition observer state (gate +
++  // callback + compilation-instance registry). Created in Isolate::Init
++  // after the heap exists; embedders drive it only through the primitive
++  // boundary in xtrace-ignition-observer.h.
++  xtrace::IgnitionObserverState* xtrace_ignition_observer() const {
++    DCHECK_NOT_NULL(xtrace_ignition_observer_.get());
++    return xtrace_ignition_observer_.get();
++  }
++#endif
++
+   compiler::PerIsolateCompilerCache* compiler_cache() const {
+     return compiler_cache_;
+   }
+@@ -2789,6 +2803,10 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+ 
+   interpreter::Interpreter* interpreter_ = nullptr;
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  std::unique_ptr<xtrace::IgnitionObserverState> xtrace_ignition_observer_;
++#endif
++
+   compiler::PerIsolateCompilerCache* compiler_cache_ = nullptr;
+   // The following zone is for compiler-related objects that should live
+   // through all compilations (and thus all JSHeapBroker instances).
 diff --git a/src/execution/messages.cc b/src/execution/messages.cc
 index 9a3a6de3..c092e2ba 100644
 --- a/src/execution/messages.cc

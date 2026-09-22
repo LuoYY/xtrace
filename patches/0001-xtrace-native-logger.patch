@@ -13966,6 +13966,18 @@ index 0f8b2defe6..e6eb79a824 100644
      "animation/animation_translation_util_test.cc",
      "animation/compositor_animation_test.cc",
      "animation/timing_function_test.cc",
+diff --git a/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h b/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
+index 480ccc3f0e..0738daafe4 100644
+--- a/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
++++ b/third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h
+@@ -219,6 +219,7 @@ class PLATFORM_EXPORT V8PerIsolateData final {
+     enum class Key : uint32_t {
+       kProfileGroup,
+       kCanvasResourceTracker,
++      kXTraceIgnitionObserver,
+       kNumberOfKeys
+     };
+ 
 diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc
 index 0d3d4a3305..be7ed9c451 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/url_loader/code_cache_fetcher.cc
