@@ -88,7 +88,7 @@ index 8da7876994..e28e8b1b32 100644
    };
  
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b..e7fb54e0a2 100644
+index b2a722741b..22ee082d2e 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -4,6 +4,7 @@
@@ -600,7 +600,7 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  }  // namespace
-@@ -411,6 +569,127 @@ bool XTraceLogger::Enabled() {
+@@ -411,6 +569,132 @@ bool XTraceLogger::Enabled() {
    return GetCachedConfig().enabled;
  }
  
@@ -627,7 +627,12 @@ index b2a722741b..e7fb54e0a2 100644
 +                                    const char* opcode_name,
 +                                    const String& activation_ref) {
 +  const XTraceConfig& config = GetCachedConfig();
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
 +    return;
 +  }
 +  auto snapshot = EntrySnapshot();
@@ -728,12 +733,17 @@ index b2a722741b..e7fb54e0a2 100644
  String XTraceLogger::QuoteJson(const String& value) {
    return String::FromUtf8(QuoteJsonString(value.Utf8()));
  }
-@@ -445,14 +724,17 @@ void XTraceLogger::LogEvent(const char* category,
+@@ -445,14 +729,22 @@ void XTraceLogger::LogEvent(const char* category,
                              const char* api,
                              const String& args_json) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -
@@ -752,12 +762,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogEventWithContext(const char* category,
-@@ -462,15 +744,17 @@ void XTraceLogger::LogEventWithContext(const char* category,
+@@ -462,15 +754,22 @@ void XTraceLogger::LogEventWithContext(const char* category,
                                         const String& frame_url,
                                         const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -
@@ -777,12 +792,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogEventNoStack(const char* category,
-@@ -478,14 +762,17 @@ void XTraceLogger::LogEventNoStack(const char* category,
+@@ -478,14 +777,22 @@ void XTraceLogger::LogEventNoStack(const char* category,
                                     const char* api,
                                     const String& args_json) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -
@@ -801,12 +821,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogEventNoStackWithContext(const char* category,
-@@ -495,15 +782,17 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+@@ -495,15 +802,22 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
                                                const String& frame_url,
                                                const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -
@@ -826,12 +851,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogAssetEvent(const char* category,
-@@ -514,19 +803,20 @@ void XTraceLogger::LogAssetEvent(const char* category,
+@@ -514,19 +828,25 @@ void XTraceLogger::LogAssetEvent(const char* category,
                                   const String& url,
                                   const String& source) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
 +    return;
 +  }
 +  auto snapshot = EntrySnapshot();
@@ -855,12 +885,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-@@ -537,18 +827,25 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+@@ -537,18 +857,30 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
                                               const String& url,
                                               const String& source) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -
@@ -889,12 +924,17 @@ index b2a722741b..e7fb54e0a2 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAssetAndContext(
-@@ -562,19 +859,42 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+@@ -562,19 +894,47 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
      const String& frame_url,
      const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
 -  if (!CategoryEnabled(config, category)) {
-+  if (!config.enabled) {
++  if (!config.enabled ||
++      // N3-part2 conservative non-acceptance: until the browser's config
++      // (initial backfill included) has been applied, this process emits
++      // nothing — a fresh renderer never labels events with a stale
++      // launch snapshot.
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
      return;
    }
 -

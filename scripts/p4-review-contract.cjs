@@ -113,12 +113,21 @@ async function run(name, flags, page, extra) {
       // F1: a renderer spawned after the update (localhost is a different
       // site than 127.0.0.1 -> own process) must receive the config
       // backfill via its startup control-endpoint registration.
+      // N3-part2: ZERO-WAIT navigation — the first-config barrier makes
+      // the outcome deterministic without sleeps: the new renderer either
+      // observed under the backfilled config or not at all, never under
+      // the launch snapshot.
       const { targetId: t2 } = await pipe.send('Target.createTarget', { url: 'about:blank' });
       const { sessionId: s2 } = await pipe.send('Target.attachToTarget', { targetId: t2, flatten: true });
-      await new Promise(r => setTimeout(r, 500));
       await pipe.send('Page.enable', {}, s2);
       await pipe.send('Page.navigate', { url: `http://localhost:${server.address().port}/fp` }, s2);
-      await new Promise(r => setTimeout(r, 800));
+      // Bounded poll on the status axis (not a fixed sleep): the new
+      // renderer appears in appliedProducers once its events land.
+      for (let i = 0; i < 40; i++) {
+        const st = await pipe.send('XTrace.getCaptureStatus');
+        if ((st.appliedProducers || []).length > 0) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
       result.statusAfterUpdate = await pipe.send('XTrace.getCaptureStatus');
     }
     result.stop = await pipe.send('XTrace.stopCapture');
@@ -144,6 +153,14 @@ async function run(name, flags, page, extra) {
         result.workerRandom = random.filter(r => r.producer.startsWith('rtw:'));
         const mainEpochs = new Set(events.filter(e => e.api === 'JSON.stringify').map(e => (e.producer_id.split(':')[1] || '')));
         result.newRendererRandom = random.filter(r => r.producer.startsWith('rtx:') && !mainEpochs.has(r.producer.split(':')[1] || ''));
+        // N3-part2: attribute events to the NEW RENDERER by its distinctive
+        // page API (rtx Crypto.getRandomValues outside the main epoch) —
+        // "any non-main renderer" would wrongly sweep in the browser's
+        // pre-existing initial renderer, whose pre-update generation-0
+        // events are legitimate.
+        const t2Epochs = new Set(result.newRendererRandom.map(r => (r.producer.split(':')[1] || '')));
+        result.newRendererAllEvents = events.filter(e => t2Epochs.has(e.producer_id.split(':')[1] || ''))
+            .map(e => ({ api: e.api, category: e.category, generation: e.config_generation }));
       }
     }
   } catch (e) { result.probeError = e.stack; }
@@ -219,6 +236,8 @@ function categoryContracts(cat) {
   contract('B7.worker-inherits-update', 'a Worker created after the update emits fingerprint events on the new generation (same-process hub snapshot)', cat?.workerProbe?.result?.value === 'ok' && workerRandom.length > 0 && workerRandom.every(r => String(r.generation) === gen && r.category === 'fingerprint'), { workerProbe: cat?.workerProbe?.result?.value ?? cat?.workerProbe, workerRandom, gen });
   const newRendererRandom = cat?.newRendererRandom || [];
   contract('B7.new-renderer-inherits-update', 'a renderer spawned after the update (own process) observes under the backfilled config, not generation 0', newRendererRandom.length > 0 && newRendererRandom.every(r => String(r.generation) === gen && r.category === 'fingerprint'), { newRendererRandom, gen });
+  const anyGen0 = (cat?.newRendererAllEvents || []).filter(e => String(e.generation) === '0');
+  contract('R4.new-renderer-zero-wait-no-stale-generation', 'with ZERO wait before first navigation, a renderer created after an update never emits a generation-0 event (barrier or backfill — never the launch snapshot)', (cat?.newRendererAllEvents || []).length === 0 || anyGen0.length === 0, { stale: anyGen0.slice(0, 5), total: (cat?.newRendererAllEvents || []).length });
 }
 
 (async () => {

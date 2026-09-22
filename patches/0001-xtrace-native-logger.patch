@@ -916,10 +916,10 @@ index 0000000000..d77c3baec1
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..700a803676
+index 0000000000..5c4509d278
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1202 @@
+@@ -0,0 +1,1201 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1463,15 +1463,14 @@ index 0000000000..700a803676
 +        },
 +        weak_factory_.GetWeakPtr(), epoch));
 +    control_remotes_by_epoch_[epoch] = std::move(remote);
-+    // F1/B7: a renderer registering AFTER an updateCapture must inherit
-+    // the current effective config — broadcasting to already-known
-+    // endpoints is not inheritance. Generation "0" needs no backfill (the
-+    // renderer's launch snapshot already matches).
-+    if (status_generation_ != "0") {
-+      control_remotes_by_epoch_[epoch]->UpdateConfig(
-+          status_generation_, status_categories_,
-+          base::BindOnce([](bool distributed) {}));
-+    }
++    // F1/B7 + N3-part2 barrier: a renderer registering at ANY time
++    // receives the current effective config — including generation "0".
++    // The arrival releases the renderer's first-config barrier, making
++    // "no observation before confirmation" deterministic for zero-wait
++    // first scripts.
++    control_remotes_by_epoch_[epoch]->UpdateConfig(
++        status_generation_, status_categories_,
++        base::BindOnce([](bool distributed) {}));
 +  }
 +}
 +
@@ -14006,10 +14005,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..be2d1aeb3a
+index 0000000000..5af741c682
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,250 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14030,6 +14029,7 @@ index 0000000000..be2d1aeb3a
 +#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 +#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
 +#include "v8/include/v8.h"
 +
 +namespace v8 {
@@ -14134,8 +14134,11 @@ index 0000000000..be2d1aeb3a
 +};
 +
 +void RecomputeGate(v8::Isolate* isolate, IgnitionScope* scope) {
-+  const bool open = !scope->Stopped() && !scope->stack.empty() &&
-+                    scope->stack.back().selected;
++  // N3-part2 barrier: until the browser's config has been applied in
++  // this process, conservative non-acceptance — the gate stays closed.
++  const bool open = !scope->Stopped() &&
++                    XTraceProducerHub::Get()->ConfigReceived() &&
++                    !scope->stack.empty() && scope->stack.back().selected;
 +  v8::internal::xtrace::IgnitionObserverSetGate(
 +      reinterpret_cast<v8::internal::Isolate*>(isolate), open ? 1 : 0);
 +}
@@ -14432,10 +14435,10 @@ index 0000000000..308d0c56bc
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..72367f1c02
+index 0000000000..8c7dcabeb3
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,466 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14606,6 +14609,7 @@ index 0000000000..72367f1c02
 +  next->categories = categories;
 +  base::AutoLock lock(config_lock_);
 +  effective_config_ = std::move(next);
++  config_received_.store(true, std::memory_order_release);
 +}
 +
 +void XTraceProducerHub::ResetForTesting() {
@@ -14903,10 +14907,10 @@ index 0000000000..72367f1c02
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..63c45020b1
+index 0000000000..2f5cef489b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,212 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14978,6 +14982,13 @@ index 0000000000..63c45020b1
 +  // config_generation stamp for one event both come from a single
 +  // SnapshotConfig() call at the event entry.
 +  std::shared_ptr<const EffectiveCaptureConfig> SnapshotConfig() const;
++  // N3-part2 first-config barrier: false until the browser's initial
++  // config (backfill or update) has been APPLIED in this process. In the
++  // precise environment the observer gate stays closed until then, so a
++  // fresh renderer conservatively emits nothing under a stale snapshot.
++  bool ConfigReceived() const {
++    return config_received_.load(std::memory_order_acquire);
++  }
 +  // P3-E4: current effective config, inherited by newly created producers.
 +  std::string current_generation() const;
 +  void SetCurrentConfig(const std::string& generation,
@@ -15015,6 +15026,7 @@ index 0000000000..63c45020b1
 +  // pointer under config_lock_, readers copy the shared_ptr once per event.
 +  mutable base::Lock config_lock_;
 +  std::shared_ptr<const EffectiveCaptureConfig> effective_config_;
++  std::atomic<bool> config_received_{false};
 +  std::atomic<uint64_t> next_lseq_{0};
 +  mutable base::Lock lock_;
 +  std::map<uint64_t, std::shared_ptr<RegistryEntry>> registry_;
