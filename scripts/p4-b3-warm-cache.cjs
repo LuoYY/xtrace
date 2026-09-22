@@ -8,7 +8,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const { once } = require('node:events');
 
 const root = path.resolve(__dirname, '..');
@@ -19,9 +19,14 @@ const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.st
 
 // Stable URL + cacheable, non-trivial script (above the ~1KB code-cache
 // threshold so production is even possible).
-const scriptBody = 'function warm(n){let s=0;for(let i=0;i<n;i++)s+=i*Math.sin(i);return s}\n'
+const scriptBody = 'function warm(n){let s=0;for(let i=0;i<n;i++)s+=(i%7);return s}\n'
   + Array.from({length: 40}, (_, i) => `function f${i}(x){return warm(x+${i})+${i}*x*x+x/3+Math.sqrt(x+${i})}`).join('\n')
   + '\nwindow.warmResult=f0(2000);window.reviewDone=true;';
+// N4/R5: fixed expected value — f0(2000) = warm(2000) + 0 + 2000/3 + sqrt(2000).
+const EXPECTED_WARM = (() => {
+  let s = 0; for (let i = 0; i < 2000; i++) s += i % 7;
+  return s + 2000 / 3 + Math.sqrt(2000);
+})();
 const server = http.createServer((req, res) => {
   if (req.url === '/warm.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript', 'Cache-Control': 'max-age=3600' });
@@ -71,8 +76,19 @@ async function runOnce(name, flags, loads) {
     for (let i = 0; i < loads; i++) {
       await pipe.send('Page.navigate', { url }, sessionId);
       for (let k = 0; k < 60; k++) {
-        const done = await pipe.send('Runtime.evaluate', { expression: 'window.reviewDone === true', returnByValue: true }, sessionId);
-        if (done.result.value) break;
+        const done = await pipe.send('Runtime.evaluate',
+            { expression: 'window.reviewDone === true ? window.warmResult : false', returnByValue: true }, sessionId);
+        if (done.result.value !== false) {
+          // N4/R5: execution RESULT asserted (cache state must not break
+          // JS semantics), at least on the final (warm) load.
+          if (i === loads - 1) {
+            const got = done.result.value;
+            if (!(Math.abs(got - EXPECTED_WARM) < 1e-9)) {
+              throw new Error(`${name}: warmResult ${got} != ${EXPECTED_WARM}`);
+            }
+          }
+          break;
+        }
         if (k === 59) throw new Error('page did not complete');
         await new Promise(r => setTimeout(r, 100));
       }
@@ -81,6 +97,14 @@ async function runOnce(name, flags, loads) {
     await pipe.send('Browser.close');
   } finally {
     if (child.exitCode === null) { child.kill('SIGTERM'); await exit; }
+  }
+  // N4/R5: the FULL hardened validator gates each run (schema, single
+  // capture, per-producer written == observed records).
+  const v = spawnSync('python3', [path.join(root, 'scripts', 'validate_quiet.py'), trace],
+      { encoding: 'utf8', timeout: 120000 });
+  if (v.status !== 0) {
+    fs.writeFileSync(path.join(dir, 'validator.txt'), (v.stdout || '') + (v.stderr || ''));
+    throw new Error(`${name}: validator failed: ${(v.stderr || v.stdout || '').slice(0, 300)}`);
   }
   const events = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : [];
   const decisions = events.filter(e => e.api === 'XTraceCodeCache.compileOptions')
