@@ -184,8 +184,10 @@ def main() -> int:
     if load <= 0:
         raise Refused(f"LOAD_LIMIT must be >= 1 (got {load})")
 
-    ninja_bin = args.ninja_bin or Path(
-        os.environ.get("NINJA_BIN") or "") or TREE_NINJA
+    ninja_bin = args.ninja_bin
+    if ninja_bin is None:
+        env_ninja = os.environ.get("NINJA_BIN", "").strip()
+        ninja_bin = Path(env_ninja) if env_ninja else TREE_NINJA
     if shutil.which(str(ninja_bin)) is None and not ninja_bin.is_file():
         raise Refused(f"ninja binary not found: {ninja_bin}")
     out_dir = args.out_dir.resolve()
