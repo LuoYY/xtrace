@@ -9088,7 +9088,7 @@ index fc6d62e2..3d371df1 100644
  #ifdef V8_FUZZILLI
  
 diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
-index d5b352a6..8f8d31d5 100644
+index d5b352a6..512d5552 100644
 --- a/src/execution/isolate.cc
 +++ b/src/execution/isolate.cc
 @@ -79,6 +79,9 @@
@@ -9186,7 +9186,21 @@ index d5b352a6..8f8d31d5 100644
  
    if (v8_flags.print_all_exceptions) {
      PrintF("=========================================================\n");
-@@ -6154,6 +6228,11 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
+@@ -5004,6 +5078,13 @@ void Isolate::RegisterMicrotaskQueue(MicrotaskQueue* queue) {
+ void Isolate::Deinit() {
+   TRACE_ISOLATE(deinit);
+ 
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // N1 (review R1): tear the observer state down while the heap and
++  // global handles are still alive (member destruction would race the
++  // heap member's own teardown order).
++  xtrace_ignition_observer_.reset();
++#endif
++
+ #ifdef V8_ENABLE_REGEXP_DIAGNOSTICS
+   PrintAndClearRegExpSubjectStrings();
+ #endif  // V8_ENABLE_REGEXP_DIAGNOSTICS
+@@ -6154,6 +6235,11 @@ bool Isolate::Init(SnapshotData* startup_snapshot_data,
        jsregexp_static_offsets_vector());
    date_cache_ = new DateCache();
    interpreter_ = new interpreter::Interpreter(this);
@@ -9518,10 +9532,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..aff3dc40
+index 00000000..d43bda03
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,271 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9580,25 +9594,59 @@ index 00000000..aff3dc40
 +
 +class IgnitionObserverState::Registry {
 + public:
++  // Raw ownership on purpose (N1/review R1): an Entry whose first-pass
++  // weak callback ran is erased from both indexes immediately, but the
++  // POINTER must survive until its second pass — which may even run
++  // during isolate teardown, after this registry is gone. The second
++  // pass therefore only deletes the Entry and touches nothing else.
 +  struct Entry {
 +    Address* handle_slot = nullptr;  // weak global handle: stable identity
++    Address slot_key = 0;            // by_slot_ key (survives first pass)
 +    uint32_t version = 0;
 +    std::vector<IgnitionLogicalInstruction> instructions;  // ascending
-+    Registry* owner = nullptr;  // weak-callback dispatch (review B5)
++    Registry* owner_registry = nullptr;  // index cleanup in first pass
 +  };
 +
 +  Registry() = default;
 +  Registry(const Registry&) = delete;
 +  Registry& operator=(const Registry&) = delete;
 +
-+  // Weak-collection callback (second pass, isolate thread). The parameter
-+  // is the Entry pointer; erase both index maps.
++  ~Registry() { DestroyAllHandles(); }
++
++  // Weak collection, canonical two-pass contract (mirrors
++  // ManagedObjectFinalizer in objects/managed.cc): the FIRST pass frees
++  // the global handle — the pinned V8 CHECK's "Handle not reset in first
++  // callback" fatal fires otherwise — and calls no other V8 API. The
++  // index cleanup happens inline (plain map edits are not V8 API); the
++  // SECOND pass only deletes the Entry.
 +  static void HandleCollected(const v8::WeakCallbackInfo<void>& data) {
 +    Entry* entry = reinterpret_cast<Entry*>(data.GetParameter());
-+    entry->owner->Erase(entry);
++    GlobalHandles::Destroy(entry->handle_slot);
++    entry->handle_slot = nullptr;  // collected marker
++    collected_entries_()->push_back(entry);
++    DropFromIndexes(entry);
++    data.SetSecondPassCallback(&Registry::HandleCollectedSecondPass);
 +  }
 +
-+  void Erase(Entry* entry) {
++  static void HandleCollectedSecondPass(
++      const v8::WeakCallbackInfo<void>& data) {
++    Entry* entry = reinterpret_cast<Entry*>(data.GetParameter());
++    auto& pending = *collected_entries_();
++    for (auto it = pending.begin(); it != pending.end(); ++it) {
++      if (*it == entry) {
++        pending.erase(it);
++        break;
++      }
++    }
++    delete entry;
++  }
++
++  static void DropFromIndexes(Entry* entry) {
++    entry->owner_registry->by_address_erase(entry);
++    entry->owner_registry->by_slot_.erase(entry->slot_key);
++  }
++
++  void by_address_erase(Entry* entry) {
 +    for (auto it = by_address_.begin(); it != by_address_.end();) {
 +      if (it->second == entry) {
 +        it = by_address_.erase(it);
@@ -9606,13 +9654,12 @@ index 00000000..aff3dc40
 +        ++it;
 +      }
 +    }
-+    by_slot_.erase(reinterpret_cast<Address>(entry->handle_slot));
 +  }
 +
 +  // GC epilogue: global-handle relocations update the slot CONTENTS in
 +  // place, so re-reading every slot rebuilds the object-address
-+  // accelerator. Entries whose handle was cleared await their weak
-+  // callback and are skipped (kNullAddress).
++  // accelerator. Collected entries left the maps in their first pass, so
++  // every remaining slot is live.
 +  void RebuildAddressMap() {
 +    by_address_.clear();
 +    for (auto& [slot, entry] : by_slot_) {
@@ -9620,7 +9667,7 @@ index 00000000..aff3dc40
 +      // object address (Tagged<HeapObject>::address()).
 +      const Address current = *entry->handle_slot;
 +      if (current != kNullAddress) {
-+        by_address_[current - kHeapObjectTag] = entry.get();
++        by_address_[current - kHeapObjectTag] = entry;
 +      }
 +    }
 +  }
@@ -9641,9 +9688,9 @@ index 00000000..aff3dc40
 +    IndirectHandle<BytecodeArray> handle =
 +        isolate->global_handles()->Create(array);
 +    Address* slot = handle.location();
-+    auto entry = std::make_unique<Entry>();
-+    entry->owner = this;
-+    GlobalHandles::MakeWeak(slot, entry.get(), &Registry::HandleCollected,
++    auto* entry = new Entry();
++    entry->owner_registry = this;
++    GlobalHandles::MakeWeak(slot, entry, &Registry::HandleCollected,
 +                            v8::WeakCallbackType::kParameter);
 +    // Pre-decode ONCE per compilation instance: normalized logical
 +    // offsets (prefix positions) with their bytecodes, ascending.
@@ -9655,16 +9702,43 @@ index 00000000..aff3dc40
 +    }
 +    entry->version = next_version_++;
 +    entry->handle_slot = slot;
-+    Entry* raw = entry.get();
-+    by_slot_[reinterpret_cast<Address>(slot)] = std::move(entry);
-+    by_address_[array.address()] = raw;
-+    return raw;
++    entry->slot_key = reinterpret_cast<Address>(slot);
++    by_slot_[entry->slot_key] = entry;
++    by_address_[array.address()] = entry;
++    return entry;
 +  }
 +
 +  size_t size() const { return by_slot_.size(); }
 +
++  // Teardown while global handles are still alive: destroy the remaining
++  // LIVE handles (collected markers are skipped — their nodes are already
++  // free) and delete those entries. Entries still awaiting a second pass
++  // stay on collected_entries_: a late second pass can then only `delete`
++  // them safely, and if it never fires the process is tearing down
++  // anyway (bounded, counted in the census below).
++  void DestroyAllHandles() {
++    for (auto& [slot, entry] : by_slot_) {
++      if (entry->handle_slot != nullptr) {
++        GlobalHandles::Destroy(entry->handle_slot);
++        entry->handle_slot = nullptr;
++      }
++      delete entry;
++    }
++    by_address_.clear();
++    by_slot_.clear();
++  }
++
 + private:
-+  std::unordered_map<Address, std::unique_ptr<Entry>> by_slot_;
++  // Process-lifetime parking list for entries between their first and
++  // second weak pass (the second pass may outlive the registry).
++  // Intentionally leaked: exit-time destructors are banned, and the list
++  // must stay valid until process teardown.
++  static std::vector<Entry*>* collected_entries_() {
++    static std::vector<Entry*>* entries = new std::vector<Entry*>();
++    return entries;
++  }
++
++  std::unordered_map<Address, Entry*> by_slot_;
 +  std::unordered_map<Address, Entry*> by_address_;
 +  uint32_t next_version_ = 1;
 +};
@@ -9683,6 +9757,10 @@ index 00000000..aff3dc40
 +}
 +
 +IgnitionObserverState::~IgnitionObserverState() {
++  // Teardown order (N1/review R1): unregister the GC callback FIRST, then
++  // destroy the remaining live weak handles and free the registry — all
++  // while the heap and global handles are still alive (the state is
++  // destroyed from Isolate::Deinit).
 +  isolate_->heap()->RemoveGCEpilogueCallback(
 +      &XTraceGCEpilogue, reinterpret_cast<void*>(this));
 +  delete registry_;
