@@ -142,10 +142,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..1fa93bd6c7
+index 0000000000..26838faed2
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,537 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -515,6 +515,7 @@ index 0000000000..1fa93bd6c7
 +
 +void XTraceHandler::UpdateCapture(
 +    const String& in_categories,
++    std::unique_ptr<protocol::XTrace::ObserverScope> in_observerScope,
 +    std::unique_ptr<XTrace::Backend::UpdateCaptureCallback> callback) {
 +  XTraceCaptureController* controller = XTraceCaptureController::Get();
 +  if (!controller) {
@@ -522,8 +523,19 @@ index 0000000000..1fa93bd6c7
 +        "capture disabled: no launch-time trace configuration"));
 +    return;
 +  }
++  // N3-part2: the optional selector rides the same generation snapshot.
++  XTraceCaptureController::ObserverScope scope;
++  const XTraceCaptureController::ObserverScope* scope_ptr = nullptr;
++  if (in_observerScope) {
++    scope.context_patterns.assign(in_observerScope->GetContexts()->begin(),
++                                  in_observerScope->GetContexts()->end());
++    scope.script_patterns.assign(in_observerScope->GetScripts()->begin(),
++                                 in_observerScope->GetScripts()->end());
++    scope.deny_internal = in_observerScope->GetDenyInternal();
++    scope_ptr = &scope;
++  }
 +  const std::string generation = controller->DomainUpdateCapture(
-+      in_categories);
++      in_categories, scope_ptr);
 +  if (generation.empty()) {
 +    callback->sendFailure(Response::InvalidRequest(
 +        "invalid state: capture stopping or settled"));
@@ -673,10 +685,10 @@ index 0000000000..1fa93bd6c7
 +}  // namespace content::protocol
 diff --git a/content/browser/devtools/protocol/xtrace_handler.h b/content/browser/devtools/protocol/xtrace_handler.h
 new file mode 100644
-index 0000000000..4a921b6e84
+index 0000000000..f3873089cb
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.h
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,76 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -729,6 +741,7 @@ index 0000000000..4a921b6e84
 +      override;
 +  void UpdateCapture(
 +      const String& in_categories,
++      std::unique_ptr<protocol::XTrace::ObserverScope> in_observerScope,
 +      std::unique_ptr<XTrace::Backend::UpdateCaptureCallback> callback)
 +      override;
 +  DispatchResponse GetCaptureStatus(
@@ -800,10 +813,10 @@ index db280b0576..cea936ae91 100644
  
 diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
 new file mode 100644
-index 0000000000..d77c3baec1
+index 0000000000..46b1cc1b44
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace.pdl
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,123 @@
 +# Copyright 2026 The XTrace Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in Chromium's LICENSE file.
@@ -844,6 +857,16 @@ index 0000000000..d77c3baec1
 +      string written
 +      string failed
 +      boolean confirmed
++
++  experimental type ObserverScope extends object
++    properties
++      # N3-part2 selector (design docs/chromium-p4-scope-selector-design.md):
++      # URL-substring pattern lists over two non-interchangeable
++      # namespaces; empty list = namespace fully selected. denyInternal
++      # makes the internal-scheme exclusion explicit configuration.
++      array of string contexts
++      array of string scripts
++      boolean denyInternal
 +
 +  experimental type TerminalInfo extends object
 +    properties
@@ -893,6 +916,9 @@ index 0000000000..d77c3baec1
 +  experimental command updateCapture
 +    parameters
 +      string categories
++      # N3-part2: the observer scope selector rides the same generation
++      # snapshot; omitted = keep the current scope.
++      optional ObserverScope observerScope
 +    returns
 +      string generation
 +      array of string appliedProducers
@@ -916,10 +942,10 @@ index 0000000000..d77c3baec1
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..5c4509d278
+index 0000000000..a0bf64e2d3
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1201 @@
+@@ -0,0 +1,1210 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1470,6 +1496,9 @@ index 0000000000..5c4509d278
 +    // first scripts.
 +    control_remotes_by_epoch_[epoch]->UpdateConfig(
 +        status_generation_, status_categories_,
++        status_observer_scope_.context_patterns,
++        status_observer_scope_.script_patterns,
++        status_observer_scope_.deny_internal,
 +        base::BindOnce([](bool distributed) {}));
 +  }
 +}
@@ -1718,7 +1747,7 @@ index 0000000000..5c4509d278
 +}
 +
 +std::string XTraceCaptureController::DomainUpdateCapture(
-+    const std::string& categories) {
++    const std::string& categories, const ObserverScope* observer_scope) {
 +  std::string generation;
 +  {
 +    base::AutoLock lock(writer_lock_);
@@ -1728,6 +1757,9 @@ index 0000000000..5c4509d278
 +    generation = base::NumberToString(next_generation_++);
 +    status_generation_ = generation;
 +    status_categories_ = categories;
++    if (observer_scope) {
++      status_observer_scope_ = *observer_scope;
++    }
 +  }
 +  // Distribute on the writer runner: the control remotes are bound there
 +  // (mojo sequence checker). Delivery is distribution only; confirmation
@@ -1737,18 +1769,21 @@ index 0000000000..5c4509d278
 +      base::BindOnce(
 +          [](base::WeakPtr<XTraceCaptureController> weak,
 +             const std::string& generation,
-+             const std::string& categories) {
++             const std::string& categories,
++             const ObserverScope& scope) {
 +            if (!weak) {
 +              return;
 +            }
 +            base::AutoLock lock(weak->writer_lock_);
 +            for (auto& [epoch, remote] : weak->control_remotes_by_epoch_) {
 +              remote->UpdateConfig(
-+                  generation, categories,
++                  generation, categories, scope.context_patterns,
++                  scope.script_patterns, scope.deny_internal,
 +                  base::BindOnce([](bool distributed) {}));
 +            }
 +          },
-+          weak_factory_.GetWeakPtr(), generation, categories));
++          weak_factory_.GetWeakPtr(), generation, categories,
++          status_observer_scope_));
 +  return generation;
 +}
 +
@@ -2123,10 +2158,10 @@ index 0000000000..5c4509d278
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..48fd2197e8
+index 0000000000..fa2f6f7fc1
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,273 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2246,7 +2281,13 @@ index 0000000000..48fd2197e8
 +  // P3-E4: serial generation allocation + config distribution through the
 +  // in-band control endpoints. Returns the new generation, or "" when the
 +  // capture is stopping/settled (updateCapture -> invalidState).
-+  std::string DomainUpdateCapture(const std::string& categories);
++  struct ObserverScope {
++    std::vector<std::string> context_patterns;
++    std::vector<std::string> script_patterns;
++    bool deny_internal = true;
++  };
++  std::string DomainUpdateCapture(const std::string& categories,
++                                  const ObserverScope* observer_scope);
 +
 +  // P3-E5: identity crosswalk — frame_tree_node -> document token +
 +  // frame URL, captured at manifest time; unresolved entries are
@@ -2268,6 +2309,7 @@ index 0000000000..48fd2197e8
 +  uint64_t next_generation_ = 1;  // updateCapture allocations from "1"
 +  std::string status_generation_ = "0";
 +  std::string status_categories_;  // launch categories until first update
++  ObserverScope status_observer_scope_;  // N3-part2 selector (backfill)
 +
 +  // DP5 shutdown evidence: synchronous, idempotent finalization as
 +  // incomplete/browser-shutdown using only data already at the writer (no
@@ -2395,7 +2437,7 @@ index 0000000000..48fd2197e8
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 new file mode 100644
-index 0000000000..5d5f725177
+index 0000000000..e6245c6a22
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 @@ -0,0 +1,303 @@
@@ -2653,7 +2695,7 @@ index 0000000000..5d5f725177
 +// F1/B7: updateCapture stores the categories; the manifest discloses the
 +// effective config at settlement next to the historical startup snapshot.
 +TEST_F(XTraceCaptureControllerTest, UpdateStoresCategoriesAndManifestDiscloses) {
-+  const std::string gen = controller_->DomainUpdateCapture("fingerprint");
++  const std::string gen = controller_->DomainUpdateCapture("fingerprint", nullptr);
 +  EXPECT_EQ(gen, "1");
 +  EXPECT_EQ(controller_->current_generation(), "1");
 +  EXPECT_EQ(controller_->current_categories(), "fingerprint");
@@ -2681,7 +2723,7 @@ index 0000000000..5d5f725177
 +// F1: once stopping, updateCapture is rejected (serial state machine).
 +TEST_F(XTraceCaptureControllerTest, UpdateRejectedWhenStopping) {
 +  BeginStop();
-+  EXPECT_TRUE(controller_->DomainUpdateCapture("fingerprint").empty());
++  EXPECT_TRUE(controller_->DomainUpdateCapture("fingerprint", nullptr).empty());
 +}
 +
 +// F5 (review B6): a non-empty trace file at the target path is refused —
@@ -2752,10 +2794,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..16b8a41f93
+index 0000000000..2625d1d221
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,97 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2845,7 +2887,13 @@ index 0000000000..16b8a41f93
 +  // Runtime filter update (P3-E4): applies the new generation to every
 +  // producer thread of this process. Confirmation evidence is each
 +  // event's config_generation field — no applied-ACK is fabricated here.
-+  UpdateConfig(string generation, string categories) => (bool distributed);
++  // N3-part2: the observer scope selector rides the SAME message —
++  // contexts/scripts URL-substring patterns and the explicit
++  // denyInternal switch (see docs/chromium-p4-scope-selector-design.md).
++  UpdateConfig(string generation, string categories,
++               array<string> observerContextPatterns,
++               array<string> observerScriptPatterns,
++               bool observerDenyInternal) => (bool distributed);
 +};
 diff --git a/third_party/blink/public/platform/xtrace_control.h b/third_party/blink/public/platform/xtrace_control.h
 new file mode 100644
@@ -14005,10 +14053,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..5af741c682
+index 0000000000..5f4e93ae0a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,284 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14032,22 +14080,10 @@ index 0000000000..5af741c682
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
 +#include "v8/include/v8.h"
 +
-+namespace v8 {
-+namespace internal {
-+namespace xtrace {
-+// F2 single supported boundary: primitive-arg C signatures only — no V8
-+// struct layout is mirrored in Blink (review B5). Definitions link from
-+// the V8 archive; IgnitionObserverIsCompiled()'s return value (never a
-+// symbol's address) is the compile truth.
-+using IgnitionObserverCallback = void (*)(Isolate*, uint32_t, uint32_t,
-+                                          uint32_t, uint32_t);
-+bool IgnitionObserverIsCompiled();
-+const char* IgnitionOpcodeName(uint32_t opcode);
-+void IgnitionObserverSetCallback(Isolate*, IgnitionObserverCallback);
-+void IgnitionObserverSetGate(Isolate*, uint32_t);
-+}  // namespace xtrace
-+}  // namespace internal
-+}  // namespace v8
++// N3-part2: the SINGLE boundary declaration lives in
++// v8/include/xtrace_observer_boundary.h (compile-checked on both sides of
++// the link — no hand-written mirror here).
++#include "v8/include/xtrace_observer_boundary.h"
 +
 +namespace blink::xtrace {
 +
@@ -14076,16 +14112,53 @@ index 0000000000..5af741c682
 +  return stopped;
 +}
 +
-+// F2 v1 script scope: page scripts only. Internal schemes never open the
-+// gate — their bytecode short-circuits in generated code.
-+bool IsSelectableUrl(const char* frame_url) {
-+  if (!frame_url) {
-+    return true;  // no URL known: attribute to the page, not an extension
++// N3-part2 scope selection (design §1/§2): explicit configuration, not a
++// hidden hardcode. contexts evaluate at activation begin against the
++// context URL (frame document / worker scope); scripts evaluate at the
++// event callback against the registry-cached script SOURCE URL.
++bool MatchesAnyPattern(const std::vector<std::string>& patterns,
++                       std::string_view url) {
++  if (patterns.empty()) {
++    return true;  // empty list = namespace fully selected
 +  }
-+  std::string_view url(frame_url);
-+  return !url.starts_with("chrome-extension://") &&
-+         !url.starts_with("devtools://") && !url.starts_with("chrome://") &&
-+         !url.starts_with("chrome-untrusted://");
++  for (const std::string& pattern : patterns) {
++    if (url.find(pattern) != std::string_view::npos) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool IsInternalSchemeUrl(std::string_view url) {
++  return url.starts_with("chrome-extension://") ||
++         url.starts_with("devtools://") || url.starts_with("chrome://") ||
++         url.starts_with("chrome-untrusted://");
++}
++
++bool ContextSelected(const xtrace::ObserverScopeConfig& scope,
++                     const char* frame_url) {
++  if (scope.deny_internal && frame_url &&
++      IsInternalSchemeUrl(std::string_view(frame_url))) {
++    return false;  // explicit denyInternal rule (default on)
++  }
++  if (!frame_url) {
++    return scope.context_patterns.empty();
++  }
++  return MatchesAnyPattern(scope.context_patterns,
++                           std::string_view(frame_url));
++}
++
++bool ScriptSelected(const xtrace::ObserverScopeConfig& scope,
++                    const char* script_url) {
++  if (!script_url) {
++    return scope.script_patterns.empty() ||
++           scope.script_patterns.size() == 0;
++    // null URL (inline/eval without resolvable source): matches only an
++    // unconstrained selector — a pattern list cannot be verified against
++    // nothing.
++  }
++  return MatchesAnyPattern(scope.script_patterns,
++                           std::string_view(script_url));
 +}
 +
 +// Per-isolate observation scope (V8PerIsolateData::UserData owns the
@@ -14102,9 +14175,9 @@ index 0000000000..5af741c682
 +    // never extracted or nulled by the stop path. Callback first (a
 +    // racing event then no-ops), then the gate, then leave the registry.
 +    v8::internal::xtrace::IgnitionObserverSetCallback(
-+        reinterpret_cast<v8::internal::Isolate*>(isolate_.get()), nullptr);
++        isolate_.get(), nullptr);
 +    v8::internal::xtrace::IgnitionObserverSetGate(
-+        reinterpret_cast<v8::internal::Isolate*>(isolate_.get()), 0);
++        isolate_.get(), 0);
 +    base::AutoLock lock(*scopes_lock());
 +    scopes()->erase(this);
 +  }
@@ -14140,7 +14213,7 @@ index 0000000000..5af741c682
 +                    XTraceProducerHub::Get()->ConfigReceived() &&
 +                    !scope->stack.empty() && scope->stack.back().selected;
 +  v8::internal::xtrace::IgnitionObserverSetGate(
-+      reinterpret_cast<v8::internal::Isolate*>(isolate), open ? 1 : 0);
++      isolate, open ? 1 : 0);
 +}
 +
 +IgnitionScope* ScopeFor(v8::Isolate* isolate) {
@@ -14150,9 +14223,9 @@ index 0000000000..5af741c682
 +                                                 Key::kXTraceIgnitionObserver));
 +}
 +
-+void OnIgnitionEvent(v8::internal::Isolate* i_isolate, uint32_t script_id,
++void OnIgnitionEvent(v8::Isolate* isolate, uint32_t script_id,
 +                     uint32_t bytecode_version, uint32_t bytecode_offset,
-+                     uint32_t opcode);
++                     uint32_t opcode, const char* script_url);
 +
 +IgnitionScope* InstallScope(v8::Isolate* isolate) {
 +  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
@@ -14171,18 +14244,23 @@ index 0000000000..5af741c682
 +    IgnitionScope::scopes()->insert(scope);
 +  }
 +  v8::internal::xtrace::IgnitionObserverSetCallback(
-+      reinterpret_cast<v8::internal::Isolate*>(isolate), &OnIgnitionEvent);
++      isolate, &OnIgnitionEvent);
 +  return scope;
 +}
 +
-+void OnIgnitionEvent(v8::internal::Isolate* i_isolate, uint32_t script_id,
++void OnIgnitionEvent(v8::Isolate* isolate, uint32_t script_id,
 +                     uint32_t bytecode_version, uint32_t bytecode_offset,
-+                     uint32_t opcode) {
-+  v8::Isolate* isolate = reinterpret_cast<v8::Isolate*>(i_isolate);
++                     uint32_t opcode, const char* script_url) {
 +  IgnitionScope* scope = ScopeFor(isolate);
 +  if (!scope || scope->Stopped() || scope->stack.empty() ||
 +      !scope->stack.back().selected) {
 +    return;  // second line: scope state beyond the generated-code gate
++  }
++  // SCRIPT selection (design §1): the registry-cached source URL against
++  // the selector from the CURRENT snapshot.
++  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
++  if (!ScriptSelected(snapshot->observer_scope, script_url)) {
++    return;
 +  }
 +  if (XTraceLogger::CurrentActivationToken() == 0) {
 +    return;  // outside a tracked (sync-causality) activation
@@ -14234,9 +14312,13 @@ index 0000000000..5af741c682
 +  if (!scope) {
 +    return;
 +  }
++  // One snapshot also feeds the CONTEXT selection (design §2: same
++  // immutable object as categories/generation).
++  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
 +  // Always push (selected or not): end must have a pair to pop, and an
 +  // unselected inner explicitly suppresses only ITSELF (review B1/B8-B).
-+  scope->stack.push_back({IsSelectableUrl(frame_url)});
++  scope->stack.push_back(
++      {ContextSelected(snapshot->observer_scope, frame_url)});
 +  RecomputeGate(isolate, scope);
 +}
 +
@@ -14316,10 +14398,10 @@ index 0000000000..0059684fbc
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
 new file mode 100644
-index 0000000000..95bacbf136
+index 0000000000..88d0774ac2
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,71 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14363,13 +14445,20 @@ index 0000000000..95bacbf136
 +                     base::Unretained(this)));
 +}
 +
-+void XTraceControlImpl::UpdateConfig(const std::string& generation,
-+                                    const std::string& categories,
-+                                    UpdateConfigCallback callback) {
++void XTraceControlImpl::UpdateConfig(
++    const std::string& generation, const std::string& categories,
++    const std::vector<std::string>& observer_context_patterns,
++    const std::vector<std::string>& observer_script_patterns,
++    bool observer_deny_internal, UpdateConfigCallback callback) {
 +  // P3-E4: swap the process-wide effective config; every subsequent event
 +  // stamps the new generation. Confirmation evidence is the events
-+  // themselves — no fabricated applied-ACK (draft §8.3).
-+  XTraceProducerHub::Get()->SetCurrentConfig(generation, categories);
++  // themselves — no fabricated applied-ACK (draft §8.3). N3-part2: the
++  // observer scope rides the same snapshot.
++  xtrace::ObserverScopeConfig scope;
++  scope.context_patterns = observer_context_patterns;
++  scope.script_patterns = observer_script_patterns;
++  scope.deny_internal = observer_deny_internal;
++  XTraceProducerHub::Get()->SetCurrentConfig(generation, categories, scope);
 +  std::move(callback).Run(true /* distributed */);
 +}
 +
@@ -14386,10 +14475,10 @@ index 0000000000..95bacbf136
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
 new file mode 100644
-index 0000000000..308d0c56bc
+index 0000000000..59d49da5e7
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,48 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14398,6 +14487,7 @@ index 0000000000..308d0c56bc
 +#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 +
 +#include <string>
++#include <vector>
 +
 +#include "mojo/public/cpp/bindings/pending_receiver.h"
 +#include "mojo/public/cpp/bindings/receiver.h"
@@ -14421,9 +14511,13 @@ index 0000000000..308d0c56bc
 +  void StopCapture(const std::string& capture_id,
 +                   uint32_t deadline_ms,
 +                   StopCaptureCallback callback) override;
-+  void UpdateConfig(const std::string& generation,
-+                    const std::string& categories,
-+                    UpdateConfigCallback callback) override;
++  void UpdateConfig(
++      const std::string& generation,
++      const std::string& categories,
++      const std::vector<std::string>& observer_context_patterns,
++      const std::vector<std::string>& observer_script_patterns,
++      bool observer_deny_internal,
++      UpdateConfigCallback callback) override;
 +
 + private:
 +  // Self-owned: deleted when the associated pipe disconnects.
@@ -14435,10 +14529,10 @@ index 0000000000..308d0c56bc
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..8c7dcabeb3
+index 0000000000..250a60922b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,468 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14603,10 +14697,12 @@ index 0000000000..8c7dcabeb3
 +}
 +
 +void XTraceProducerHub::SetCurrentConfig(
-+    const std::string& generation, const std::string& categories) {
++    const std::string& generation, const std::string& categories,
++    const ObserverScopeConfig& observer_scope) {
 +  auto next = std::make_shared<EffectiveCaptureConfig>();
 +  next->generation = generation;
 +  next->categories = categories;
++  next->observer_scope = observer_scope;
 +  base::AutoLock lock(config_lock_);
 +  effective_config_ = std::move(next);
 +  config_received_.store(true, std::memory_order_release);
@@ -14907,10 +15003,10 @@ index 0000000000..8c7dcabeb3
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..2f5cef489b
+index 0000000000..990de79841
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,226 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14924,6 +15020,8 @@ index 0000000000..2f5cef489b
 +#include <map>
 +#include <memory>
 +#include <optional>
++#include <string>
++#include <vector>
 +#include <string>
 +
 +#include "base/memory/raw_ptr.h"
@@ -14948,6 +15046,16 @@ index 0000000000..2f5cef489b
 +// decimal > 0 or 0 (no override).
 +PLATFORM_EXPORT uint32_t ParseTestCapacitySwitchForTest(const std::string& value);
 +
++// Observer scope selector (N3-part2 design §1): URL-substring pattern
++// lists over two NON-interchangeable namespaces plus the explicit
++// internal-scheme switch. Defaults reproduce the historical page-scripts
++// behavior — as configuration, not a hidden hardcode.
++struct PLATFORM_EXPORT ObserverScopeConfig {
++  std::vector<std::string> context_patterns;  // empty = all contexts
++  std::vector<std::string> script_patterns;   // empty = all scripts
++  bool deny_internal = true;
++};
++
 +// Effective runtime config published by the browser through XTraceControl
 +// (F1/B7): generation and the category filter are ONE snapshot so an event
 +// is never filtered by the old config while stamped with the new
@@ -14955,6 +15063,7 @@ index 0000000000..2f5cef489b
 +struct PLATFORM_EXPORT EffectiveCaptureConfig {
 +  std::string generation = "0";
 +  std::string categories;  // launch --xtrace-categories until the first update
++  ObserverScopeConfig observer_scope;
 +};
 +
 +// Producer-side configuration snapshot (startup only; P2 has no hot
@@ -14992,7 +15101,8 @@ index 0000000000..2f5cef489b
 +  // P3-E4: current effective config, inherited by newly created producers.
 +  std::string current_generation() const;
 +  void SetCurrentConfig(const std::string& generation,
-+                                  const std::string& categories);
++                       const std::string& categories,
++                       const ObserverScopeConfig& observer_scope);
 +  void SetBufferCapacityForTesting(uint32_t capacity) {
 +    config_.buffer_capacity = capacity;
 +  }
@@ -15125,7 +15235,7 @@ index 0000000000..2f5cef489b
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
 new file mode 100644
-index 0000000000..fe124f0e7e
+index 0000000000..578c2fd929
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
 @@ -0,0 +1,245 @@
@@ -15338,7 +15448,7 @@ index 0000000000..fe124f0e7e
 +  ASSERT_TRUE(before);
 +  EXPECT_EQ(before->generation, "0");
 +  EXPECT_FALSE(before->categories.empty());  // launch default
-+  XTraceProducerHub::Get()->SetCurrentConfig("7", "fingerprint");
++  XTraceProducerHub::Get()->SetCurrentConfig("7", "fingerprint", {});
 +  auto after = XTraceProducerHub::Get()->SnapshotConfig();
 +  ASSERT_TRUE(after);
 +  EXPECT_EQ(after->generation, "7");
@@ -15363,7 +15473,7 @@ index 0000000000..fe124f0e7e
 +    EXPECT_TRUE(p->AcceptEvent("{\"api\":\"g\"}", "5").has_value());
 +    // An update arriving AFTER the entry snapshot must not re-stamp the
 +    // already-buffered record (it only affects later events).
-+    XTraceProducerHub::Get()->SetCurrentConfig("6", "fingerprint");
++    XTraceProducerHub::Get()->SetCurrentConfig("6", "fingerprint", {});
 +  }));
 +  thread.Stop();  // settle flushes the buffered line
 +  XTraceThreadProducer::SetHostFactoryForTesting({});

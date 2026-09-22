@@ -33,6 +33,67 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-decoder.cc",
      "src/interpreter/bytecode-flags-and-tokens.cc",
      "src/interpreter/bytecode-generator.cc",
+diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
+new file mode 100644
+index 00000000..d83361b4
+--- /dev/null
++++ b/include/xtrace_observer_boundary.h
+@@ -0,0 +1,55 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++// XTrace Ignition observer — the SINGLE embedder boundary (N3-part2,
++// docs/chromium-p4-scope-selector-design.md §4). Primitive signatures
++// only: no V8-internal type crosses this header beyond v8::Isolate*, and
++// no embedder mirrors a V8 struct layout. Blink, content and d8 include
++// THIS header instead of hand-writing declarations; compile-time checked
++// on both sides of the link.
++//
++// script_url in the callback points into registry-owned storage that is
++// stable while the compilation instance is alive; it may be null when
++// the script has no resolvable source URL. Copy if kept.
++
++#ifndef V8_INCLUDE_XTRACE_OBSERVER_BOUNDARY_H_
++#define V8_INCLUDE_XTRACE_OBSERVER_BOUNDARY_H_
++
++#include <stdint.h>
++
++#include "v8config.h"
++
++namespace v8 {
++class Isolate;
++}  // namespace v8
++
++namespace v8 {
++namespace internal {
++namespace xtrace {
++
++using IgnitionObserverCallback = void (*)(v8::Isolate* isolate,
++                                          uint32_t script_id,
++                                          uint32_t bytecode_version,
++                                          uint32_t bytecode_offset,
++                                          uint32_t opcode,
++                                          const char* script_url);
++
++// Always compiled; the RETURN VALUE carries the compile macro's truth.
++V8_EXPORT bool IgnitionObserverIsCompiled();
++
++// Stable display name for a bytecode enum value (upstream mnemonic).
++V8_EXPORT const char* IgnitionOpcodeName(uint32_t opcode);
++
++// Per-isolate state accessors. SetCallback(nullptr) uninstalls; close
++// the gate first (destroy-order contract).
++V8_EXPORT void IgnitionObserverSetCallback(
++    v8::Isolate* isolate, IgnitionObserverCallback callback);
++V8_EXPORT void IgnitionObserverSetGate(v8::Isolate* isolate,
++                                        uint32_t open);
++
++}  // namespace xtrace
++}  // namespace internal
++}  // namespace v8
++
++#endif  // V8_INCLUDE_XTRACE_OBSERVER_BOUNDARY_H_
 diff --git a/src/builtins/arm64/builtins-arm64.cc b/src/builtins/arm64/builtins-arm64.cc
 index f7c9c32e..edc46670 100644
 --- a/src/builtins/arm64/builtins-arm64.cc
@@ -9005,7 +9066,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..3d371df1 100644
+index fc6d62e2..355bc764 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9016,26 +9077,27 @@ index fc6d62e2..3d371df1 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,40 @@
+@@ -40,6 +41,41 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
-+#include "src/interpreter/xtrace-ignition-observer.h"
++#include "include/xtrace_observer_boundary.h"
 +#ifdef V8_XTRACE_IGNITION_OBSERVER
 +namespace {
 +std::atomic<uint64_t> g_d8_observer_events{0};
 +std::mutex g_pairs_mutex;
 +std::set<std::pair<uint32_t, uint32_t>> g_version_pairs;
 +std::set<std::string> g_d8_observer_opcodes;
-+void D8ObserverCallback(v8::internal::Isolate*, uint32_t script_id,
++void D8ObserverCallback(v8::Isolate*, uint32_t script_id,
 +                        uint32_t bytecode_version, uint32_t bytecode_offset,
-+                        uint32_t opcode) {
++                        uint32_t opcode, const char* script_url) {
 +  g_d8_observer_events.fetch_add(1, std::memory_order_relaxed);
 +  // F4: the PER-EVENT stream (offset + opcode, in execution order) is the
 +  // coverage oracle — totals are only a quick metric.
-+  printf("OBS script=%u version=%u offset=%u opcode=%s\n", script_id,
++  printf("OBS script=%u version=%u offset=%u opcode=%s url=%s\n", script_id,
 +         bytecode_version, bytecode_offset,
-+         v8::internal::xtrace::IgnitionOpcodeName(opcode));
++         v8::internal::xtrace::IgnitionOpcodeName(opcode),
++         script_url ? script_url : "-");
 +  // Warm-profile evidence: distinct (script, bytecode_version) pairs.
 +  std::lock_guard<std::mutex> lock(g_pairs_mutex);
 +  g_version_pairs.emplace(script_id, bytecode_version);
@@ -9057,7 +9119,7 @@ index fc6d62e2..3d371df1 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -7037,6 +7072,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7073,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9070,7 +9132,7 @@ index fc6d62e2..3d371df1 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +7942,16 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +7943,15 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9078,9 +9140,8 @@ index fc6d62e2..3d371df1 100644
 +  // XTRACE_TEST_SCAFFOLDING (P4-E2/F2 d8 loop): install the counting
 +  // callback and open THIS isolate's gate (the state is per-isolate now).
 +  if (i::v8_flags.xtrace_observer_smoke) {
-+    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
-+    i::xtrace::IgnitionObserverSetCallback(i_isolate, &D8ObserverCallback);
-+    i::xtrace::IgnitionObserverSetGate(i_isolate, 1);
++    i::xtrace::IgnitionObserverSetCallback(isolate, &D8ObserverCallback);
++    i::xtrace::IgnitionObserverSetGate(isolate, 1);
 +    printf("XTRACE-P4 d8 observer gate OPEN\n");
 +  }
 +#endif
@@ -9575,10 +9636,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..d43bda03
+index 00000000..255a017b
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,283 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9614,6 +9675,9 @@ index 00000000..d43bda03
 +  return false;
 +#endif
 +}
++// Boundary signatures take the PUBLIC v8::Isolate; cast to the internal
++// representation at the seam (the established V8 object-identity
++// invariant).
 +
 +const char* IgnitionOpcodeName(uint32_t opcode) {
 +  return interpreter::Bytecodes::ToString(
@@ -9622,15 +9686,17 @@ index 00000000..d43bda03
 +
 +#ifdef V8_XTRACE_IGNITION_OBSERVER
 +
-+void IgnitionObserverSetCallback(Isolate* isolate,
++void IgnitionObserverSetCallback(v8::Isolate* v8_isolate,
 +                                 IgnitionObserverCallback cb) {
-+  isolate->xtrace_ignition_observer()->callback.store(
-+      cb, std::memory_order_release);
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->callback.store(cb, std::memory_order_release);
 +}
 +
-+void IgnitionObserverSetGate(Isolate* isolate, uint32_t open) {
-+  isolate->xtrace_ignition_observer()->gate.store(open,
-+                                                  std::memory_order_release);
++void IgnitionObserverSetGate(v8::Isolate* v8_isolate, uint32_t open) {
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->gate.store(open, std::memory_order_release);
 +}
 +
 +// ---- Per-isolate state and compilation-instance registry ---------------
@@ -9648,6 +9714,7 @@ index 00000000..d43bda03
 +    uint32_t version = 0;
 +    std::vector<IgnitionLogicalInstruction> instructions;  // ascending
 +    Registry* owner_registry = nullptr;  // index cleanup in first pass
++    std::string source_url;  // cached at registration (scope selection)
 +  };
 +
 +  Registry() = default;
@@ -9720,7 +9787,8 @@ index 00000000..d43bda03
 +    return hit == by_address_.end() ? nullptr : hit->second;
 +  }
 +
-+  Entry* EnsureRegistered(Isolate* isolate, Tagged<BytecodeArray> array) {
++  Entry* EnsureRegistered(Isolate* isolate, Tagged<BytecodeArray> array,
++                          const char* script_url) {
 +    auto hit = by_address_.find(array.address());
 +    if (hit != by_address_.end()) {
 +      return hit->second;
@@ -9744,6 +9812,9 @@ index 00000000..d43bda03
 +           static_cast<uint32_t>(iterator.current_bytecode())});
 +    }
 +    entry->version = next_version_++;
++    if (script_url) {
++      entry->source_url = script_url;
++    }
 +    entry->handle_slot = slot;
 +    entry->slot_key = reinterpret_cast<Address>(slot);
 +    by_slot_[entry->slot_key] = entry;
@@ -9811,12 +9882,12 @@ index 00000000..d43bda03
 +
 +bool IgnitionObserverState::FindEventMetadata(
 +    Tagged<BytecodeArray> array, uint32_t normalized_offset,
-+    IgnitionEventMetadata* out) {
++    const char* script_url, IgnitionEventMetadata* out) {
 +  Registry::Entry* entry = registry_->FindByAddress(array.address());
 +  if (!entry) {
 +    // No allocation happens between the address read and the map insert
 +    // (single isolate thread), so no GC can invalidate the key mid-way.
-+    entry = registry_->EnsureRegistered(isolate_, array);
++    entry = registry_->EnsureRegistered(isolate_, array, script_url);
 +  }
 +  const auto& instructions = entry->instructions;
 +  auto it = std::lower_bound(
@@ -9829,6 +9900,8 @@ index 00000000..d43bda03
 +  }
 +  out->bytecode_version = entry->version;
 +  out->opcode = it->opcode;
++  out->script_url = entry->source_url.empty() ? nullptr
++                                              : entry->source_url.c_str();
 +  return true;
 +}
 +
@@ -9842,8 +9915,8 @@ index 00000000..d43bda03
 +
 +#else  // !V8_XTRACE_IGNITION_OBSERVER
 +
-+void IgnitionObserverSetCallback(Isolate*, IgnitionObserverCallback) {}
-+void IgnitionObserverSetGate(Isolate*, uint32_t) {}
++void IgnitionObserverSetCallback(v8::Isolate*, IgnitionObserverCallback) {}
++void IgnitionObserverSetGate(v8::Isolate*, uint32_t) {}
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
 +
@@ -9852,10 +9925,10 @@ index 00000000..d43bda03
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..b3cc3ed0
+index 00000000..0f12cd83
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,91 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9869,6 +9942,8 @@ index 00000000..b3cc3ed0
 +
 +#include "src/base/macros.h"
 +#include "src/objects/tagged.h"
++
++#include "include/xtrace_observer_boundary.h"
 +
 +namespace v8 {
 +namespace internal {
@@ -9886,28 +9961,9 @@ index 00000000..b3cc3ed0
 +// V8_XTRACE_IGNITION_OBSERVER is defined (GN:
 +// v8_enable_xtrace_ignition_observer, default false).
 +//
-+// Embedder boundary: C signatures over primitives only (function pointers
-+// and integral parameters) — embedders must not mirror V8 struct layouts.
-+using IgnitionObserverCallback = void (*)(Isolate* isolate,
-+                                          uint32_t script_id,
-+                                          uint32_t bytecode_version,
-+                                          uint32_t bytecode_offset,
-+                                          uint32_t opcode);
-+
-+// Always compiled; the return value carries the compile macro's truth
-+// (review B2-4: a symbol's address is NOT compile evidence).
-+V8_EXPORT_PRIVATE bool IgnitionObserverIsCompiled();
-+
-+// Stable display name for a bytecode enum value (upstream mnemonic).
-+V8_EXPORT_PRIVATE const char* IgnitionOpcodeName(uint32_t opcode);
-+
-+// Per-isolate state: embedders install the callback and drive the gate
-+// through these entry points. `IgnitionObserverSetCallback(nullptr)`
-+// uninstalls; the gate must be closed first (destroy-order contract).
-+V8_EXPORT_PRIVATE void IgnitionObserverSetCallback(Isolate* isolate,
-+                                                   IgnitionObserverCallback cb);
-+V8_EXPORT_PRIVATE void IgnitionObserverSetGate(Isolate* isolate,
-+                                               uint32_t open);
++// N3-part2: the embedder boundary (callback typedef + the four accessor
++// functions, v8::Isolate signatures) is declared ONCE in the public
++// header included above; this internal header only consumes it.
 +
 +#ifdef V8_XTRACE_IGNITION_OBSERVER
 +
@@ -9923,6 +9979,8 @@ index 00000000..b3cc3ed0
 +struct IgnitionEventMetadata {
 +  uint32_t bytecode_version;  // per-compilation-instance monotonic number
 +  uint32_t opcode;            // interpreter bytecode enum value
++  const char* script_url = nullptr;  // registry-owned; null when the
++                                      // script has no resolvable URL
 +};
 +
 +class V8_EXPORT_PRIVATE IgnitionObserverState {
@@ -9941,6 +9999,7 @@ index 00000000..b3cc3ed0
 +  // the event.
 +  bool FindEventMetadata(Tagged<BytecodeArray> array,
 +                         uint32_t normalized_offset,
++                         const char* script_url,
 +                         IgnitionEventMetadata* out);
 +
 +  // Test/verification seams (d8 smoke): registry census.
@@ -10923,7 +10982,7 @@ index 86fafdb8..484c9eb9 100644
  }
  
 diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
-index 1e3f6ed3..14c07ef8 100644
+index 1e3f6ed3..d3a0e0e5 100644
 --- a/src/runtime/runtime-trace.cc
 +++ b/src/runtime/runtime-trace.cc
 @@ -2,6 +2,13 @@
@@ -10940,7 +10999,7 @@ index 1e3f6ed3..14c07ef8 100644
  #include <iomanip>
  
  #include "src/execution/arguments-inl.h"
-@@ -277,5 +284,49 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+@@ -277,5 +284,55 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
  
  #endif  //  V8_DUMPLING
  
@@ -10962,27 +11021,33 @@ index 1e3f6ed3..14c07ef8 100644
 +  // registry's pre-decoded table decides with one binary search (no
 +  // per-event iterator walk from offset 0, no process-global mutex).
 +  const int offset = raw_offset - BytecodeArray::kHeaderSize + kHeapObjectTag;
-+  xtrace::IgnitionEventMetadata metadata{};
-+  if (!isolate->xtrace_ignition_observer()->FindEventMetadata(
-+          *bytecode_array, static_cast<uint32_t>(offset), &metadata)) {
-+    // Opcode-position duplicate dispatch of a prefixed instruction.
-+    return ReadOnlyRoots(isolate).undefined_value();
-+  }
-+
 +  // Script identity via the executing frame's function (same derivation
-+  // the upstream trace uses for its disassembly context).
++  // the upstream trace uses for its disassembly context); its source URL
++  // feeds the registry (scope selection, N3-part2).
 +  JavaScriptStackFrameIterator frame_iterator(isolate);
 +  UnoptimizedJSFrame* frame =
 +      reinterpret_cast<UnoptimizedJSFrame*>(frame_iterator.frame());
 +  Tagged<JSFunction> function = frame->function();
 +  Handle<Script> script(
 +      Cast<Script>(function->shared()->script()), isolate);
++  std::string script_url;
++  Tagged<Object> source_url = script->source_url();
++  if (IsString(source_url)) {
++    script_url = Cast<String>(source_url)->ToCString().get();
++  }
++  xtrace::IgnitionEventMetadata metadata{};
++  if (!isolate->xtrace_ignition_observer()->FindEventMetadata(
++          *bytecode_array, static_cast<uint32_t>(offset),
++          script_url.empty() ? nullptr : script_url.c_str(), &metadata)) {
++    // Opcode-position duplicate dispatch of a prefixed instruction.
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
 +  auto cb = isolate->xtrace_ignition_observer()->callback.load(
 +      std::memory_order_acquire);
 +  if (cb) {
-+    cb(isolate, static_cast<uint32_t>(script->id()),
-+       metadata.bytecode_version, static_cast<uint32_t>(offset),
-+       metadata.opcode);
++    cb(reinterpret_cast<v8::Isolate*>(isolate),
++       static_cast<uint32_t>(script->id()), metadata.bytecode_version,
++       static_cast<uint32_t>(offset), metadata.opcode, metadata.script_url);
 +  }
 +  return ReadOnlyRoots(isolate).undefined_value();
 +}

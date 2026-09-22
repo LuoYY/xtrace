@@ -46,6 +46,16 @@ const server = http.createServer((req, res) => {
   res.end(makePage(req.url === '/nested', req.url === '/fp'));
 });
 
+async function waitForReviewDone(pipe, sessionId) {
+  for (let i = 0; i < 80; i++) {
+    const done = await pipe.send('Runtime.evaluate',
+        { expression: 'window.reviewDone === true ? window.reviewAnswer : false', returnByValue: true }, sessionId);
+    if (done.result.value !== false) return done.result.value;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error('scope reload did not complete');
+}
+
 async function run(name, flags, page, extra) {
   const dir = path.join(outDir, name); fs.mkdirSync(dir);
   const trace = path.join(dir, 'trace.ndjson');
@@ -78,6 +88,22 @@ async function run(name, flags, page, extra) {
       result.page = await pipe.send('Runtime.evaluate', { expression: '({answer:window.reviewAnswer,inner:window.reviewInner})', returnByValue: true }, sessionId);
     }
     if (extra) result.extra = await pipe.send('Runtime.evaluate', { expression: extra, returnByValue: true }, sessionId);
+    if (extra === 'scope') {
+      // N3-part2: the scope selector is real configuration. The
+      // observation window is a full page RELOAD (CDP Runtime.evaluate
+      // bypasses the ClassicScript activation path); attribution is by
+      // generation — each update stamps its own.
+      await pipe.send('XTrace.updateCapture', { categories: 'reverse,fingerprint',
+        observerScope: { contexts: ['nomatch.invalid'], scripts: [], denyInternal: true } });
+      await new Promise(r => setTimeout(r, 200));
+      await pipe.send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/flat` }, sessionId);
+      result.excludedAnswer = await waitForReviewDone(pipe, sessionId);
+      await pipe.send('XTrace.updateCapture', { categories: 'reverse,fingerprint',
+        observerScope: { contexts: ['127.0.0.1'], scripts: [], denyInternal: true } });
+      await new Promise(r => setTimeout(r, 200));
+      await pipe.send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/flat` }, sessionId);
+      result.includedAnswer = await waitForReviewDone(pipe, sessionId);
+    }
     if (extra === 'lifecycle-stop-first' || extra === 'lifecycle-terminate-first') {
       // R2: worker lifecycle vs capture stop, both orders. The crash
       // (Inspector.targetCrashed) is collected by the CdpPipe event hook.
@@ -145,6 +171,18 @@ async function run(name, flags, page, extra) {
       const from = markers.find(({ e }) => JSON.stringify(e.args).includes('after-nested'));
       const to = markers.find(({ e }) => JSON.stringify(e.args).includes('after-calc'));
       if (from && to) result.ignitionAfterNested = events.slice(from.i + 1, to.i).filter(e => e.api === 'Ignition.execute').length;
+      if (extra === 'scope') {
+        const byGen = {};
+        for (const e of events) {
+          if (e.api === 'Ignition.execute') {
+            const g = String(e.config_generation);
+            byGen[g] = (byGen[g] || 0) + 1;
+          }
+        }
+        result.ignitionByGeneration = byGen;
+        result.ignitionDuringExcluded = byGen['1'] || 0;
+        result.ignitionAfterIncluded = byGen['2'] || 0;
+      }
       if (extra === 'category') {
         result.categoryMarkers = events.map((e, i) => ({ e, i })).filter(({ e }) => e.api === 'JSON.stringify' && JSON.stringify(e.args).includes('reviewCategoryMarker'))
           .map(({ e, i }) => ({ i, category: e.category, generation: e.config_generation }));
@@ -208,6 +246,21 @@ function preciseFlagContracts(negationConflict) {
   contract('R3.precise-with-independent-negation-rejected', 'startCapture(ignition-precise) must reject when sparkplug is enabled even if a LATER flag negates a DIFFERENT one', !!negationConflict?.rejection, { startResult: negationConflict?.precise, rejection: negationConflict?.rejection, capsTierLock: negationConflict?.caps?.capabilities?.limits?.tierLock });
 }
 
+function scopeContracts(run) {
+  contract('R4.scope-contexts-exclusion-works',
+      'updateCapture observerScope.contexts excluding the page URL yields ZERO ignition during the window',
+      run && !run.probeError && run.ignitionDuringExcluded === 0,
+      { ignitionDuringExcluded: run?.ignitionDuringExcluded, probeError: run?.probeError });
+  contract('R4.scope-contexts-inclusion-resumes',
+      're-including the page URL resumes ignition after the second update',
+      run && !run.probeError && run.ignitionAfterIncluded > 0,
+      { ignitionAfterIncluded: run?.ignitionAfterIncluded });
+  contract('R4.scope-js-semantics-preserved',
+      'both scope windows return the same JS answer (selector never changes semantics)',
+      run && run.excludedAnswer === 19900 && run.includedAnswer === 19900,
+      { excludedAnswer: run?.excludedAnswer, includedAnswer: run?.includedAnswer });
+}
+
 function lifecycleContracts(stopFirst, terminateFirst) {
   // R2 (2026-09-22 re-review): stop must not corrupt the observer scope's
   // isolate ownership — terminating a Worker after stopCapture (and the
@@ -264,6 +317,10 @@ function categoryContracts(cat) {
     if (want('category')) {
       const cat = await run('category-update', ['--xtrace-causality=sync'], 'flat', 'category');
       categoryContracts(cat);
+    }
+    if (want('scope')) {
+      const scopeRun = await run('scope-selector', ['--xtrace-causality=sync', '--xtrace-ignition-observer', '--js-flags=--max-opt=0'], 'flat', 'scope');
+      scopeContracts(scopeRun);
     }
     if (want('lifecycle')) {
       // R2: both orders of stop vs worker teardown must keep the renderer
