@@ -1,17 +1,42 @@
 # P4 交接：结构化 Ignition observer（执行前事件 / 规范化 offset / 执行层校验）
 
-- 文档版本：v1.1（2026-09-21，增加近期提交总审、P4 终审及整改执行块，见 §10）。
-- **当前裁决：P4 终审不通过（changes required），不得标记 accepted-p4，不开放 P5 插桩实施。** §4 的完成勾选保留为执行层原始申报，不能代替 §10 的终审；下一执行任务是 P4-F0～F6。
-- 前置状态：P1/P2 历史验收记录保留；P3 旧补丁漂移已闭环，但本轮新复现类别过滤缺陷，相关控制契约重新打开，见 §10.3 B7。
+- 文档版本：v1.2（2026-09-22，F0～F6 复审、生命周期/解析反例与资源约束下的下一步见 §11）。
+- **当前裁决：仍为 changes required，不标 accepted-p4，不开放 P5 插桩实施。** F0/F1 和 F2/F4 的部分改进已复验；非 release 项仍有 GC/Worker 崩溃及错误 tier 接受，不是“只缺性能构建”。下一任务以 §11 为准，§4/§10.4 勾选保留为原始申报。
+- **资源约束：A/B release 全量编译维持用户要求的暂停。** 本轮只做低负载、串行复核；限流与加速执行方案见 [chromium-build-resource-plan.md](chromium-build-resource-plan.md)。
+- 前置状态：P1/P2 历史验收保留；P3 类别过滤的常见反例在本轮已通过，首次配置屏障与完整范围能力仍须按 §11 补验。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。执行模式沿用长程单次终审（§7）。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §9（V8 增强设计）、§12 P4 行、§13.1（已收敛决策）；P0 证据（`out/XTraceD8Verify/validation/`，10 组字节码样本 + 4 组 tier 检查）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P3 设计](chromium-p3-design.md)（控制面现状）。
 
-## 1. 接手先做什么
+## 1. 当前执行指令（2026-09-22 15:05 +0800 更新）
 
-1. 读本文件全文 + 草稿 §9（全部）、§12.1（P0 测试矩阵）、§13.1 的 P4 行。
-2. 确认 P3 阻塞项已关闭（补丁逐文件比对为 0 不符），P4 才允许动手。
-3. 读 P0 证据目录的 `verify_d8.py` / `verify_tiers.py` 与样本断言方式——P4-E6 的对照基准就是它们。
-4. P4 设计文档（P4-E1）经架构师裁决后才写 C++；设计冻结后按 §7 长程块一次推进。
+**执行负责人：用户指定的资深工程师／执行层 agent；总架构师负责契约与证据复核，不启动重复实施。以下是当前任务入口，优先于 §4、§7、§10.4 中历史阶段的完成勾选与入口条件。**
+
+### 1.1 已解除与仍有效的限制
+
+- 磁盘：用户已清理并报告 **345.42 GB** 可用，本会话实测约 **321 GiB**，已满足构建方案初始空间门槛；不用再为旧的 18/109 GiB 快照清理文件。
+- 功能：R1 弱回收 fatal、R2 stop 后 Worker 销毁崩溃、R3 tier 误判仍需修复；范围、warm、验证器与驱动的其余缺口按 §11.3 执行。
+- 编译：**A/B release 全量构建仍暂停，用户尚未授权恢复。** 磁盘充足不等于功能通过、限流已部署或恢复获批。
+- 交付：代码修复、驱动、测试、资源控制均落根补丁/scripts/tests；out 只保留产物和证据。不得清空 out、重建 P0、关闭沙箱或用旧二进制宣称修复生效。
+
+### 1.2 工程师现在做什么（不等待全量编译解冻）
+
+| 顺序 | 现在执行 | 交付与停止条件 |
+| --- | --- | --- |
+| 1 | **N0：固化反例与修测试驱动** | 将 R1/R2/R3 独立反例转成受跟踪测试；修 F5 sessionId、完成结果、超时和进程清理；fake pipe/合成 fixture 单测，无需全量构建 |
+| 2（可与1并行） | **N5：资源控制先落地** | 按构建方案 C0～C2 实现单协调者、默认 -j2/-l3/-k1、后台调度、单 linker／内部2线程、压力停止门；先用 fake runner 验证，不启动 A/B |
+| 3 | **N1：先修 V8 弱回收；N2：再修 stop/销毁** | 代码修改后先 dry-run，确认只做既有 P4D8/Integration 的局部增量；通过资源控制入口串行执行。若图意外扩大为全量或压力超限，停报，不自行继续 |
+| 4 | **N3：tier、范围及首次配置屏障；N4：warm与证据闭合** | 修复路径与断言见 §11.3/§11.4；同一策略驱动实际配置和披露。逐项局部验证后再跑必要回归，不逐小改重建 release A/B |
+| 5（暂不可执行） | **N6：完整 release B→A 与三态测量** | 仅在功能门和限流验证通过、实时资源门满足，并获得用户明确恢复许可后运行；不得并行 A/B |
+
+N0～N5 不要求逐行审批；不可兼容契约、范围变更、超预算或意外全量失效才回报裁决。资源控制可并行开发，但**实际编译始终一个协调者，限流接线先于下一次真实增量构建**。
+
+### 1.3 下一次交回架构师的内容
+
+工程师下一次回报按 §11.4 的 N0～N5 给出：变更文件/补丁、复现前后退出码、原始证据、最终载码二进制与驱动摘要，以及资源控制的有效 argv/压力测试结果。不能只报“单测全绿”；R1 必须真实释放对象，R2 必须 stop 后销毁 Worker 且无 renderer crash，R3 必须真实 baseline 反例被拒绝。
+
+N0～N5 完成后由总架构师复核功能与限流，再向用户提交 N6 恢复请求（明确 B→A、-j2/-l3、单链接、预计资源与停止条件）。当前用户只更新了磁盘状态，**不视为该恢复请求已获批准**。P4 不提前 accepted，P5 C++ 不开放。
+
+历史设计依据仍需阅读：草稿 §9/§12.1/§13.1、P4 五项裁决以及本文 §10/§11；不重新等待已经通过的最初 R1 设计裁决，也不因 P3 有整改项而停止修复这些整改项本身。
 
 ## 2. 冻结输入（不得变更的基线）
 
@@ -414,3 +439,144 @@ F0/F6 增补交付门：
 - 完成屏障取自测试工作负载，分别计启动、执行和 stop；不要把固定等待混入执行开销。先断言结果、单 capture、schema、真实行数与终态，再统计事件率/RSS/队列/丢弃率/停止耗时，保留多次重复的分布与环境信息。
 
 **执行顺序不变，但职责更明确：F0 固化反例与交付入口 → F1 配置快照 → F2/F3 对齐状态边界后实施 → F4 正确性 → F5 性能 → F6 重放与身份验收。** 工程师可以决定局部函数拆分，不能自行用全局门、裸地址、伪 effectiveConfig 或弱化测试替换这些关键不变量。
+
+## 11. F0～F6 复审与资源约束下的下一步（2026-09-22）
+
+### 11.1 范围、边界与裁决
+
+审查 `1e8ce32..95fb283` 的 10 笔提交、最终五补丁、当前对应源码、验证驱动和最终原始证据，采用串行低优先级单测、保存的 trace 复核及小型独立反例。**未恢复用户叫停的 A/B 编译，未安装工具、改 GN、删除证据或清理磁盘。** 新证据统一位于 [p4-rereview-pkmq_li3](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/)。
+
+裁决分两条：
+
+- **功能线：仍需整改。** 基础快照过滤、嵌套恢复、opcode、预解码与 validator 加固是真进展；但已复现弱回收致命错误、stop 后 Worker 销毁崩溃、真实 baseline 被接受为 precise。F2/F3/F4/F6 不能宣告非 release 全闭环。
+- **资源/性能线：暂停合理，不催用户恢复。** F5 的未完成是已授权暂停，不能伪标通过，也不应作为工程师违规；但新性能驱动自身有 session 路由错误等缺陷，先低成本修好。编译如何限流、续编和加速由 [构建资源方案](chromium-build-resource-plan.md) 明确规定，恢复必须经用户同意及资源门检查。
+
+### 11.2 提交逐项与已有成果
+
+| 提交 | 核对结论 |
+| --- | --- |
+| `d64176b` | 上轮总审和架构路径已入库，作为本次整改输入 |
+| `3204ec1` | F0 根驱动路径修正、16 个 v3 单测及契约驱动有效；仍有更深的字段/引用负例待补 |
+| `ba188c3` | F1 同一 snapshot 过滤+盖 generation、配置回填和 applied/pending 方向正确；本轮常见 B7 五项重新通过 |
+| `bdcf1c0` | F2 per-isolate gate、外层恢复、预解码和 opcode 已接入；弱 handle 回收与 stop/destroy 实现引入致命路径，见 R1/R2 |
+| `2856373` | F3 编译能力改为函数返回值，普通冲突被拒绝，缓存双门存在；parser 仍不等价 V8，完整范围与生效模型缺项 |
+| `1452894` | warm 从 new Function 升级为真实浏览器缓存决策观测；但尚非“已消费并执行成功+版本绑定+重启”全套证据 |
+| `6418608` | parity 增加逐 offset/opcode 对照，比总数强；仍丢弃实例身份、缺进程退出码/独立 off 对照和完整原始流持久化 |
+| `623367d` | 拒绝已有非空 trace、debug/dcheck 分列和三态驱动准备；并发路径所有权、原 manifest 保护与性能驱动仍有缺口 |
+| `042b7dc` | 非 release 证据整理和旧坏性能驱动删除有效；“全门槛绿”不覆盖本次发现的退场/回收路径 |
+| `95fb283` | 真实 A/B tracing 参数与受跟踪重放脚本已落盘；构建脚本未限流，重放验证器需 fail-closed 加固 |
+
+本轮独立核验通过：
+
+- 主套件 **354**、launcher **28**、GUI 逻辑 **211**；controller **9/9**、producer **6/6**。这不是完整 Chromium/V8 上游测试，也不是新的 GUI 交互验收。
+- 受跟踪 `scripts/verify_patches.py` 本轮重放：Chromium **122 文件、0 不符**，tree `0d8a0d699034d93edd9dc4d1c95a8144d0218b98`；V8 **135 文件、0 不符**，tree `1fb1236f86ec2ee987ce6238defcf1324624c0f2`，两个 HEAD 仍为固定基线。
+- F6 可执行文件、六个 component dylib、仍存在的 11 个驱动及 validator 摘要匹配现场。清单仍包含已删除的旧性能驱动，见 R7。
+- 最终保存的开/关矩阵 `browser-run-pJhFVM`、`browser-run-mIZAj8` 各有 12 个 pass；本轮对其中 **16 份非空 trace** 重新执行当前 v3 validator 全通过，没有重启整套矩阵。
+- 当前根契约驱动选择 `nested,category` 实跑 **7/7**（B1 两项、B7 五项）；证据 `p4-contract-i4dodv`。本轮不重跑重复完整 13 组来制造更大的绿色数字，而用独立输入审查其遗漏。
+
+### 11.3 新发现与必须执行的关键修复
+
+#### R1 / 最高优先级：弱引用真正回收时触发 V8 fatal
+
+定位：`chromium/src/v8/src/interpreter/xtrace-ignition-observer.cc:70–85,117–123,161–165`。
+
+`GlobalHandles::MakeWeak(..., kParameter)` 注册的是 first-pass 回调，但 `HandleCollected` 只删除 Entry，没有 reset/destroy global handle。固定 V8 `src/handles/global-handles.cc:843–848` 强制检查 first pass 后 node 为 FREE；`include/v8-weak-callback-info.h:42–53` 明确第一阶段必须 reset，额外清理使用 second pass。
+
+本轮用 40 次短小动态函数、退出局部作用域后 `gc()` 复现：observer 开启 **exit=-5**，stderr 为 **`Handle not reset in first callback`**；同一 d8、同一输入只关闭 observer，**exit=0** 且打印 `REVIEW_GC_SURVIVED`。这是实际崩溃，不是推测；现 GC 测试保留存活引用且检查已被 set 去重的 pair，所以没有覆盖回收路径。
+
+**整改路径：** Entry 显式拥有 weak global handle 生命周期；first pass 按本版本 API reset/destroy handle，并标记无效、保持 second-pass 参数存活，额外索引/元数据释放按第二阶段契约完成。需要内部 handle 时可核对 `GlobalHandles::Destroy(Address*)`（global-handles.h:46），不要仅释放 C++ Entry。注销 GC callback、未触发回调的剩余 handles 和 isolate teardown 的顺序必须完整核对，确保不在 heap/global-handles 销毁后清理、不留悬空 Entry。
+
+**验收：** 存活对象压缩 GC 后 version 稳定；不可达对象触发真实 weak callback 且 registry/handle 数下降；编译缓存关闭与开启分别测试；多次 isolate 建立/销毁；每个用例有 stdout/stderr 和退出码。不要通过永久强引用、禁用 GC 或绕过 CHECK 修复。
+
+#### R2 / 最高优先级：stop 清空 isolate 指针，随后 Worker 销毁导致 renderer SEGV
+
+定位：`xtrace-ignition-bridge.cc:79–88,185–194`；`partition_alloc/pointers/raw_ptr.h:873–896`。
+
+`IgnitionBridge::Close()` 使用 `scope->isolate_.ExtractAsDangling()`，此操作**会把原字段置空**；后续 `WillBeDestroyed()` 再从它取指针调用 V8 API。另有普通 bool `closed` 跨 Worker 读写，进程全局集合锁并未覆盖读取，不能把原子 gate 安全等同于整个对象跨线程安全。
+
+本轮真实 ChromiumX：启动 Worker → `XTrace.stopCapture` 返回 complete → `worker.terminate()` → renderer **signal 11**，栈落 `IgnitionScope::WillBeDestroyed()`，CDP 收到 `Inspector.targetCrashed`，后续 evaluate 超时。browser 最后 exit 0，正好说明只检查 browser 退出和 manifest complete 会漏掉 renderer 退场崩溃。
+
+**整改路径：** stop 不转移/清空 isolate 所有权；清理在所属 isolate 线程执行，并与 Worker teardown 串行。进程级停止只发布 stopping latch/投递任务，避免在其他线程修改 Oilpan 管理的 scope 内容；所属线程关 gate、使回调失效，再结算 watermark。新建 scope 必须继承 stopped 状态，不能绕过首次 Close 的集合快照重开。销毁保持指针有效直到注销完成，设计好幂等顺序，不靠 nullptr guard 隐藏漏清理。
+
+**验收：** stop→Worker terminate、Worker terminate→stop、stop→导航、重复 stop、停止中创建新 Worker/isolate，以及两个 Worker 同时运行；事件不再增长、JS/目标仍可用、没有 renderer crash/fatal。普通嵌套反例保持绿。
+
+#### R3 / 高优先级：flags 被合并成一个布尔值，precise 仍可误接受 baseline
+
+定位：`xtrace_handler.cc:102–149`。
+
+新 parser 把 `sparkplug` 和 `always-sparkplug` 写入同一 bool，后一个否定会覆盖前一个肯定。最终二进制实测启动：
+
+```text
+--js-flags=--allow-natives-syntax --max-opt=0 --sparkplug --no-always-sparkplug
+```
+
+返回 `tierLock=ignition-locked`、precise 成功；实际 `%CompileBaseline` 后 `ActiveTierIsSparkplug=true`、Ignition=false。`noX` 与 `no-X`、下划线规范化、布尔值/别名、未知 flag 及实际 renderer 状态也未完整覆盖，不能继续声明“按 V8 方式解析”。
+
+**整改路径：** 每个真实 flag 独立状态，采用固定 V8 的语义/可审计的严格 allowlist，明确否定、重复与 implication 的优先级；未知且无法证明安全的参数明确拒绝，不默默略过。browser、launcher 预检和 renderer 实际报告共享策略，禁止只在本函数增加本例字符串特判。补齐环境变量/命令行优先级和 status/manifest 中真实模式配置；当前 start 仍回显 mode、status 只有 generation/categories，完整承诺尚未落地。
+
+**验收：** 本例必须拒绝；分别覆盖 sparkplug/always-sparkplug、maglev/turbofan/别名、同旗后值覆盖、不同旗互不覆盖、无 observer/无 sync，以及合法环境真实帧内 tier。不通过禁止 `%CompileBaseline` 的测试代码规避真实启动状态。
+
+#### R4 / 高优先级：按 isolate 管理不等于交付 isolate/context/script 可选范围
+
+当前 PDL 仍只有 categories、mode、tier；`IgnitionScope` 的选择仅按 URL scheme 判定，未有外部配置的 context/script/isolate selector。scope filter 和状态不变量的实现必须区分：前者决定“观察谁”，后者保证“观察时不串扰”。F2 的自报不能用 per-isolate 实现替代既定范围能力。
+
+**整改路径：** 先以小型设计修订固定 selector 的身份命名空间、初始化/更新/销毁规则，然后从统一配置快照传播到所属 isolate。脚本源 URL 不能替代脚本实例或 context identity。按现有 v3 演进规则增加必要字段，先明确契约，不再用内部 scheme 排除列表宣称完成。V8/Blink 已去掉镜像 struct 是改进，但仍手写重复的函数声明，收敛到单一、可编译检查的边界声明。
+
+F1 常见过滤反例已修，但新 renderer 仅“尽早发送异步 endpoint”不证明首次脚本前配置已落地；现契约在新 target 导航前等 500ms，未覆盖零等待首次脚本。补初始化屏障或保守不接纳策略及可观测状态，用确定性测试验证，不进一步加 sleep。
+
+#### R5 / 高优先级：warm 证据仍只证明部分决策路径
+
+两门确实已接，普通缓存决策有 produce/consume，observer 有 suppression，值得保留。但 `p4-b3-warm-cache.cjs:56–89` 只在同一进程重导航，不核验 warmResult、脚本/loader 身份、实际缓存消费成功/拒绝结果或 bytecode_version，未测同 profile 重启，也未调用完整 validator；Browser.close 后立即 SIGTERM 的 cleanup 可抢先终止正常退出。
+
+`code_cache_fetcher.cc:52–55` 的上游注释明确指出 Service Worker 脚本缓存来自另一响应路径；该文件不是所有 Worker/cache 的万能入口。V8 进程内 compilation cache 也未由这两门直接禁用。`v8_code_cache.cc:440–450` 把普通 `cache_options=kNone` 也记成 suppressed-observer-env，观测分类不精确。
+
+**整改路径：** 按本期支持的脚本种类列生产/消费入口和排除边界；只在 observer 原因短路时记录 suppression，决策与实际消费成功/拒绝分列。每轮绑定 URL/源码 hash/loader或context/编译实例；同进程重复与同 profile 重启分开验证，等待页面和退出完成，确保语义值一致。缓存未覆盖的来源要先提范围裁决，不默称所有 code cache 已关闭。
+
+#### R6 / 高优先级：新 F5 性能驱动还不能有效运行
+
+定位：`scripts/p4-f5-release-perf.cjs:58–63,77–81,105–125`。
+
+- `Pipe.send` 没有 sessionId 参数，也不序列化它；调用 `Page.enable/navigate/Runtime.evaluate` 时传入的第三参数被丢弃。独立 fake transport 实验确认发送帧只有 id/method/params；会路由到 browser session，不能正确测页面。
+- 等待循环耗尽没有失败断言，也不检查 `reviewAnswer`；预期为 **359820**。页面未运行/异常时不能报工作负载完成。
+- 错误分支在 finally 直接等 child exit，没有可靠关闭或截止清理，可能悬挂；stderr 被丢弃。F5_REPEATS 也缺正整数校验。
+- RSS 只采 browser PID，漏 renderer/Worker/其他受管子进程；缺队列占用/批次等已承诺指标。采样应明确口径，汇总共享页误差，必要测试统计不能硬编码零。
+- A/B 实际 args 虽已记录但未比较；V8 HEAD、driver/validator版本、每轮执行结果与最终 Framework 的绑定仍应统一。单纯 `max-opt=0` 相同但 C 额外禁用缓存，不能声称所有运行变量已一致。
+
+**整改路径：** 先修纯 JS 驱动并用 fake pipe 单测 session 路由、超时、异常和清理，再对现有 Integration 做小负载适配自检；两次均不需完整 release 编译。输入/output quota、完成屏障、实际结果、单 capture、schema/计数通过后才记录性能。参考 [构建方案 §6](chromium-build-resource-plan.md#6-交付与验收清单)。
+
+#### R7 / 中优先级：F6 交付与证据关闭仍需加固
+
+- `verify_patches.py:65` 使用当前 HEAD 而不验证固定 SHA；`:77–97` 多个 Git 返回码未检查；仅遍历补丁修改清单，不查清单外工作树漂移；缺文件按 b"" 处理可能与空 blob 混淆；请求 dylib 校验时缺库被静默跳过。当前独立核验确实匹配，不代表脚本能拦住上述负例。
+- `p4-f6-identity.json` 仍记录已删除 `p4-e7-release-perf.cjs` 为当前 driver。应区分历史摘要与当前必要文件，绑定最终修复后的源码/补丁/args/二进制/驱动/validator；不能删除旧记录来伪造历史一致。
+- 当前 validator 已拦住缺 opcode/删尾/混 capture，但仍接受字母组成的虚构 `NotARealOpcode` 和只在未来出现的 paired activation_ref。本轮合成负例已确认；需按照实际 opcode 元数据及事件顺序验证匹配激活，不能只靠 regex 与全文件 set。
+- parity 已比较 offset/opcode，是实质加强；仍丢掉 script/version 维度、未检查 `run.status`、未保存每次完整 stream、缺独立 on/off 语义对照。GC 测试对 `std::set` 输出检查唯一性仍是循环论证，改为目标实例跨时间样本和 registry census。
+- 非空 trace 拒绝有效，但 check-size 后重新 APPEND 不是跨进程排他；旧同 stem asset/manifest 仍可能被更改。不得使用“混 capture 从根不可能”措辞。下一修订先原子获取输出归属，失败不碰旧 trace/manifest/assets；不用静默 truncate。加入已有产物和并发创建负例。
+
+### 11.4 下一步给资深工程师的明确顺序
+
+| 顺序 | 执行任务 | 完成门槛 / 成本控制 |
+| --- | --- | --- |
+| N0 | 固化 R1/R2/R3 反例、F5 fake pipe 单测，修测量驱动和验证器负例 | 本轮问题先红；源码/脚本入根 tests/scripts；无需全量编译 |
+| N1 | 修 weak callback first/second pass、registry/handle/isolate teardown | 用现有 XTraceP4D8 只增量 d8；40 动态函数回收通过、存活与释放双证据、无保持强引用作弊 |
+| N2 | 修 stop→Worker destroy 的指针所有权、所属线程串行和新 scope 停止继承 | Integration component 增量；stop 后销毁、重复stop、导航、Worker竞态无崩溃；嵌套旧反例仍绿 |
+| N3 | 独立 flags 状态及严格精细模式核验；scope selector/首次配置屏障补齐 | 原 baseline 新反例拒绝；合法环境真 tier；状态/范围与manifest一致；新renderer无sleep门 |
+| N4 | warm 双证据补足、身份/validator/parity强化；回归及补丁重放 | 不再以活对象GC或决策标签代替实际消费/回收；354/28/211+新增、9/6+新增、矩阵与故障/launcher按影响面复跑 |
+| N5 | 资源协调器、单link和内部线程控制；空间门已满足，不再清理 | 可与N0并行；先fake runner验限流，作为N1～N4实际增量构建前置；A/B恢复许可仍单独等待 |
+| N6 | 最终源稳定后 B→A 顺序续编，三态性能，最终身份重录 | 先完整chrome成功，再运行修好的驱动；功能与性能两条门全过才请求accepted-p4 |
+
+R1/R2 优先于性能：在坏生命周期上继续 A/B 首构建只会增加返工。N0 的纯驱动工作和资源协调器设计可并行，实际编译仍由一个协调者管理。不得为了省成本把 P4 范围需求静默延期或把 baseline 开关/沙箱/上游测试关闭。
+
+本轮接受“性能验收暂停”的状态，不接受“非 release 全完成”的结论。P5 可先做接口/异常/重入测试设计，C++ 插桩仍等待功能整改和约定终审；若要改变性能作为P5入口的门槛，须显式提交裁决，不自行拆掉验收条件。
+
+### 11.5 原始证据导航与复验边界
+
+- [review-summary.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/review-summary.json)：本轮10提交、d8摘要、资源快照、未恢复编译说明。
+- [replay.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/replay.json)、[identity-audit.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/identity-audit.json)：两树与最终产物/驱动核对。
+- [gc-collected.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/gc-collected.json)、[stderr](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/gc-collected.stderr)、[关闭对照](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/gc-off-control.json)：R1致命回收反例。
+- [flag-independent-negation-VG8X3n/result.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/flag-independent-negation-VG8X3n/result.json)：R3错误tier接受与实际baseline证明。
+- [stop-then-worker-destroy-xFCdbx/result.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/stop-then-worker-destroy-xFCdbx/result.json)、[stderr](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/stop-then-worker-destroy-xFCdbx/stderr.log)：R2停采后renderer崩溃。
+- [perf-driver-session-probe.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/perf-driver-session-probe.json)、[validator-extra-probes.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/validator-extra-probes.json)：不启动浏览器的驱动与validator反例。
+- [nested-category-contracts.log](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/nested-category-contracts.log)、`regression.log/controller.log/producer.log`：本轮复测的已通过项。
+- [final-matrices-validator.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/final-matrices-validator.json)：保存的16份非空最终trace重新校验结果，非重跑整套浏览器矩阵。
+
+本轮没有复跑性能、全量上游测试或所有长期故障场景；所有“通过”只针对明确运行/重新解析的项目。完整F0～F6审阅是对交付清单逐项核对，不是宣称本机已再次执行每个耗时任务；未验证项和阻塞均已显式登记。原始产物维持 git-ignored，关键裁决和构建方案进入受跟踪文档，代码修复留执行层实施。
