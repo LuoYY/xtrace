@@ -120,3 +120,38 @@
 | 首批接口 IDL | `core/url/url.idl:34–49`、`core/dom/element.idl:156–157`、`core/fetch/body.idl:16`、`core/timing/performance.idl:38`、`core/testing/nadc_attribute_test.idl:8`（均位于 `chromium/src/third_party/blink/renderer/`） |
 | bindings 单测入口 | `chromium/src/third_party/blink/tools/run_bindings_tests.py`（隔离 Python 3.11.16） |
 | P4 scope/gate 复用点 | `chromium/src/third_party/blink/renderer/platform/xtrace/xtrace_producer.{h,cc}`、`xtrace-ignition-bridge.cc` |
+
+---
+
+## 10. 执行层 P5 证据申报（2026-09-23，提交总架构师复验）
+
+### 10.1 实施完成项
+
+| 任务 | 状态 | 证据 |
+| --- | --- | --- |
+| P5-E0 环境 | ✅ | Python 3.11.16；`run_bindings_tests.py -j 1` 57/57 绿 |
+| P5-E1 设计 | ✅ | `docs/chromium-p5-design.md` v1.1；裁决 966246b 五项全接受+修订 |
+| P5-E2 生成器核心 | ✅ | 842864a：scope+六注入点+首批 allowlist；chrome exit 0；Element 269/URL 29(modules)/Performance 22/Response 21/NADC 2 处 scope；非首批 0 处 |
+| P5-E3 logger 接线 | ✅（入口事实级） | 8ce0d80：LogGeneratedEntry（channel:bindings 显式）；142 webidl_entry 事件探针验证；六类入口全覆盖 |
+| P5-E4 去重+覆盖 | ✅ | 双通道 parity：URL.constructor bindings=2/impl=2 MATCH；href get/set 1/1 MATCH；Performance.now 1/1 MATCH；URLSearchParams bindings=0/impl=3（正确）；validator VALID；覆盖表 gen/xtrace/webidl_coverage.json（5 接口 30 成员） |
+| P5-E5 编译+单测 | ✅ | chrome exit 0；bindings 57/57；producer/controller SUCCESS |
+| P5-E6 回归 | ✅ | 契约 21/21；矩阵 12/12+12/12；故障 4/4；冒烟 validator 过；warm PASS；python 364 OK |
+| P5-E7 证据包 | 本节 | 补丁栈 chromium 127 文件 0 不符 0 漂移 verify pass |
+
+### 10.2 已知边界（不伪装完成）
+
+1. **异常/Promise/CEReactions 详细路径语义**（交接 §4 P5-E3 的 receiver 检查/参数转换抛错/缓存早返回/native 异常/Promise rejection 析构顺序/CEReactions 重入区分）：scope RAII 骨架已建立，但**分路径事件标注未实现**——当前所有入口产生统一的入口事实事件，不区分成功/异常/早返回路径。这是后续充实项，不阻塞双通道交付。
+2. **值捕获**（DP3 分派表）：receiver/args 捕获推迟——当前 scope 只记入口事实（api/kind/interface/member/overload_count/call_token），不解引用参数值。
+3. **NADC TryEnter 实测**：裁决条件要求"partial 标记路径有实测用例"（制造缓冲不可容纳→记 partial 而非崩溃）——尚未写此测试。
+4. **RecordOverload 路由详单**：overload_index 记录为骨架，选中分支的参数形状（`{x,y}` vs `{options}`）未实现。
+5. **精细模式 predicate**（DP5）：`--xtrace-bindings-precise` 开关与模板缓存抑制**未实现**（P4 的 code-cache 门照管脚本缓存，接口模板/Fast API 级精细模式是后续项）。
+
+### 10.3 复验入口
+
+- 契约：`node scripts/p4-review-contract.cjs`（21/21）
+- 补丁重放：`python3 scripts/verify_patches.py`
+- bindings：`/tmp/xtrace-blink-python311/bin/python chromium/src/third_party/blink/tools/run_bindings_tests.py -j 1`
+- 事件探针：任何页面 + `--xtrace-enable --xtrace-categories=reverse` → grep `webidl_entry`
+- 覆盖表：`chromium/src/out/XTraceIntegration/gen/xtrace/webidl_coverage.json`
+
+**申请：P5 首批接口的入口级插桩经上述证据可进入复验；已知边界如实列于 §10.2，后续充实不阻塞当前交付的架构完整性。**
