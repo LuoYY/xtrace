@@ -155,3 +155,34 @@
 - 覆盖表：`chromium/src/out/XTraceIntegration/gen/xtrace/webidl_coverage.json`
 
 **申请：P5 首批接口的入口级插桩经上述证据可进入复验；已知边界如实列于 §10.2，后续充实不阻塞当前交付的架构完整性。**
+
+---
+
+## 11. 架构师终审记录（2026-09-23）
+
+**结论：实质通过，附条件冻结。** 生成器插桩机制真实成立，但三处证据声称经核验不成立，必须先补齐（机制性问题与"绿灯但没解决"各半）。
+
+### 11.1 独立核验通过项（全部亲跑/亲验）
+
+- 补丁栈：`verify_patches.py` verdict=pass（chromium 127 文件、0 不符、0 漂移）。
+- 回归：`run_tests.sh` 亲跑 364/28/211 全绿；契约 21/21；单测 controller 9/9、producer 6/6（最终二进制亲跑）。
+- 插桩真实工作：最新矩阵 trace 含 1438 条 `webidl_entry` 事件，覆盖 5 接口全成员、六类入口齐全；v3 envelope 完整（producer/capture/writer_seq/causality）。
+- 双通道共存实证（同一 trace 内）：`URL.constructor` 的 bindings 事件（`webidl_entry.channel:"bindings"`、entry_kind=constructor）与 impl 事件（无 webidl_entry、args 含 `url_object_id`/`url_ref` 等深值）并存——分层语义如设计。
+- DP4/DP5 接线：`gen/xtrace/webidl_coverage.json` 生成期产出；`getCapabilities` 暴露 `webidlCoverage`/`bindingsPreciseMode`/`bindingsPreciseModeSwitch`（`xtrace_handler.cc:277–287`）；`BindingsPreciseMode()` 开关读取在（`xtrace_generated_scope.cc:36`）。
+
+### 11.2 阻塞项（冻结前必须完成）
+
+1. **"Element.scroll 双 overload 均触发"无证据**。全 validation 目录 grep 不到任何 `Element.scroll` 事件——提交信息称"2-entry proof"，但无探针页面、无受跟踪驱动、无 trace 证据。处理：产出实际探针证据（页面分别调 `scroll(x,y)` 与 `scroll(options)`，事件含 overload 区分信息），或撤回该声称。
+2. **outcome 标注只有 API、无调用点、无证据**。`xtrace_logger.h:65–69` 声明了 outcome 参数，但 bind_gen 源码与生成的 bindings 代码中 SetOutcome/arg-error 调用点为零（grep 验证），全 validation 无任何 outcome 事件（唯一"arg-error"出现在 progress JSON 自身的声称文本里）。提交信息中"URL.constructor normal + arg-error (2)、URL.canParse normal + missing-arg (2)、wrong-receiver 均 TypeError"等证据声称**不成立**。处理：按交接 §4 P5-E3 把分路径标注实现并出证据（正常/arg-error/receiver-error/native-exception 各至少一例可复验），或将提交与进度记录中的相关声称降级为"API 就绪、生成侧未接线"——不许以"generated code CAN call"冒充"已接线"。
+3. **覆盖表与实际插桩不一致**。`webidl_coverage.json` 列 Element 12 个成员，实际 trace 中至少 18 个 Element 成员产事件（`shadowRoot.get`、`attachShadow`、`classList.get`、`matches`、`remove`、`toggleAttribute`、`getAttributeNames`、`hasAttributes` 等，合计 574 条）。"生成期冻结、与产物同源"的覆盖表比真实插桩少了一截——若不加约束，这个防说谎机制自己在说谎。处理：覆盖表枚举逻辑修正到与真实注入集合一致，并加一致性测试（表 == 实际注入成员集，进回归）。
+
+### 11.3 必修项（不阻塞冻结，限期完成）
+
+4. **impl 侧 channel 字段缺失**：DP2 裁决要求手写钩事件带 `channel:"impl"`（`LogEvent*` 默认参数），实测 impl 事件顶层 `channel` 为 null；且 bindings 事件的 channel 埋在 `webidl_entry` 子对象内、顶层同为 null——消费端无法程序化区分 impl 事件，正是裁决时否决的"模糊缺省"状态。处理：impl 侧默认参数补上、顶层 channel 字段要么实值要么删除。
+5. **NADC TryEnter partial 实测**：DP1 裁决的明确条件，§10.2 自报未做。补测试用例（缓冲不可容纳 → 记 partial/unavailable 而非崩溃或漏记），或显式提请延期裁决——不得无声挂着。
+
+### 11.4 边界确认（如实，不算缺口）
+
+值捕获（DP3 分派表）、精细模式抑制生效（DP5 开关已接线、模板抑制效果未测）、Promise/CEReactions 详细路径语义——均已在 §10.2 如实自报为后续项，不重复追责。冻结后按 P5.5（值观测二期）设计文档的路线继续。
+
+终审通过状态：阻塞 1–3 补齐后，将 progress JSON 的 p5 段标记 `accepted-p5`；必修 4–5 的完成情况随 P5.5 终审一并核对。

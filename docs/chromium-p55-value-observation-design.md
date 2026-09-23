@@ -1,0 +1,111 @@
+# P5.5 设计提案：值观测二期（vPC 流截获 / 值级 tap / 物化 dump）
+
+- 版本：v1.0（2026-09-23，架构师提案，待裁决）。
+- 依据：[P4 交接](chromium-p4-ignition-observer-handoff.md)（observer/scope selector/两阶段弱回调）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P5 设计](chromium-p5-design.md) DP3（反扰动分派表）；真实样本语料 `analysis/pmos-{xj,sc,jibei}-sgcc-20260923/`（瑞数 JSVMP 三站四份挑战脚本，本地 gitignored）。
+- 定位：P4 交付的是**物理层**（V8 字节码执行前事件）；本提案打开**虚拟层**——VM 自己的指令流、虚拟寄存器值、运行期物化的表数据。目标是让瑞数级 JSVMP 的 cookie/签名计算从"黑盒"变成"可重建的计算图"。
+
+## 1. 问题定义（由样本证实）
+
+瑞数挑战层（三站四份脚本）的防御结构：LCG PRNG 洗牌构造字符串/操作码表 → `while(1)` 派发器按虚拟 PC 取指 → API 名全部运行期解码 → VM 算出 cookie → 服务端校验。由此推出四个"看不见"：
+
+1. **虚拟指令流不可见**：P4 只能看到 V8 在跑派发循环，看不到 VM 实际执行的虚拟程序。
+2. **虚拟寄存器值不可见**：计算过程的中间值全部在 VM 内部的 JS 数组/变量里。
+3. **表数据运行期才物化**：`$_ts.cd` 大 blob 与 meta 加密内容只有解码后才成为可用常量表。
+4. **环境读取面不可枚举**：API 名运行期解码，静态分析拿不到读取清单。
+
+服务端校验 cookie 使"伪造"不可行——唯一正路是**还原计算**。本提案的三个能力就是还原链的三段。
+
+## 2. 设计原则（硬约束）
+
+1. **范围限定是前提**：所有 tap/dump 只在选定 script + 函数 + offset 窗口内生效，无全局开关；精细模式环境（P4 已交付）之外不启用。
+2. **预算硬闸**：每激活事件预算 N（超限按 DP5 预留扩展式 `eligible = enqueued + dropped + sampled_out` 记账）；dump 的深度/宽度/条数同样有限。
+3. **构造性不调用用户代码**：值捕获只做类型分派（P5 DP3 的静态表），永不触发 getter/Proxy trap/toString——与 P5 同一保证等级。
+4. **计数契约不破坏**：tap/dump 事件走既有 producer 管道与 watermark 结算；突发量由 P2 有界缓冲 + drop-newest 兜底。
+5. **GC 安全沿用 N1 教训**：不在事件/资产中持 V8 堆指针；对象引用为即时序列化（短窗口 identity ref，GC 后跨事件相关仅 best-effort——与 P5 裁决口径一致）；任何新弱引用必须两阶段回调。
+
+## 3. 能力 T4-a：vPC 流截获（虚拟指令流）
+
+### 机制
+
+- P4 observer 的 Entry 插桩点增加**带 offset 谓词的 accumulator 读取**：当事件 PC 命中选定窗口时，在 Entry 处从当前帧读 accumulator（此刻它正是刚取出的虚拟操作码或其输入）。
+- **循环头 tap 点选择**：先粗观测一次（普通 P4 observer 流），分析层按结构特征自动定位派发循环——回边计数、表索引读取密度、分支扇出——产出候选 `(script, function, offset)`；操作者确认或写入 scope 配置。瑞数四份脚本就是开发期 fixture：定位器必须在四份上全部命中 `while(1)` 循环头。
+- 产物：每条 tap 事件 = `(script_id, bytecode_version, v8_offset, accumulator值/摘要, activation_ref)`；分析层把 tap 流按激活串接即为 **vPC 序列**（VM 自己的指令流）。
+
+### 与 P4 的关系
+
+不新增第二条观测通道：vPC tap 复用 observer 的 Entry 与 gate，只是事件负载多了 accumulator 字段；per-isolate 状态、范围启停、销毁顺序、弱回调两阶段语义全部沿用（P4 N1/N2 修复成果不得回退）。
+
+## 4. 能力 T4-b：值级 tap（选择性执行点值观测）
+
+### 机制
+
+- 配置项：`(script, function?, offset_windows[], kinds[], budget)`；`kinds`：`accumulator` / `register_range(start,count)` / `frame_args`。
+- 值形态沿用 DP3 分派表：标量直接值；字符串走长度上限与截断四元组；对象=短窗口 identity ref + 类型名（不解引用）；TypedArray=原生指针+长度不解码；record/sequence=长度+元素类型标签。
+- 预算：每激活 N 条；超限计 `sampled_out`（启用 DP5 预留的等式扩展——这是其首次实际启用，规范 §7 的扩展式同步落文档）。
+- 用途一（瑞数）：在 VM handler 调内建的边界，0002 家族钩（charCodeAt/base64/位运算）本就带值且 tier 免疫——值级 tap 补齐 VM 内部段，与边界钩拼成完整计算图。
+
+### 注入点（决策点 1 的两个候选）
+
+- 候选 A：Entry 点 + offset 谓词，读帧（当前状态语义——"执行前这一刻的值"）。
+- 候选 B：上游 Exit 变体（`Runtime_TraceUnoptimizedBytecodeExit`）同款改造（"执行后结果"语义）。
+- 推荐 **A 起步**：与现有 Entry 设施同构、风险低；候选 B 作为后续补充（覆盖/成本另行评估），本期不做。
+
+## 5. 能力 T5：物化 dump（定点快照）
+
+### 机制
+
+- 锚点类型：函数入口、指定 offset、VM 初始化完成标记（由操作者按样本锚定，如瑞数 `_$jc` 洗牌完成点）。
+- 快照内容：frame args + 寄存器文件 + 选定全局对象属性（如 `window.$_ts` 的解码产物）+ 选定大数组（S-box/字节码表——走资产通道，sha1 去重、`retrieval_status` 按 v3 §5.3）。
+- 对象图遍历：深度 ≤2、宽度有界、只读；触发用户代码的路径一律不进入（构造性保证同 §2.3）。
+- 产物：dump 事件（引用资产 ID + 四元组），manifest 照常结算；**解码后的表数据一旦落盘，离线分析器按会话参数化，多态退化为"每会话多跑一次 dump"**。
+
+### 与动态代码资产的关系
+
+现有资产通道已捕获脚本源码（dynamic-code）。T5 补的是**运行期物化值**——源码里不存在的、只有执行后才存在的数据（解码表、VM 字节码数组、计算中间态）。两者合起来才是"该会话 VM 的完整自描述"。
+
+## 6. 范围与配置接口（决策点）
+
+- scope selector（N3 交付的三命名空间）扩展**函数与 offset 粒度**：`scripts:[url_pattern], functions:[name/script-local-id], offsets:[(function,start,end)]`。
+- 域接口两个候选：**(a)** `startCapture` 的 config 对象扩展 `valueObservation` 子段；**(b)** 独立 `XTrace.startValueTap` / `XTrace.startDump` 方法。推荐 (a)——与 capture 生命周期/终态/计数同一治理，避免第二种 capture 状态机（B1 教训：不做第二套生命周期）。
+- 配置快照进 manifest（自描述原则）；`getCapabilities` 披露 valueObservation 的可用范围与预算上限。
+
+## 7. v3 字段扩展（只加不改）
+
+```json
+"value_tap": {"kind": "accumulator|register_range|frame_args", "v8_offset": "123",
+              "values": [<DP3 分派形态的值对象>], "budget": {"limit": "N", "used": "k"}}
+"dump": {"anchor": "function-entry|offset|custom", "frame_ref": "<activation_ref>",
+         "asset_refs": [<资产引用+四元组>], "notes": "..."}
+```
+
+`ignition` 对象六字段不变；`sampled_out` 等式扩展落规范 v1.3（同时把 §7 的预留式写成正式条款）。
+
+## 8. 分析层配套（本提案一并交付契约）
+
+1. **vPC 序列重建**：tap 流按 (activation_ref, 时序) 串接 → 虚拟指令序列。
+2. **handler 语义提取**：vPC 值 → 对应 V8 子 trace（P4 事件）→ handler 语义指纹；跨多态会话按语义指纹聚类（打包层轮换不改变 handler 代码——三站样本已实证骨架一致）。
+3. **字符串表收获**：dump 的解码表 + 使用点事件（属性名/内建参数）交叉补全。
+4. **值流 DAG**：边界钩值 + tap 值按 `activation_ref` + 短窗口 ref 链接（runtime-trace-plan Phase 2 的 sha 描述符此处不重复引入——值级 tap 是真值，比 hash 更强）。
+
+## 9. 验收设计（fixtures 全部在手）
+
+| 验收 | 内容 |
+| --- | --- |
+| 合成 fixture | `test-pages/` 新增类 VMP 派发器页（已知虚拟程序）：vPC 流与已知程序逐条一致；值 tap 还原已知计算；dump 捕获已知表 |
+| 瑞数离线语料 | 派发器自动定位在四份挑战脚本全部命中；环境读取清单（GetNamedProperty 流）产出非空且可人工抽查 |
+| 瑞数现场（授权研究环境） | 挑战脚本范围内：vPC 序列非空、dump 得解码表资产、cookie.set sink 事件存在且值与请求头一致（边界证据，不承诺完整算法还原） |
+| 契约与回归 | 计数等式/终态不被 tap/dump 破坏；sampled_out 记账正确；P2–P5 全部门禁（契约 21/21、矩阵、故障、parity、单测）不回退 |
+
+## 10. 决策点（提请裁决）
+
+1. **tap 注入点**：Entry+谓词读帧（推荐）vs Exit 变体改造（后续）——是否同意 A 起步、B 后置。
+2. **接口形状**：`startCapture` 的 `valueObservation` 子段（推荐）vs 独立方法——不做第二套 capture 生命周期。
+3. **预算默认值**：每激活 N 与 offset 窗口语义；`sampled_out` 首次启用的记账形态确认。
+4. **dump 对象图边界**：深度 ≤2、宽度上限、大数组的资产阈值（默认 16KB 走资产，以下内联——可调）。
+5. **v3 字段扩展清单**：§7 的 `value_tap`/`dump` 形状与 §7 扩展式升版（v1.2 → v1.3）。
+
+## 11. 非目标
+
+- 不做全量 post-op 值观测（只在选定窗口）；不做精确 def-use 全程跟踪。
+- 分析层的 handler 语义标注为 hypothesis 级输出，不冒充已验证算法还原（沿用分析结果五级纪律）。
+- 不在常规（非精细）模式启用；不对未授权目标启用；不承诺对时序门活目标的隐形性（观测开销如实披露，线上用常规模式、深挖用重放）。
