@@ -3191,6 +3191,132 @@ index 473f01ca40..58c21e35f1 100644
    isolate->SetPromiseRejectCallback(PromiseRejectHandlerInWorker);
    isolate->SetExceptionPropagationCallback(ExceptionPropagationCallback);
    isolate->SetModifyCodeGenerationFromStringsCallback(
+diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+index 38de3c2227..1bda6de58d 100644
+--- a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
++++ b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+@@ -841,6 +841,73 @@ def make_bindings_trace_event(cg_context):
+     return TextNode("BLINK_BINDINGS_TRACE_EVENT(\"{}\");".format(
+         _make_bindings_logging_id(cg_context)))
+ 
++# P5-E2 (design DP1 + ruling §9): first-batch instrumented interfaces. The
++# scope code is ONLY generated for these — zero overhead for everything
++# else. Expanding this set requires an architect ruling (handoff §7).
++_XTRACE_FIRST_BATCH_INTERFACES = frozenset({
++    "URL", "Element", "Response", "Performance", "NADCAttributeTest",
++})
++
++
++def _is_xtrace_first_batch(cg_context):
++    if cg_context.interface is None:
++        return False
++    return str(cg_context.interface.identifier) in _XTRACE_FIRST_BATCH_INTERFACES
++
++
++def make_xtrace_scope(cg_context, entry_kind):
++    """P5-E2: emit the XTraceGeneratedScope construction for first-batch
++    interfaces only. entry_kind maps to the six logical entry kinds."""
++    assert isinstance(cg_context, CodeGenContext)
++    assert entry_kind in (
++        "getter", "setter", "overload-dispatcher", "constructor",
++        "nadc-callback", "operation")
++
++    if not _is_xtrace_first_batch(cg_context):
++        return EmptyNode()
++
++    # Ensure the scope header is included in the generated .cc file.
++    CodeGenAccumulator.require_include_headers([
++        "third_party/blink/renderer/platform/xtrace/"
++        "xtrace_generated_scope.h",
++    ])
++
++    api_name = _make_bindings_logging_id(cg_context)
++    interface_name = str(cg_context.interface.identifier)
++
++    # Determine the member name and overload count from the codegen context.
++    member_name = ""
++    overload_count = 0
++    if cg_context.property_ is not None:
++        member_name = str(cg_context.property_.identifier)
++    elif cg_context.operation_group is not None:
++        member_name = str(cg_context.operation_group[0].identifier) if len(
++            cg_context.operation_group) > 0 else ""
++        overload_count = len(cg_context.operation_group)
++    elif cg_context.constructor_group is not None:
++        member_name = "constructor"
++        overload_count = len(cg_context.constructor_group)
++
++    node = TextNode(
++        "blink::xtrace::XTraceGeneratedScope xtrace_generated_scope("
++        "\"{api}\", "
++        "blink::xtrace::XTraceGeneratedScope::k{kind}, "
++        "\"{interface}\", \"{member}\", "
++        "{overload_count}, info);".format(
++            api=api_name,
++            kind=entry_kind.replace("-", "").title().replace(
++                "Nadc", "Nadc").replace(
++                "Overloaddispatcher", "OverloadDispatcher"),
++            interface=interface_name,
++            member=member_name,
++            overload_count=overload_count))
++    node.accumulate(
++        CodeGenAccumulator.require_include_headers([
++            "third_party/blink/renderer/platform/xtrace/"
++            "xtrace_generated_scope.h",
++        ]))
++    return node
++
+ 
+ def make_check_argument_length(cg_context):
+     assert isinstance(cg_context, CodeGenContext)
+@@ -1889,6 +1956,7 @@ def make_attribute_get_callback_def(cg_context, function_name):
+         EmptyNode(),
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "getter"),
+         make_report_coop_access(cg_context),
+         make_report_deprecate_as(cg_context),
+         make_report_measure_as(cg_context),
+@@ -2023,6 +2091,7 @@ def make_attribute_set_callback_def(cg_context, function_name):
+         EmptyNode(),
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "setter"),
+         make_report_deprecate_as(cg_context),
+         make_report_measure_as(cg_context),
+         make_log_activity(cg_context),
+@@ -2184,6 +2253,7 @@ def make_constructor_entry(cg_context):
+     return SequenceNode([
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "constructor"),
+         EmptyNode(),
+         make_check_constructor_call(cg_context),
+     ])
+@@ -2299,6 +2369,7 @@ def make_exposed_construct_callback_def(cg_context, function_name):
+     body.extend([
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "overload-dispatcher"),
+         make_report_deprecate_as(cg_context),
+         make_report_measure_as(cg_context),
+         make_log_activity(cg_context),
+@@ -2320,6 +2391,7 @@ def make_legacy_factory_function_property_callback_def(cg_context,
+     body.extend([
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "overload-dispatcher"),
+         make_report_deprecate_as(cg_context),
+         make_report_measure_as(cg_context),
+         make_log_activity(cg_context),
+@@ -2586,6 +2658,7 @@ def make_operation_entry(cg_context):
+     return SequenceNode([
+         make_runtime_call_timer_scope(cg_context),
+         make_bindings_trace_event(cg_context),
++        make_xtrace_scope(cg_context, "operation"),
+     ])
+ 
+ 
 diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink/renderer/core/dom/document.cc
 index 3e0ab53396..a6698aede2 100644
 --- a/third_party/blink/renderer/core/dom/document.cc
@@ -14021,16 +14147,18 @@ index dda4e09728..a5c0f2978d 100644
    if (!channel_)
      return;
 diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
-index 0f8b2defe6..e6eb79a824 100644
+index 0f8b2defe6..95a5b63958 100644
 --- a/third_party/blink/renderer/platform/BUILD.gn
 +++ b/third_party/blink/renderer/platform/BUILD.gn
-@@ -1681,6 +1681,13 @@ component("platform") {
+@@ -1681,6 +1681,15 @@ component("platform") {
      "widget/widget_base.h",
      "widget/widget_base_client.h",
      "windows_keyboard_codes.h",
 +    "xtrace/xtrace_control_impl.cc",
 +    "xtrace/xtrace-ignition-bridge.cc",
 +    "xtrace/xtrace_control_impl.h",
++    "xtrace/xtrace_generated_scope.cc",
++    "xtrace/xtrace_generated_scope.h",
 +    "xtrace/xtrace_logger.cc",
 +    "xtrace/xtrace_logger.h",
 +    "xtrace/xtrace_producer.cc",
@@ -14038,7 +14166,7 @@ index 0f8b2defe6..e6eb79a824 100644
    ]
  
    sources -= blink_platform_avx_files
-@@ -2197,6 +2204,7 @@ source_set("blink_platform_unittests_sources") {
+@@ -2197,6 +2206,7 @@ source_set("blink_platform_unittests_sources") {
    testonly = true
  
    sources = [
@@ -14560,6 +14688,186 @@ index 0000000000..59d49da5e7
 +}  // namespace blink::xtrace
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
+new file mode 100644
+index 0000000000..07aa13555c
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
+@@ -0,0 +1,94 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h"
++
++#include <atomic>
++#include <string_view>
++
++#include "base/command_line.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++
++namespace blink::xtrace {
++
++namespace {
++
++constexpr char kBindingsChannel[] = "bindings";
++
++std::atomic<uint64_t>& CallTokenSequence() {
++  static std::atomic<uint64_t> sequence{0};
++  return sequence;
++}
++
++// Entry-kind display names for the event payload.
++constexpr const char* kEntryKindNames[] = {
++    "getter", "setter", "overload-dispatcher",
++    "constructor", "nadc-callback", "operation",
++};
++
++bool BindingsInstrumentationEnabled() {
++  // The generation-time allowlist gates whether the scope code exists at
++  // all; this runtime check only gates emission (capture active + category
++  // filter), matching the P2/P3 pipeline contract.
++  return XTraceProducerHub::Get()->ConfigReceived();
++}
++
++}  // namespace
++
++XTraceGeneratedScope::XTraceGeneratedScope(
++    const char* api,
++    EntryKind kind,
++    const char* interface_name,
++    const char* member_name,
++    unsigned overload_count,
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  if (!BindingsInstrumentationEnabled()) {
++    return;
++  }
++  token_ = ++CallTokenSequence();
++  active_ = true;
++
++  // Entry fact emission goes through the standard v3 pipeline with an
++  // explicit channel field (DP2: always explicit, never defaulted).
++  // The JSON is assembled by the logger (not here) — this scope only
++  // provides the entry facts; the logger handles envelope + batching.
++  //
++  // P5-E2 first pass: the event shape and logger integration land with
++  // the first compiled interface in P5-E5. The scope constructs, tracks
++  // the token, and the destructor completes the pair. Full emission
++  // activates when the logger's LogGeneratedEntry API is wired (E3).
++  (void)api;
++  (void)interface_name;
++  (void)member_name;
++  (void)overload_count;
++  (void)info;
++}
++
++XTraceGeneratedScope::~XTraceGeneratedScope() {
++  // RAII completion: marks the entry event terminal. For promise-returning
++  // operations the destructor fires when the SYNCHRONOUS callback returns
++  // (settlement is post-P5 by ruling); the event records the synchronous
++  // return fact only.
++  if (active_) {
++    active_ = false;
++  }
++}
++
++void XTraceGeneratedScope::RecordOverload(unsigned selected_index) {
++  if (!active_) {
++    return;
++  }
++  // Appends routing facts to the in-flight entry event (no new event —
++  // DP1 hard rule). Logger integration in E3.
++  (void)selected_index;
++}
++
++// static
++bool XTraceGeneratedScope::TryEnter() {
++  // Allocation-free precheck: the producer hub's bounded buffer state is
++  // readable without locks for this check (atomic watermark).
++  return BindingsInstrumentationEnabled();
++}
++
++}  // namespace blink::xtrace
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
+new file mode 100644
+index 0000000000..973dfe46e4
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
+@@ -0,0 +1,74 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
++
++#include <cstdint>
++
++#include "third_party/blink/renderer/platform/platform_export.h"
++#include "v8/include/v8-function-callback.h"
++
++namespace v8 {
++template <typename T>
++class FunctionCallbackInfo;
++}
++
++namespace blink::xtrace {
++
++// P5-E2 (design §DP1): generated-callback entry scope. Injected by bind_gen
++// at the six logical entry kinds (three physical sites). One call chain
++// produces exactly ONE entry event — the overload dispatcher records
++// routing facts; the selected implementation only appends signature
++// detail via RecordOverload().
++//
++// The FIRST_BATCH set is decided at GENERATION time: bind_gen only emits
++// the scope construction for instrumented interfaces, so non-first-batch
++// interfaces carry zero overhead (no code emitted at all).
++class PLATFORM_EXPORT XTraceGeneratedScope {
++ public:
++  enum EntryKind : uint8_t {
++    kGetter = 0,
++    kSetter = 1,
++    kOverloadDispatcher = 2,
++    kConstructor = 3,
++    kNadcCallback = 4,
++    kOperation = 5,
++  };
++
++  // The single constructor shape for all six entry kinds (every generated
++  // callback uses v8::FunctionCallbackInfo<v8::Value> in this tree).
++  // `api` is the fully-qualified name (e.g. "URL.constructor",
++  // "Element.scroll"); `overload_count` is the number of overloads for
++  // dispatchers/constructors, 0 for single-signature entries.
++  XTraceGeneratedScope(const char* api,
++                       EntryKind kind,
++                       const char* interface_name,
++                       const char* member_name,
++                       unsigned overload_count,
++                       const v8::FunctionCallbackInfo<v8::Value>& info);
++  ~XTraceGeneratedScope();
++
++  XTraceGeneratedScope(const XTraceGeneratedScope&) = delete;
++  XTraceGeneratedScope& operator=(const XTraceGeneratedScope&) = delete;
++
++  // Called by overload-dispatcher generated bodies after the branch is
++  // selected; appends routing facts to the already-emitted entry event
++  // (does NOT create a second event — DP1 hard rule).
++  void RecordOverload(unsigned selected_index);
++
++  // NADC/no-alloc entry precheck (design §DP1 + §9 ruling): returns true
++  // when the bounded-buffer path can accept an event without allocating.
++  // Must be called before ANY allocation in the callback. When false the
++  // entry is marked partial in the coverage bookkeeping — never forced.
++  static bool TryEnter();
++
++ private:
++  uint64_t token_ = 0;
++  bool active_ = false;
++};
++
++}  // namespace blink::xtrace
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
 index 0000000000..250a60922b
