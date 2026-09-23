@@ -1,3 +1,36 @@
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index 7df3e18c4c..ccd05d8c58 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -51,6 +51,12 @@ if (!is_clang) {
+ declare_args() {
+   # This allows overriding the location of lld.
+   lld_path = default_lld_path
++
++  # XTrace (N5/C1, resource plan §3.2): cap ld64.lld's internal thread
++  # count on mac. 0 keeps upstream behavior (all hardware threads);
++  # nonzero adds -Wl,--threads=N. Delivered via the patch stack; the A/B
++  # release pair sets 2 while Ninja itself runs at -j2/-l3.
++  xtrace_lld_threads = 0
+ }
+ 
+ declare_args() {
+@@ -1049,6 +1055,15 @@ config("linker") {
+       ldflags += [ "--ld-path=" + rebase_path(linker_path, root_build_dir) ]
+     } else if (use_lld) {
+       ldflags += [ "-fuse-ld=lld" ]
++
++      # XTrace C1 (resource plan §3.2): cap ld64.lld's internal thread
++      # count on mac. 0 keeps upstream behavior; nonzero adds
++      # -Wl,--threads=N. Delivered via the patch stack; the A/B release
++      # pair sets 2 while Ninja itself runs at -j2/-l3.
++      if (is_mac && xtrace_lld_threads != 0) {
++        ldflags += [ "-Wl,--threads=$xtrace_lld_threads" ]
++      }
++
+       if (lld_path != "") {
+         ldflags += [ "-B" + rebase_path(lld_path, root_build_dir) ]
+       }
 diff --git a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc b/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
 index c9f49cd198..7b9feb305a 100644
 --- a/chrome/browser/devtools/chrome_devtools_manager_delegate.cc
