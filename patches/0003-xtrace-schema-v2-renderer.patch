@@ -88,7 +88,7 @@ index 8da7876994..e28e8b1b32 100644
    };
  
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b..22ee082d2e 100644
+index b2a722741b..8972af6673 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 @@ -4,6 +4,7 @@
@@ -392,11 +392,22 @@ index b2a722741b..22ee082d2e 100644
 +      (std::string_view(phase) != "return" &&
 +       std::string_view(phase) != "exception")) {
 +    return false;
-+  }
+   }
+-  return host.get();
 +  const std::vector<XTraceActivation>& stack = ActivationStack();
 +  return !stack.empty() && stack.back().api == api;
-+}
-+
+ }
+ 
+-void LogEventWithSequence(const XTraceConfig& config,
+-                          const char* category,
+-                          const char* phase,
+-                          const char* api,
+-                          const String& args_json,
+-                          uint64_t seq,
+-                          std::string_view extra_fields,
+-                          bool capture_stack,
+-                          std::string_view frame_url,
+-                          std::string_view origin) {
 +CausalityFields CurrentCausalityFields(const XTraceConfig& config,
 +                                       const char* phase,
 +                                       const char* api,
@@ -420,21 +431,10 @@ index b2a722741b..22ee082d2e 100644
 +    fields.parent_token = stack.back().token;
 +    fields.has_parent = true;
 +    fields.depth = stack.back().depth + 1;
-   }
--  return host.get();
++  }
 +  return fields;
- }
- 
--void LogEventWithSequence(const XTraceConfig& config,
--                          const char* category,
--                          const char* phase,
--                          const char* api,
--                          const String& args_json,
--                          uint64_t seq,
--                          std::string_view extra_fields,
--                          bool capture_stack,
--                          std::string_view frame_url,
--                          std::string_view origin) {
++}
++
 +// Schema v3 §3.4: the causality object is always present. `duration_us`
 +// is a decimal string on paired terminal events, otherwise null.
 +void AppendCausalityObject(std::string* line,
@@ -762,7 +762,7 @@ index b2a722741b..22ee082d2e 100644
  }
  
  void XTraceLogger::LogEventWithContext(const char* category,
-@@ -462,15 +754,22 @@ void XTraceLogger::LogEventWithContext(const char* category,
+@@ -462,15 +754,60 @@ void XTraceLogger::LogEventWithContext(const char* category,
                                         const String& frame_url,
                                         const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
@@ -789,10 +789,48 @@ index b2a722741b..22ee082d2e 100644
 +            /*capture_stack=*/true, frame_url.Utf8(), origin.Utf8(), nullptr,
 +            nullptr, nullptr, nullptr, std::string_view(),
 +            snapshot->generation);
++}
++
++void XTraceLogger::LogGeneratedEntry(const char* api,
++                                    const char* entry_kind,
++                                    const char* interface_name,
++                                    const char* member_name,
++                                    unsigned overload_count,
++                                    uint64_t call_token) {
++  const XTraceConfig& config = GetCachedConfig();
++  if (!config.enabled ||
++      // Same first-config barrier as every other entry (N3-part2).
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
++    return;
++  }
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, "reverse")) {
++    return;
++  }
++  // Entry facts as top-level extra fields (channel always explicit —
++  // DP2 ruling: no default semantics).
++  std::string extra;
++  extra.append("\"webidl_entry\":{");
++  extra.append("\"channel\":\"bindings\",");
++  extra.append("\"entry_kind\":");
++  extra.append(QuoteJsonString(entry_kind ? entry_kind : "unknown"));
++  extra.append(",\"interface\":");
++  extra.append(QuoteJsonString(interface_name ? interface_name : ""));
++  extra.append(",\"member\":");
++  extra.append(QuoteJsonString(member_name ? member_name : ""));
++  extra.append(",\"overload_count\":");
++  extra.append(base::NumberToString(overload_count));
++  extra.append(",\"call_token\":");
++  extra.append(base::NumberToString(call_token));
++  extra.append("}");
++  EmitEvent(config, "reverse", "call", api ? api : "WebIDL.entry",
++            String("[]"),
++            /*capture_stack=*/false, std::string_view(), std::string_view(),
++            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation);
  }
  
  void XTraceLogger::LogEventNoStack(const char* category,
-@@ -478,14 +777,22 @@ void XTraceLogger::LogEventNoStack(const char* category,
+@@ -478,14 +815,22 @@ void XTraceLogger::LogEventNoStack(const char* category,
                                     const char* api,
                                     const String& args_json) {
    const XTraceConfig& config = GetCachedConfig();
@@ -821,7 +859,7 @@ index b2a722741b..22ee082d2e 100644
  }
  
  void XTraceLogger::LogEventNoStackWithContext(const char* category,
-@@ -495,15 +802,22 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
+@@ -495,15 +840,22 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
                                                const String& frame_url,
                                                const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
@@ -851,7 +889,7 @@ index b2a722741b..22ee082d2e 100644
  }
  
  void XTraceLogger::LogAssetEvent(const char* category,
-@@ -514,19 +828,25 @@ void XTraceLogger::LogAssetEvent(const char* category,
+@@ -514,19 +866,25 @@ void XTraceLogger::LogAssetEvent(const char* category,
                                   const String& url,
                                   const String& source) {
    const XTraceConfig& config = GetCachedConfig();
@@ -885,7 +923,7 @@ index b2a722741b..22ee082d2e 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-@@ -537,18 +857,30 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
+@@ -537,18 +895,30 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
                                               const String& url,
                                               const String& source) {
    const XTraceConfig& config = GetCachedConfig();
@@ -924,7 +962,7 @@ index b2a722741b..22ee082d2e 100644
  }
  
  void XTraceLogger::LogEventWithOptionalAssetAndContext(
-@@ -562,19 +894,47 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
+@@ -562,19 +932,47 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
      const String& frame_url,
      const String& origin) {
    const XTraceConfig& config = GetCachedConfig();
@@ -982,7 +1020,7 @@ index b2a722741b..22ee082d2e 100644
  
  }  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-index f621f4cc3f..63ebdca025 100644
+index f621f4cc3f..fabeb37ef1 100644
 --- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 @@ -5,6 +5,8 @@
@@ -1024,7 +1062,24 @@ index f621f4cc3f..63ebdca025 100644
    static void LogCall(const char* api, const String& args_json);
    static void LogCall(const char* category,
                        const char* api,
-@@ -65,6 +90,28 @@ class PLATFORM_EXPORT XTraceLogger {
+@@ -27,6 +52,16 @@ class PLATFORM_EXPORT XTraceLogger {
+                                   const String& args_json,
+                                   const String& frame_url,
+                                   const String& origin);
++  // P5-E3: generated-callback entry event (channel always "bindings",
++  // never defaulted — DP2 ruling). The scope provides the entry facts;
++  // the logger handles envelope + batching through the standard v3
++  // pipeline.
++  static void LogGeneratedEntry(const char* api,
++                                const char* entry_kind,
++                                const char* interface_name,
++                                const char* member_name,
++                                unsigned overload_count,
++                                uint64_t call_token);
+   static void LogEventNoStack(const char* category,
+                               const char* phase,
+                               const char* api,
+@@ -65,6 +100,28 @@ class PLATFORM_EXPORT XTraceLogger {
    static String NetworkCorrelationKey(const String& method, const String& url);
  };
  

@@ -14690,10 +14690,10 @@ index 0000000000..59d49da5e7
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
 new file mode 100644
-index 0000000000..07aa13555c
+index 0000000000..b576483efd
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,90 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14704,6 +14704,8 @@ index 0000000000..07aa13555c
 +#include <string_view>
 +
 +#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
 +
 +namespace blink::xtrace {
@@ -14745,20 +14747,13 @@ index 0000000000..07aa13555c
 +  token_ = ++CallTokenSequence();
 +  active_ = true;
 +
-+  // Entry fact emission goes through the standard v3 pipeline with an
-+  // explicit channel field (DP2: always explicit, never defaulted).
-+  // The JSON is assembled by the logger (not here) — this scope only
-+  // provides the entry facts; the logger handles envelope + batching.
-+  //
-+  // P5-E2 first pass: the event shape and logger integration land with
-+  // the first compiled interface in P5-E5. The scope constructs, tracks
-+  // the token, and the destructor completes the pair. Full emission
-+  // activates when the logger's LogGeneratedEntry API is wired (E3).
-+  (void)api;
-+  (void)interface_name;
-+  (void)member_name;
-+  (void)overload_count;
-+  (void)info;
++  // Entry fact emission through the standard v3 pipeline (P5-E3 wiring).
++  // channel is always explicit "bindings" (DP2 ruling) — the logger
++  // handles the envelope, batching, and the category/generation gates.
++  XTraceLogger::LogGeneratedEntry(
++      api, kEntryKindNames[static_cast<unsigned>(kind)], interface_name,
++      member_name, overload_count, token_);
++  (void)info;  // receiver/args capture is E4 value-capture work
 +}
 +
 +XTraceGeneratedScope::~XTraceGeneratedScope() {
@@ -14776,7 +14771,8 @@ index 0000000000..07aa13555c
 +    return;
 +  }
 +  // Appends routing facts to the in-flight entry event (no new event —
-+  // DP1 hard rule). Logger integration in E3.
++  // DP1 hard rule). Logged as a follow-up fact within the same token.
++  // Full detail with E4 dedup work; basic index now.
 +  (void)selected_index;
 +}
 +
