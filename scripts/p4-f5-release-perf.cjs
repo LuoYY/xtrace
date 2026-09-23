@@ -63,7 +63,9 @@ function sampleRSS(pid) {
 }
 function normalizedArgs(file) {
   return fs.readFileSync(file, 'utf8').split('\n').map(l => l.trim())
-      .filter(l => l && !l.startsWith('#'));
+      .filter(l => l && !l.startsWith('#'))
+      // GN is whitespace-insensitive around '=' — normalize before compare.
+      .map(l => l.replace(/\s*=\s*/, '='));
 }
 
 async function oneRun(state, repeat) {
@@ -127,10 +129,21 @@ async function oneRun(state, repeat) {
     fs.writeFileSync(path.join(dir, 'validator.txt'), (v.stdout || '') + (v.stderr || ''));
     throw new Error(`${state}-${repeat}: validator failed: ${(v.stderr || v.stdout || '').slice(0, 400)}`);
   }
-  const text = fs.readFileSync(trace, 'utf8');
-  run.events = text.trim() ? text.trim().split('\n').length : 0;
-  run.ignition = (text.match(/"api":"Ignition.execute"/g) || []).length;
-  run.traceBytes = Buffer.byteLength(text);
+  // Buffer-based counting: state C traces can exceed Node's max string
+  // length (~512MB) — never decode the whole file to a JS string.
+  const buf = fs.readFileSync(trace);
+  run.events = 0;
+  run.ignition = 0;
+  {
+    let pos = -1;
+    run.events = 0;
+    while ((pos = buf.indexOf(0x0a, pos + 1)) !== -1) { run.events += 1; }
+    if (buf.length && buf[buf.length - 1] !== 0x0a) { run.events += 1; }
+    const needle = Buffer.from('"api":"Ignition.execute"');
+    let p2 = 0;
+    while ((p2 = buf.indexOf(needle, p2)) !== -1) { run.ignition += 1; p2 += needle.length; }
+  }
+  run.traceBytes = buf.length;
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'trace.manifest.json'), 'utf8'));
   run.dropped = Number(manifest.counts?.dropped ?? -1);
   run.failed = Number(manifest.counts?.failed ?? -1);
