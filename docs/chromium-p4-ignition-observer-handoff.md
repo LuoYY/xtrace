@@ -666,3 +666,39 @@ A 产物初测 http 导航挂起触发深度排障（netlog 逐事件、子进�
 - 三态复跑：`node scripts/p4-f5-release-perf.cjs`（F5_REPEATS 可调）
 - 单测/矩阵/故障/parity/warm/GC：scripts/ 下对应驱动，均从仓库根可复跑
 - 身份核对：`validation/p4-n6-identity.json` vs 现场产物摘要
+
+---
+
+## 13. 总架构师 P4 终审（2026-09-23）：accepted-p4
+
+**结论：P4 通过终审，标记 accepted-p4。** B1～B7（§10.3）与 R1～R7（§11.3）的整改经 N0～N6 证据链独立复验成立。
+
+### 13.1 独立复验记录（全部亲跑，不凭申报）
+
+| 项 | 命令/位置 | 结果 |
+| --- | --- | --- |
+| 补丁重放 | `python3 scripts/verify_patches.py --with-dylibs` | verdict=pass；chromium 124 文件 / v8 137 文件、0 不符、0 清单外漂移、双 HEAD pin 一致 |
+| 契约套件 | `node scripts/p4-review-contract.cjs` | **21/21 PASS**（exit 0）：R1 弱回收、R2 双序生命周期、R3 独立否定、R4 scope 三态+零等待屏障、B1/B2/B7 维持 |
+| 回归 | `scripts/run_tests.sh` | **364/28/211 全绿**（套件较 P3 期 338→364，新增 v3 契约与协调器测试） |
+| C++ 单测 | `XTraceCaptureControllerTest.*` / `XTraceProducerTest.*` | 9/9、6/6 SUCCESS（最终二进制亲跑） |
+| N1 弱回调两阶段 | `node scripts/p4-n1-weak-gc.js` | 两态 PASS，exit 0（原 fatal "Handle not reset in first callback" 已根除） |
+| 逐事件 parity | `node scripts/p4-e6-parity.js` | 10/10 PASS：offset 深等 + opcode 逐条 + off 对照（wide-register 1918/1918） |
+| 三态性能 | `validation/p4-f5-perf-0ril4f/` | A/B 统计等价（编译期开销不可测）；C 观测开销如实（同负载 5.4–5.6s / 1.44M 事件）；启动/执行/停止分列；dropped/failed 全零；身份绑定完整；`rssScope` 局限（browser-only）在数据内如实标注 |
+| 矩阵 | `browser-run-ekm4Qr` / `browser-run-yh5xUK` | 各自 12/12 |
+| warm 证据 | `validation/p4-b3-warm-XENEll/` | 决策点 suppression 观测在位（observer-env 与 normal-env 分列） |
+
+digest 谱系：perf summary 的补丁摘要为测量时记录（BUILD.gn 折入前），`p4-n6-identity.json` 为终栈记录，当前磁盘与终栈一致（0001=`905ac8d0…`）。谱系可追溯，无断链。
+
+### 13.2 结转边界（不阻塞，列入后续阶段）
+
+1. analyzer/GUI v3 完整消费——P6 入口条件，持续开放。
+2. P3 identity 的跨导航/BFCache/redirect crosswalk 全场景——下一控制面修订，现证据为终态快照 + 分场景冒烟。
+3. 非受信 browser client 主动反例——机制保留，测试待补。
+4. scope selector C 端编址为 URL 的 v1 边界（设计文档已声明）。
+5. 编译缓存评估（资源方案 §5.3）未实施——本轮以限流+增量完成 A/B，未引入新变量。
+
+### 13.3 流程记录
+
+本轮缺席期间的代行审查（§10/§11）质量合格：B1–B7 与 R1–R7 全部经源码与运行反例证实，整改路径（§10.8 A–G、§11.4 N0–N6）有效。两笔教训记入长期纪律并已被 AGENTS.md 吸收：**补丁栈强制同步**（树改补丁必随，`verify_patches.py` fail-closed 兜底）；**反例先于通过声明**（先红后绿，绿色不替代覆盖证明）。P4 的 §10.1 已裁决的精细模式 `causality=sync` 前置（附实施条件）维持有效。
+
+下一阶段：P5（Blink WebIDL 生成器插桩），交接文档 [chromium-p5-webidl-generator-handoff.md](chromium-p5-webidl-generator-handoff.md)。P4 交接文档自本节点冻结归档。
