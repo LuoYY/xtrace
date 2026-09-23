@@ -1,6 +1,6 @@
 # P5 交接：Blink WebIDL 生成器插桩（首批接口的 call token 与 scope 观测）
 
-- 文档版本：v1.0（2026-09-23）。
+- 文档版本：v1.1（2026-09-23；P5-E1 设计文档经裁决通过——五项全部接受，修订见 [chromium-p5-design.md](chromium-p5-design.md) §9；实施从 P5-E2 开始，按 §7 长程块推进）。
 - 前置状态：**P1–P4 全部冻结**（P4 终审见 [P4 交接](chromium-p4-ignition-observer-handoff.md) §13；§10.5 的"P5 C++ 插桩等待"门槛随 P4 冻结解除）。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。执行模式沿用长程单次终审（§7）。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §10（Blink WebIDL 生成器增强）、§12 P5 行、§13.1；[P4 交接](chromium-p4-ignition-observer-handoff.md) §10.5（P5 进入门）；[trace-schema-v3.md](trace-schema-v3.md) v1.2。
@@ -10,7 +10,7 @@
 1. 读本文件全文 + 草稿 §10（全部）与 §13.1 的 P5 行。
 2. 确认现场：两树为五补丁状态（chromium 124 / v8 137 文件，`verify_patches.py` pass）；P4 交付的 per-isolate gate、统一配置快照、scope selector、两阶段弱回调不得回退。
 3. 恢复 bindings 单测环境（隔离 Python 3.11.16；P1 期 `/tmp/xtrace-blink-python311` 若被清理则按草稿 §15.3 重建）。
-4. P5 设计文档（P5-E1）经架构师裁决后才写 C++；设计冻结后按 §7 长程块一次推进。
+4. ~~P5 设计文档（P5-E1）经架构师裁决后才写 C++~~ **P5-E1 已裁决通过（2026-09-23，五项全部接受+修订见设计文档 §9）**。实施直接从 **P5-E2** 开始，按 §7 长程块一次推进。
 
 ## 2. 冻结输入（不得变更的基线）
 
@@ -79,13 +79,17 @@
 
 沿用既往纪律：补丁回写 + `verify_patches.py`（fail-closed）+ 逐文件 blob 比对；回归 364/28/211 + 单测 + 新增；文档与进度同步（progress JSON 新增 P5 段，初始 `p5-in-progress`）。
 
-## 5. 实施前需架构师裁决的决策点（P5-E1 提交）
+## 5. 决策点状态（v1.1：全部已裁决）
 
-1. **scope RAII 形状与注入点**：六类入口的统一/分治；call token 创建规则（普通 JS 入口）与 overload/signature 补充方式。
-2. **去重策略**：手写 hook（0001 已覆盖）与生成器事件在同一 API 上的归属规则（禁用一方/合并事件/双通道标注——三选一须论证）。
-3. **值捕获边界**：类型分派表；不触发用户代码的判定实现（异常/超时护栏）。
-4. **覆盖表格式**：supported/partial/unavailable 的判据与机器可读形状（进 `getCapabilities`）。
-5. **精细模式 predicate**：抑制点位置（模板/快照建立前）与环境语义（重启声明、能力表披露）。
+| 决策点 | 状态 |
+| --- | --- |
+| 1. scope RAII 与注入点 | **已接受**——三物理注入点覆盖六类入口；硬语义：同一调用链入口事件恰好一次（dispatcher 记路由事实，选中实现只补 signature 详单） |
+| 2. 去重策略 | **已接受双通道标注**（`channel: bindings/impl`），但无"缺省即 bindings"语义：新采集全显式、v1/v2 旧 trace 由导入适配器补标 impl |
+| 3. 值捕获边界 | **已接受**（生成期静态分派表 = 构造性不调用用户代码）；对象 ref 仅作短窗口关联提示，GC 后跨事件相关为 best-effort |
+| 4. 覆盖表格式 | **已接受**（生成期冻结 `webidl_coverage.json` + `getCapabilities` 汇总；三判据固定） |
+| 5. 精细模式 predicate | **已接受**（per-template 抑制 + `--xtrace-bindings-precise` 启动开关、不可热切、与 observer 开关可叠加且机器可读披露） |
+
+详细裁决与附条件见 [chromium-p5-design.md](chromium-p5-design.md) §9。
 
 ## 6. 纪律与纠偏事项（沿用前序，新增第 11 条）
 

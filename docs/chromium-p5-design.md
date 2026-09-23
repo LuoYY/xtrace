@@ -1,6 +1,6 @@
 # P5 设计：Blink WebIDL 生成器插桩（首批接口的 call token 与 scope 观测）
 
-- 版本：v1.0（2026-09-23）。依据：[P5 交接](chromium-p5-webidl-generator-handoff.md) v1.0 §5 五决策点；草稿 §10；trace-schema-v3 v1.2。
+- 版本：v1.1（2026-09-23；v1.0 R1 提交，v1.1 架构师裁决通过——五项全部接受，修订与条件见 §9）。依据：[P5 交接](chromium-p5-webidl-generator-handoff.md) v1.0 §5 五决策点；草稿 §10；trace-schema-v3 v1.2。
 - 状态：**R1 关卡——待总架构师裁决后实施**。每项给推荐与备选；裁决通过后 P5-E2→E7 按 §7 长程块执行。
 
 ## 0. 源码事实核对（设计输入，全部已在固定树核验）
@@ -117,3 +117,42 @@ XTraceGeneratedScope xtrace_scope(
 ## 请求裁决
 
 请对五个决策点逐项裁决（接受/修改/备选），并确认：①NADC/NoAlloc 的 TryEnter 预检查协议是否满足"不硬插桩"边界；②双通道标注的向后兼容默认值（存量事件 channel 缺省为 bindings）是否可接受；③覆盖表生成期冻结的判据三条是否成立。裁决通过后按交接 §7 启动 P5-E2→E7 长程块。
+
+---
+
+## 9. 架构师裁决（2026-09-23，R1 通过）
+
+裁决前已抽查 §0 关键事实：六类入口与 `_make_empty_callback_def:1814` 在固定树逐一在位；Element.scroll 双 overload 确为 `Promise<ScrollResult>` + `CallWith=ScriptState`（`element.idl:156–157`）；既有手写钩确在 DOM 实现层（`dom_url.cc`/`url_search_params.cc`/`response.cc` 的 XTrace 引用 51/130/44 处与 §0 一致，bindings 层仅基础设施钩）。五项决策**全部接受推荐方案**，修订与条件如下；通过后 P5-E2 → P5-E7 长程块开启。
+
+### 决策点 1：接受（scope RAII + 三物理注入点）
+
+补充一条硬语义：dispatcher 记"路由前"事实、被选中 overload 的 scope 只补充 signature 详单——**同一调用链上入口事件恰好产生一次**，dispatcher 与具体实现不得各自产出 call 事件；E4 的计数对照与 E6 的重载选择用例按此断言。
+
+### 决策点 2：接受双通道标注，但"缺省"语义按以下口径定死
+
+1. **新采集事件全部显式携带 `channel`**：生成器事件写 `"bindings"`；手写钩经 `LogEvent*` 可选参数默认 `"impl"`（不逐个改 100 文件的做法可接受）。
+2. **导入适配器对 v1/v2 旧 trace 的手写钩事件补标 `"impl"`**——旧 trace 根本不存在 bindings 层事件。
+3. **规范不承认"缺省即 bindings"**：字段缺失只在旧 trace 导入时出现，且必须由适配器消解，消费端不自行假设缺省值（旧事件缺省读成 bindings 是错标）。
+
+### 决策点 3：接受（生成期静态分派表 = 不调用用户代码的构造性保证）
+
+附一条披露要求：对象 identity ref 由 V8 地址派生仅作事件内/短窗口关联提示；**跨事件的 ref 相关性在 GC 重定位后为 best-effort，不得当作持久身份**（P4 B5 教训：地址不是身份）。此句写入覆盖表/能力披露与规范注释。
+
+### 决策点 4：接受（生成期冻结覆盖表 + getCapabilities 汇总）
+
+三判据（supported/partial/unavailable）成立；"首批之外全部 unavailable"的诚实披露保留。生成期冻结、运行时不重算——与编译产物同源，正是要的效果。
+
+### 决策点 5：接受（per-template predicate + 启动开关 + 不可热切 + 可叠加披露）
+
+补充：`--xtrace-bindings-precise` 与 `--xtrace-ignition-observer` 的叠加矩阵进 `getCapabilities` 机器可读输出（两开关独立、互不隐含），与 P4 F3 的 PreciseEnvironment 权威模型一致。
+
+### 三个确认问题的答复
+
+1. **TryEnter 预检查协议满足"不硬插桩"边界**——条件：TryEnter 自身必须无分配且先于任何分配发生；覆盖表 `partial` 标记路径必须有实测用例（制造一次缓冲不可容纳 → 记 partial/unavailable，而非崩溃或漏记）。
+2. **双通道向后兼容默认值**：不接受"缺省为 bindings"，按决策点 2 的口径执行（新采集全显式、适配器补标 impl、规范无模糊缺省）。
+3. **覆盖表生成期冻结三判据**：成立。
+
+### 实施期提醒（不阻塞）
+
+- `_make_empty_callback_def` 是四类入口共享骨架——草稿 §10.1 的警告（不在通用 helper 无差别加 scope）由决策点 1 的 call token 规则和"dispatcher/实现只记一次"语义承接，E6 的重载用例是验收证据。
+- 生成器改动的幂等性：注入只在三个函数头部前置插入，冲突面最小化约定保留。
