@@ -580,3 +580,89 @@ R1/R2 优先于性能：在坏生命周期上继续 A/B 首构建只会增加返
 - [final-matrices-validator.json](../chromium/src/out/XTraceIntegration/validation/p4-rereview-pkmq_li3/final-matrices-validator.json)：保存的16份非空最终trace重新校验结果，非重跑整套浏览器矩阵。
 
 本轮没有复跑性能、全量上游测试或所有长期故障场景；所有“通过”只针对明确运行/重新解析的项目。完整F0～F6审阅是对交付清单逐项核对，不是宣称本机已再次执行每个耗时任务；未验证项和阻塞均已显式登记。原始产物维持 git-ignored，关键裁决和构建方案进入受跟踪文档，代码修复留执行层实施。
+
+## 12. N0～N6 执行完成申报（2026-09-23，提交总架构师复验）
+
+按 §11.4 顺序完成全部整改。每项按 §10.6 七行格式申报（契约 → 断言 → 命令/退出码 → 原始证据 → 最终产物摘要）。汇总裁决请求：**B1～B7 全部整改完成、三态性能与身份绑定齐备，申请 accepted-p4。**
+
+### 12.1 逐任务申报
+
+#### N0：固化反例与修测试驱动（4f76802）
+
+- 契约：R1/R2/R3 独立反例转为受跟踪测试先红；F5 sessionId/完成断言/超时/清理修好；validator 补字段/capture 身份/真实行数负例
+- 断言：R1 红即 d8 fatal（cache-off 模式）；R2 红即 stop→terminate renderer 崩溃（Inspector.targetCrashed，浏览器 exit 0 的盲区由 CdpPipe 事件钩子捕获）；R3 红即 `--sparkplug --no-always-sparkplug` 被误判 ignition-locked；fake pipe 5 组（session 路由/错误/超时/事件/清理升级）全绿
+- 命令/退出码：`node scripts/p4-n1-weak-gc.js`（红）；`node scripts/p4-review-contract.cjs --only=precise,lifecycle`（R2/R3 红）；`node tests/f5_fake_pipe.cjs`（PASS）
+- 原始证据：`validation/p4-n1-weak-gc/`、`p4-contract-XbNU3b`、`p4-contract-nNMmra`
+- 产物：`scripts/lib/cdp-pipe.cjs`（共享传输）、`scripts/p4-n1-weak-gc.js`、validator 嵌入 212 记忆符域 + activation_ref 时序校验、18 个 v3 合成契约测试
+
+#### N1：弱回调两阶段契约（7efd2d1）
+
+- 契约：first pass `GlobalHandles::Destroy` 释放节点（V8 CHECK "Handle not reset" 的根因）；second pass 只 `delete Entry` 且不触任何 owner——teardown 后补发也安全
+- 断言：40 动态函数 + gc() 三模式（cache-off/cache-on/observer-off 对照）全 exit 0 + 哨兵打印；GC 版本稳定/重编译新版本/parity 10/10 无回归
+- 命令/退出码：`node scripts/p4-n1-weak-gc.js`（exit 0）；`node scripts/p4-f2-gc.js`（PASS）；`node scripts/p4-e6-parity.js`（PASS）
+- 原始证据：`XTraceP4D8/validation/p4-n1-weak-gc/`、`p4-f2-gc/`、`p4-e6-parity/`
+- 产物：`xtrace-ignition-observer.cc` 两阶段回调 + 泄漏式 collected 停车列表 + `Isolate::Deinit` teardown 顺序；补丁 0002 重放 135 文件 0 不符
+
+#### N2：stop 只发 latch（8281a9c）
+
+- 契约：停止路径只发布进程级停止闩，不跨线程改 scope 对象/isolate 指针（`ExtractAsDangling` 置空指针 = SEGV 根因，已根除）；各 isolate 自线程观察；新 scope 经闩继承停止态
+- 断言：R2 双序契约绿——stop→worker.terminate 与 terminate→stop 均无 renderer 崩溃、页面可继续求值
+- 命令/退出码：`node scripts/p4-review-contract.cjs --only=lifecycle`（PASS×2）
+- 原始证据：`validation/p4-contract-NOeKI2`（当轮 16/17，唯一红为 N3 待修）
+- 产物：bridge `StoppedLatch()` + `closed_` 原子 + `Stopped()`；补丁重放 122 文件 0 不符
+
+#### N3：独立 flag 状态 + 严格 allowlist（9cf1dd1）+ scope selector（4159111）+ 首配置屏障（fffc1ab）
+
+- 契约：每 tier flag 独立槽、`--no-X`/紧凑 `--noX`、下划线归一、`=value` 布尔、后覆盖；白名单外 token 明确拒绝；三命名空间 scope selector（contexts/scripts/denyInternal）按设计文档 `docs/chromium-p4-scope-selector-design.md` 实现；首配置屏障=保守不接纳
+- 断言：**21/21 契约全绿**——R3 独立否定反例被拒（环境证明 baseline）、B1/B2/B7 维持绿、R4.scope 三契约（排除代 0 ignition/纳入代 >0/JS 答案不变）、R4 零等待屏障（t2 归属锚定后无 gen-0 事件）
+- 命令/退出码：`node scripts/p4-review-contract.cjs`（exit 0，21/21）
+- 原始证据：`validation/p4-contract-wMQjPO`（17/17 里程碑）、`p4-contract-9Ojrm5`（scope 3/3）、`p4-contract-V81HnR`（21/21 终态）
+- 产物：单一公共边界头 `v8/include/xtrace_observer_boundary.h`（V8_EXPORT，回调带 script_url；Blink/d8/content 共用）；`ObserverScopeConfig` 挂统一快照经 mojom/PDL/回填传播；hub `config_received` 门全部 8 个 logger 入口 + observer gate
+
+#### N4：证据闭合（8414039 + e49024c + 43016e5）
+
+- 契约：验证器 fail-closed；warm 从决策级升级为结果级；parity 补 script/version 维度
+- 断言：**漂移检测首跑抓到两个自 F2 起无补丁文件**（v8_per_isolate_data.h、v8/src/execution/isolate.h）——折入后 chromium 123/v8 136、0 漂移；warm 身份绑定 binding.json + 同 profile 重启跨进程 consume + 编译点 consumeResult accepted/rejected 分列；opcode 域 208→212（CALL_BYTECODE_LIST 区在 IMPL 宏之前，CallProperty1 真事件踩中）；parity 逐实例 offset→opcode 一致性 = 注册表混叠检测器 + run.status + observer-off 对照 + 全流留存
+- 命令/退出码：`python3 scripts/verify_patches.py`（pass）；`node scripts/p4-b3-warm-cache.cjs`（PASS）；`node scripts/p4-e6-parity.js`（PASS 10/10）
+- 原始证据：`validation/p4-b3-warm-XENEll`、`p4-e6-parity/`、`p4-f6-replay.json`
+- 产物：`scripts/verify_patches.py`（固定 HEAD pin、git 返回码全查、清单外漂移、缺 dylib 报错）、`scripts/validate_quiet.py`
+
+#### N5：资源协调器（3fb494f + ffb14b8）
+
+- 契约：单协调者、两档限流、排他锁、仅受管组 watchdog、SIGINT 暂停保增量（资源方案 §3/§4 C0/C2）
+- 断言：7/7 fake runner 测试——档位 argv 捕获、覆盖优先、拒 0/非法（exit 3 锁不污染）、第二实例运行中被拒、死锁替换、不可能磁盘门只停受管组且锁释放状态一致；watchdog 持续压力门（连续两采样）修正后零误停
+- 命令/退出码：`python3 -m unittest tests.test_build_coordinator`（OK）
+- 原始证据：测试输出（套件 364 绿）
+- 产物：`scripts/xtrace_build_coordinator.py` + build_xtrace_release.sh 接线
+
+#### N6：B→A 续编、三态测量、身份重录（6653a6e + c7d9d04 + 3b03207）
+
+- 契约：C1 linker 限流（`concurrent_links=1` + `xtrace_lld_threads=2` 经 BUILD.gn 补丁交付）；B 先 A 后经协调器；三态 validator 先行 + 答案断言 + 分布报告；身份绑定 源码+补丁+args+二进制+快照+驱动
+- 断言与数据：B 12864 步 exit 0（interactive -j2/-l3 → 用户授权 14 核续编）；A 37648 步 exit 0；**三态 5 轮分布**（`p4-f5-perf-0ril4f`）：A 52/58/63ms·353MB·6918 事件 vs B 52/55/61ms·353MB·6918 事件——**统计等价，编译期开销不可测**；C 5386/5506/5598ms·573MB·1,441,103 ignition 事件；全部 exit 0、terminal complete、dropped=0、is_debug=false（NDEBUG/dcheck 分轴在 release 验证）
+- 命令/退出码：协调器 state.json（B/A 均 `0 / success`）；`node scripts/p4-f5-release-perf.cjs`（exit 0）
+- 原始证据：`out/XTrace-release/validation/coordinator-20260922-224423.log`（B）、A 的协调器 state.json、`validation/p4-f5-perf-0ril4f/`（15 轮 run.json + summary.json）、`validation/p4-n6-identity.json`
+- 产物：A/B 双 release 产物（Framework+context snapshot 摘要入身份文件）；BUILD.gn 折入 0001——**终栈 chromium 124 / v8 137 文件、逐 blob 0 不符、0 漂移、双 pin 通过**（`validation/p4-f6-replay.json`）
+
+### 12.2 回归汇总（N6 后终态）
+
+21/21 契约（含 R1 弱回收、R2 双序生命周期、R3 独立否定、R4 scope 三态 + 零等待屏障、B1/B2/B7 维持）；逐事件 parity 10/10（offset 深等 + opcode 逐条 + 逐实例一致性）；warm 双证据 + 同 profile 重启 + consume 成败分列；GC 稳定/重编译新版本；矩阵开/关 12/12+12/12；故障注入 4/4；observer 冒烟 validator 过；单测 producer 6/6 + controller 9/9；run_tests 354/28/211。
+
+### 12.3 排障记录：A 二进制"http 导航挂起"（已结案，非缺陷）
+
+A 产物初测 http 导航挂起触发深度排障（netlog 逐事件、子进程 pid 稳定性、sample 各进程线程、APFS clonefile 克隆二分 Bt、快照哈希对比、符号集 diff、d8 对照），最终定性为**环境幻影**：构建收尾系统抖动期（22G 压缩机、14 核负载回落）首启未签名 framework 的 macOS 签名校验极慢，被探针超时误读为死锁。系统回稳后 A/B/Bt 同探针 5/5、2/2、3/3 全过。Bt（B 克隆、observer=false）保留为二分证据。附带产出：watchdog 持续压力门修正（ffb14b8，防瞬态误杀）。
+
+### 12.4 已知边界与遗留（非阻塞，供裁决参考）
+
+1. analyzer/GUI 的 v3 完整消费（§10.5 前序遗留，P6 入口条件）
+2. P3 identity 的跨导航/BFCache/redirect crosswalk 全场景（现为终态快照 + 分场景冒烟）
+3. 非受信 browser client 的主动反例（现保留 page-target 不可用 + 受信拒绝机制）
+4. scope selector 的 C 端编址为 v1 显式边界（按源 URL，非实例身份；设计文档 §1 已声明）
+5. 编译缓存评估（资源方案 §5.3 第二优先级）未实施——本轮以限流+增量完成 A/B，未引入新变量
+
+### 12.5 复验入口
+
+- 契约套件：`node scripts/p4-review-contract.cjs`（21 项）
+- 补丁重放：`python3 scripts/verify_patches.py --out <evidence.json> --with-dylibs chromium/src/out/XTraceIntegration`
+- 三态复跑：`node scripts/p4-f5-release-perf.cjs`（F5_REPEATS 可调）
+- 单测/矩阵/故障/parity/warm/GC：scripts/ 下对应驱动，均从仓库根可复跑
+- 身份核对：`validation/p4-n6-identity.json` vs 现场产物摘要
