@@ -1,0 +1,15 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
+<div id="probe">x</div><pre id="result"></pre>
+<script>
+(async () => {
+  const el = document.getElementById('probe');
+  let acc = 0;
+  // performance.now is a [NoAllocDirectCall] operation on the first-batch
+  // Performance interface: with a tiny bounded buffer its fast callbacks
+  // hit the TryEnter rejection path (nadc_partial accounting).
+  for (let i = 0; i < 1000; i++) acc += performance.now();
+  el.scroll(0, 0);  // flood a few more events after the now() burst
+  await new Promise(r => setTimeout(r, 200));
+  document.getElementById('result').textContent = 'acc=' + (acc > 0);
+})();
+</script></body></html>

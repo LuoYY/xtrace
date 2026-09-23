@@ -186,3 +186,60 @@
 值捕获（DP3 分派表）、精细模式抑制生效（DP5 开关已接线、模板抑制效果未测）、Promise/CEReactions 详细路径语义——均已在 §10.2 如实自报为后续项，不重复追责。冻结后按 P5.5（值观测二期）设计文档的路线继续。
 
 终审通过状态：阻塞 1–3 补齐后，将 progress JSON 的 p5 段标记 `accepted-p5`；必修 4–5 的完成情况随 P5.5 终审一并核对。
+
+---
+
+## 12. 终审阻塞/必修项修复记录（2026-09-24，提交待复验）
+
+**范围：§11.2 阻塞 1–3 全部补齐、§11.3 必修 4–5 全部完成。** progress JSON p5 段已按终审指令标记 `accepted-p5`；五项修复同批落地，全部回归门禁重跑。
+
+### 12.1 阻塞 1：Element.scroll 双 overload 证据（已产出）
+
+- 机制补齐：overload 派发器的**路由事实**此前无调用点（RecordOverload 为空实现）。现于 bind_gen `_make_overload_dispatcher_per_arg_size` 的每个分支注入 `xtrace_generated_scope.RecordOverload(<0 基索引>)`——注入点在**分支体内、委托调用前**（条件分派的类型测试失败不会误记）；索引由配对的 outcome 事件携带（`webidl_outcome.selected_overload`，DP1：不产生第二个入口事件）。派发器入口 kind 修正为 `overload-dispatcher`、`overload_count` 修正为真实 overload 数（此前恒 0）。
+- 证据：`scripts/p5-outcome-evidence.cjs` PASS——`Element.scroll` 三次调用（`scroll(0,0)`/`scroll({top:1})`/错 receiver）路由分别为 `1`/`0`/`1`；页面 `test-pages/webidl-outcome-smoke.html`；trace 落 `validation/p5-outcome-*/`。
+
+### 12.2 阻塞 2：outcome 分路径标注（生成侧接线 + 四类证据）
+
+- 机制：`XTraceGeneratedScope` 增加**线程局部内层活跃 scope 栈**（有界深度 64，匿名命名空间普通栈指针——非 raw_ptr 成员）+ 静态 `MarkOutcome`。overload 体与派发器是不同生成函数，异常路径经 TLS 标注到达拥有 scope 的内层调用链；非首批接口零调用点（生成期门控不变）。
+- 生成侧六族标注点（`blink_v8_bridge.py` 与 `interface.py`，全部首批门控）：
+  - `NotEnoughArguments`（`make_check_argument_length`）与参数转换失败（`make_v8_to_blink_value` 的 conversion-exit）→ `arg-error`；
+  - receiver `HasInstance` "Illegal invocation"（promise 族，含 Element.scroll overload 体）→ `receiver-error`；`[LegacyLenientThis]` 静默返回 → `lenient-receiver`；
+  - **native 调用后**的 `HadException`（`_make_blink_api_call` 与 NADC operation 体两处；循环内转换失败均提前 return，到达后置检查的必为 Blink 抛出）→ `native-exception`；
+  - 构造器按函数调用 → `call-form-error`；`InWrapperConstructor` 早返回 → `early-return`；派发器全分支不匹配 → `overload-resolution-failed`。
+- 证据（同上驱动）：outcome 分布 `{ok:300, arg-error:2, receiver-error:1, native-exception:1, call-form-error:1}`；`URL.constructor` 上 arg-error（缺参）/native-exception（`new URL('://bad')`）/call-form-error（`URL(...)`）各≥1 例；**305 入口/305 终态按 (producer, call_token) 严格配对**。
+- 边界如实：非 promise 操作的错 receiver 检查发生在 V8 模板层（回调之前），该族 receiver-error 不可路径标注（可见但无 outcome 分类）；outcome 记录同步相位（Promise 结算仍按裁决为后续）。
+
+### 12.3 阻塞 3：覆盖表与实际注入一致（机制重建 + 一致性测试进回归）
+
+- 根因：旧表为手工落盘，与生成器无同源关系。重建为**生成期真派生**：bind_gen 注入登记表 → 每接口任务结束时写 `gen/xtrace/coverage/<Interface>.json` 碎片（每接口单任务单写者，无跨进程竞争）→ `generate_bindings.py` 在任务队列结算后聚合为 `gen/xtrace/webidl_coverage.json`（v2）：`supported`/`partial`（DP1 预检查受限）/`unavailable`（首批声明但未注入）全部机器判定。
+- 结果：Element **182** 个 supported 成员（旧表 12）；Performance.now 与 NADCAttributeTest.float64Value 正确标 `partial`（reason=DP1 预检查）；空名 stringifier 伪操作过滤。
+- 一致性测试：`tests/test_webidl_coverage_consistency.py`（4 用例）进回归——扫描生成 `v8_*.cc` 的全部 scope 构造，断言表==实际注入集、unavailable 无构造、entry_kinds 属六类枚举。修复前对旧表正确报错（16KB 差异清单），修复后 4/4。
+
+### 12.4 必修 4：顶层 channel 实值（DP2 裁决补齐）
+
+- 渲染器：`EmitEvent` 增加 `channel` 参数，**默认 `"impl"`**（手写钩 LogEvent* 族全量生效）；bindings 入口/终态显式传 `"bindings"`；`webidl_entry`/`webidl_outcome` 子对象内 channel 保留（自包含）。
+- 浏览器：BrowserNetwork request/redirect/response/complete 四个信封构造点补 `channel:"impl"`。
+- 消费端：`validate_trace.py` 新增 webidl 契约校验——webidl 事件顶层必须 `bindings`；非 webidl 事件若带 channel 必须 `impl`（历史无字段 trace 兼容）；token 按 **producer 作用域**配对（call_token 为进程内序号，跨 renderer 会重复——终审期实测确认）；outcome 枚举与 `selected_overload` 十进制串校验。
+- 证据：12424 条 impl 事件顶层 `channel:"impl"`，全部 webidl 事件 `channel:"bindings"`；validator 全绿。
+
+### 12.5 必修 5：NADC TryEnter partial 实测（DP1 裁决条件闭合）
+
+- 机制补真：`TryEnter` 此前只查开关。现为真容量预检查 `BufferHasRoom()`（capture 窗口开着 && 非 sticky 溢出 && `buffer_.size() < capacity`——与 AcceptEvent 的丢弃判定一致，无分配）；`MarkNadcPartial()` 无分配原子自增——线程 producer 计数器随 watermark 结算（mojom `XTraceWatermark.nadc_partial` → manifest `producers[].nadc_partial`，未确认 producer 按 v1.2 null 纪律），无 producer 时落 hub 兜底计数。
+- 生成侧接线：NADC 属性 setter（`make_attribute_set_nadc_callback_def`）与 NoAllocDirectCall operation（`make_no_alloc_direct_call_callback_def`，Performance.now）的快路径体包入 `if (TryEnter()) { scope…; call; } else { MarkNadcPartial(); }`——预检查先行于任何分配，拒绝路径纯原子。
+- 实测：`blink_platform_unittests` `XTraceProducerTest` **9/9**（新增 `NadcTryEnterRejectsWhenBufferFull`——容量 3 填满后预检查拒绝、计数 2、watermark `nadc_partial=2`；`NadcPartialHubFallbackWithoutProducer`；`BufferHasRoomRejectsAfterSettle`）。E2E：`scripts/p5-nadc-partial-evidence.cjs` PASS（容量 1 溢出风暴：无崩溃、capture 结算、丢失全部记入 dropped、每个已确认 producer 携带十进制 `nadc_partial` 字段）。
+- 边界如实：E2E 中 `nadc_partial>0` 的可见性依赖 V8 分层到优化代码才走 fast API（本 debug 插桩构建内罕见）——机制/计账/结算由单测确定性证明，E2E 证明包围契约（不崩、不漏账）。
+
+### 12.6 修复后全量门禁（同一二进制）
+
+| 门禁 | 结果 |
+| --- | --- |
+| 回归 python | 368 OK + launcher 28 OK（含 4 个新一致性用例） |
+| 生成器再生成 | 10/10 generate_bindings 动作成功（全接口重生成后整树编译通过；生成器自身的 57/57 套件依赖 P1 期隔离 Python 3.11 环境，该环境已不在本机、系统 Python 调用挂起——如实记录，不冒充已跑） |
+| 契约 | 21/21 |
+| 矩阵 off / observer | 12/12 / 12/12 |
+| 故障注入 | pass |
+| observer smoke | pass（163 ignition，validator 含新 webidl 契约） |
+| 单测 producer | 9/9 |
+| 补丁栈 | `verify_patches.py` verdict=pass（0 不符、0 漂移、HEAD 钉扎不变） |
+
+**补丁栈结构变更说明**：栈内同文件跨补丁分 hunk 的历史叠层改为**按文件不相交所有权**（共享文件归栈内最后包含它的补丁）重生成——逐补丁为钉扎 HEAD 到工作树的最终态 diff，回放语义等价、可机械再生；`bind_gen/blink_v8_bridge.py`、`bind_gen/__init__.py`、`generate_bindings.py` 入栈（0001）。

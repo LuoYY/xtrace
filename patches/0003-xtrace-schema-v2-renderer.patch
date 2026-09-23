@@ -1,11 +1,34 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index 8da7876994..e28e8b1b32 100644
+index ecb68ce4e2..e28e8b1b32 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-@@ -93,6 +93,19 @@ const char* XTraceScriptEvaluationResultType(
-   return "unknown";
- }
+@@ -68,6 +68,7 @@
+ #include "third_party/blink/renderer/platform/loader/fetch/url_loader/cached_metadata_handler.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/event_loop.h"
+ #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
  
+ namespace blink {
+ 
+@@ -77,6 +78,155 @@ namespace {
+ // This limit was arrived at arbitrarily. crbug.com/449744
+ const int kMaxRecursionDepth = 44;
+ 
++const char* XTraceScriptEvaluationResultType(
++    ScriptEvaluationResult::ResultType result_type) {
++  switch (result_type) {
++    case ScriptEvaluationResult::ResultType::kNotRun:
++      return "not_run";
++    case ScriptEvaluationResult::ResultType::kSuccess:
++      return "success";
++    case ScriptEvaluationResult::ResultType::kException:
++      return "exception";
++    case ScriptEvaluationResult::ResultType::kAborted:
++      return "aborted";
++  }
++  return "unknown";
++}
++
 +const char* XTraceScriptEvaluationTerminalPhase(
 +    ScriptEvaluationResult::ResultType result_type) {
 +  switch (result_type) {
@@ -19,30 +42,131 @@ index 8da7876994..e28e8b1b32 100644
 +  return "exception";
 +}
 +
- const char* XTraceModuleImportPhase(v8::ModuleImportPhase phase) {
-   switch (phase) {
-     case v8::ModuleImportPhase::kSource:
-@@ -173,7 +186,8 @@ void LogXTraceClassicScriptEvaluate(
-           .Utf8()
-           .c_str());
-   XTraceLogger::LogEventWithOptionalAssetAndContext(
--      "reverse", "return", "ClassicScript.evaluate", args,
++const char* XTraceModuleImportPhase(v8::ModuleImportPhase phase) {
++  switch (phase) {
++    case v8::ModuleImportPhase::kSource:
++      return "source";
++    case v8::ModuleImportPhase::kDefer:
++      return "defer";
++    case v8::ModuleImportPhase::kEvaluation:
++      return "evaluation";
++  }
++  return "unknown";
++}
++
++const char* XTraceClassicScriptAssetKind(
++    ScriptSourceLocationType source_location_type) {
++  switch (source_location_type) {
++    case ScriptSourceLocationType::kExternalFile:
++      return "external-script";
++    case ScriptSourceLocationType::kInline:
++    case ScriptSourceLocationType::kInlineInsideDocumentWrite:
++    case ScriptSourceLocationType::kInlineInsideGeneratedElement:
++      return "inline-script";
++    case ScriptSourceLocationType::kJavascriptUrl:
++      return "javascript-url";
++    case ScriptSourceLocationType::kEvalForScheduledAction:
++      return "dynamic-code";
++    case ScriptSourceLocationType::kInspector:
++      return "inspector-code";
++    case ScriptSourceLocationType::kInternal:
++      return "internal-script";
++    case ScriptSourceLocationType::kUnknown:
++      return "classic-script";
++  }
++  return "classic-script";
++}
++
++String XTraceContextUrl(ExecutionContext* execution_context) {
++  return execution_context ? execution_context->Url().GetString() : String();
++}
++
++String XTraceContextOrigin(ExecutionContext* execution_context) {
++  if (!execution_context || !execution_context->GetSecurityOrigin()) {
++    return String();
++  }
++  return execution_context->GetSecurityOrigin()->ToString();
++}
++
++void LogXTraceClassicScriptEvaluate(
++    ExecutionContext* execution_context,
++    const ClassicScript* classic_script,
++    int script_id,
++    const ScriptEvaluationResult& result) {
++  if (!XTraceLogger::Enabled()) {
++    return;
++  }
++
++  const String& script_url = classic_script->SourceUrl();
++  const TextPosition& start_position = classic_script->StartPosition();
++  const String context_url = XTraceContextUrl(execution_context);
++  const String context_origin = XTraceContextOrigin(execution_context);
++  String args = String::Format(
++      "[{\"script_url\":%s,\"script_url_ref\":%s,\"context_url\":%s,"
++      "\"context_url_ref\":%s,\"context_origin\":%s,"
++      "\"context_origin_ref\":%s,\"script_id\":%d,\"source_length\":%u,"
++      "\"start_line\":%d,"
++      "\"start_column\":%d,\"result_type\":%s}]",
++      XTraceLogger::QuoteJson(script_url).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(script_url).Utf8().c_str(),
++      XTraceLogger::QuoteJson(context_url).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(context_url).Utf8().c_str(),
++      XTraceLogger::QuoteJson(context_origin).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(context_origin).Utf8().c_str(),
++      script_id,
++      classic_script->SourceText().length(),
++      start_position.line_.ZeroBasedInt(),
++      start_position.column_.ZeroBasedInt(),
++      XTraceLogger::QuoteJson(String(XTraceScriptEvaluationResultType(
++                                  result.GetResultType())))
++          .Utf8()
++          .c_str());
++  XTraceLogger::LogEventWithOptionalAssetAndContext(
 +      "reverse", XTraceScriptEvaluationTerminalPhase(result.GetResultType()),
 +      "ClassicScript.evaluate", args,
-       XTraceClassicScriptAssetKind(classic_script->SourceLocationType()),
-       script_url, classic_script->SourceText().ToString(), context_url,
-       context_origin);
-@@ -208,7 +222,8 @@ void LogXTraceModuleScriptEvaluate(ExecutionContext* execution_context,
-           .Utf8()
-           .c_str());
-   XTraceLogger::LogEventNoStackWithContext(
--      "reverse", "return", "ModuleScript.evaluate", args, context_url,
++      XTraceClassicScriptAssetKind(classic_script->SourceLocationType()),
++      script_url, classic_script->SourceText().ToString(), context_url,
++      context_origin);
++}
++
++void LogXTraceModuleScriptEvaluate(ExecutionContext* execution_context,
++                                   ModuleScript* module_script,
++                                   v8::ModuleImportPhase phase,
++                                   const ScriptEvaluationResult& result) {
++  if (!XTraceLogger::Enabled()) {
++    return;
++  }
++
++  const String script_url = module_script->SourceUrl().GetString();
++  const String context_url = XTraceContextUrl(execution_context);
++  const String context_origin = XTraceContextOrigin(execution_context);
++  String args = String::Format(
++      "[{\"script_url\":%s,\"script_url_ref\":%s,\"context_url\":%s,"
++      "\"context_url_ref\":%s,\"context_origin\":%s,"
++      "\"context_origin_ref\":%s,\"import_phase\":%s,\"result_type\":%s}]",
++      XTraceLogger::QuoteJson(script_url).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(script_url).Utf8().c_str(),
++      XTraceLogger::QuoteJson(context_url).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(context_url).Utf8().c_str(),
++      XTraceLogger::QuoteJson(context_origin).Utf8().c_str(),
++      XTraceLogger::StringHashRefJson(context_origin).Utf8().c_str(),
++      XTraceLogger::QuoteJson(String(XTraceModuleImportPhase(phase)))
++          .Utf8()
++          .c_str(),
++      XTraceLogger::QuoteJson(String(XTraceScriptEvaluationResultType(
++                                  result.GetResultType())))
++          .Utf8()
++          .c_str());
++  XTraceLogger::LogEventNoStackWithContext(
 +      "reverse", XTraceScriptEvaluationTerminalPhase(result.GetResultType()),
 +      "ModuleScript.evaluate", args, context_url,
-       context_origin);
- }
- 
-@@ -407,6 +422,13 @@ v8::MaybeLocal<v8::Script> CompileScriptInternal(
++      context_origin);
++}
++
+ // In order to make sure all pending messages to be processed in
+ // v8::Function::Call, we don't call throwStackOverflowException
+ // directly. Instead, we create a v8::Function of
+@@ -272,6 +422,13 @@ v8::MaybeLocal<v8::Script> CompileScriptInternal(
          v8::ScriptCompiler::Compile(script_state->GetContext(), &source,
                                      v8::ScriptCompiler::kConsumeCodeCache);
      cache_handler->DidUseCodeCache(cached_data->rejected);
@@ -56,94 +180,285 @@ index 8da7876994..e28e8b1b32 100644
      if (cached_data->rejected) {
        // The ScriptState has an associated context. We expect the current
        // context to match the context associated with Script context when
-@@ -682,11 +704,15 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+@@ -547,10 +704,21 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
  
    ExecutionContext* execution_context = ExecutionContext::From(script_state);
    DCHECK(execution_context->IsContextThread());
 +  XTraceActivationScope xtrace_activation(
 +      "reverse", "ClassicScript.evaluate", "[]",
 +      XTraceContextUrl(execution_context), XTraceContextOrigin(execution_context));
-   int xtrace_script_id = v8::UnboundScript::kNoScriptId;
-   auto log_classic_result =
-       [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
-     LogXTraceClassicScriptEvaluate(execution_context, classic_script,
-                                    xtrace_script_id, result);
++  int xtrace_script_id = v8::UnboundScript::kNoScriptId;
++  auto log_classic_result =
++      [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
++    LogXTraceClassicScriptEvaluate(execution_context, classic_script,
++                                   xtrace_script_id, result);
 +    xtrace_activation.Complete();
-     return result;
-   };
++    return result;
++  };
  
-@@ -1029,10 +1055,14 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
+   if (policy == ExecuteScriptPolicy::kDoNotExecuteScriptWhenScriptsDisabled &&
+       !execution_context->CanExecuteScripts(kAboutToExecuteScript)) {
+-    return ScriptEvaluationResult::FromClassicNotRun();
++    return log_classic_result(ScriptEvaluationResult::FromClassicNotRun());
+   }
+ 
+   v8::Isolate* isolate = script_state->GetIsolate();
+@@ -626,6 +794,7 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+                                       compile_options, no_cache_reason,
+                                       can_use_crowdsourced_compile_hints)
+             .ToLocal(&script)) {
++      xtrace_script_id = script->ScriptId();
+       DEVTOOLS_TIMELINE_TRACE_EVENT_WITH_CATEGORIES(
+           TRACE_DISABLED_BY_DEFAULT("devtools.target-rundown"),
+           "ScriptCompiled", inspector_target_rundown_event::Data,
+@@ -702,7 +871,7 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+     if (!try_catch.CanContinue()) {
+       if (worker_or_worklet_global_scope)
+         worker_or_worklet_global_scope->ScriptController()->ForbidExecution();
+-      return ScriptEvaluationResult::FromClassicAborted();
++      return log_classic_result(ScriptEvaluationResult::FromClassicAborted());
+     }
+ 
+     if (!try_catch.HasCaught()) {
+@@ -711,7 +880,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+       v8::Local<v8::Value> result;
+       bool success = maybe_result.ToLocal(&result);
+       DCHECK(success);
+-      return ScriptEvaluationResult::FromClassicSuccess(result);
++      return log_classic_result(
++          ScriptEvaluationResult::FromClassicSuccess(result));
+     }
+ 
+     DCHECK(maybe_result.IsEmpty());
+@@ -729,7 +899,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+       // reported to WorkerGlobalScope.onerror via `TryCatch::SetVerbose(true)`
+       // called at top-level worker script evaluation.
+       try_catch.ReThrow();
+-      return ScriptEvaluationResult::FromClassicExceptionRethrown();
++      return log_classic_result(
++          ScriptEvaluationResult::FromClassicExceptionRethrown());
+     }
+ 
+     // Step 8.1.3. Otherwise, rethrow errors is false. Perform the following
+@@ -737,8 +908,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+     if (!rethrow_errors.ShouldRethrow()) {
+       // #report-the-error for rethrow errors == true is already handled via
+       // `TryCatch::SetVerbose(true)` above.
+-      return ScriptEvaluationResult::FromClassicException(
+-          try_catch.Exception());
++      return log_classic_result(
++          ScriptEvaluationResult::FromClassicException(try_catch.Exception()));
+     }
+   }
+   // |v8::TryCatch| is (and should be) exited, before ThrowException() below.
+@@ -757,7 +928,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
+       isolate,
+       V8ThrowDOMException::CreateOrEmpty(
+           isolate, DOMExceptionCode::kNetworkError, rethrow_errors.Message()));
+-  return ScriptEvaluationResult::FromClassicExceptionRethrown();
++  return log_classic_result(
++      ScriptEvaluationResult::FromClassicExceptionRethrown());
+ }
+ 
+ v8::MaybeLocal<v8::Value> V8ScriptRunner::CallAsConstructor(
+@@ -883,6 +1055,16 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
    DCHECK_EQ(Modulator::From(script_state), module_script->SettingsObject());
    ExecutionContext* execution_context = ExecutionContext::From(script_state);
    v8::Isolate* isolate = script_state->GetIsolate();
 +  XTraceActivationScope xtrace_activation(
 +      "reverse", "ModuleScript.evaluate", "[]",
 +      XTraceContextUrl(execution_context), XTraceContextOrigin(execution_context));
-   auto log_module_result =
-       [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
-     LogXTraceModuleScriptEvaluate(execution_context, module_script, phase,
-                                   result);
++  auto log_module_result =
++      [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
++    LogXTraceModuleScriptEvaluate(execution_context, module_script, phase,
++                                  result);
 +    xtrace_activation.Complete();
-     return result;
-   };
++    return result;
++  };
  
-diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-index b2a722741b..c769be9bd7 100644
---- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-+++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -4,6 +4,7 @@
+   // TODO(crbug.com/1151165): Ideally v8::Context should be entered before
+   // CanExecuteScripts().
+@@ -891,7 +1073,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
+   // <spec step="3">Check if we can run script with settings. If this returns
+   // "do not run" then return NormalCompletion(empty).</spec>
+   if (!execution_context->CanExecuteScripts(kAboutToExecuteScript)) {
+-    return ScriptEvaluationResult::FromModuleNotRun();
++    return log_module_result(ScriptEvaluationResult::FromModuleNotRun());
+   }
  
- #include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
+   // <spec step="4">Prepare to run script given settings.</spec>
+@@ -948,7 +1130,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
+             : record->Evaluate(script_state->GetContext());
  
-+#include <algorithm>
- #include <atomic>
- #include <cctype>
- #include <memory>
-@@ -29,6 +30,8 @@
- #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
- #include "third_party/blink/public/mojom/xtrace/xtrace.mojom-blink.h"
- #include "third_party/blink/public/platform/platform.h"
-+#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
-+#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
- #include "v8/include/v8.h"
+     if (!try_catch.CanContinue())
+-      return ScriptEvaluationResult::FromModuleAborted();
++      return log_module_result(ScriptEvaluationResult::FromModuleAborted());
  
- namespace blink {
-@@ -39,17 +42,20 @@ constexpr char kFileEnv[] = "XTRACE_FILE";
- constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
- constexpr char kCaptureValuesEnv[] = "XTRACE_CAPTURE_VALUES";
- constexpr char kCaptureAssetsEnv[] = "XTRACE_CAPTURE_ASSETS";
-+constexpr char kCausalityEnv[] = "XTRACE_CAUSALITY";
- constexpr char kEnableSwitch[] = "xtrace-enable";
- constexpr char kFileSwitch[] = "xtrace-file";
- constexpr char kCategoriesSwitch[] = "xtrace-categories";
- constexpr char kCaptureValuesSwitch[] = "xtrace-capture-values";
- constexpr char kCaptureAssetsSwitch[] = "xtrace-capture-assets";
-+constexpr char kCausalitySwitch[] = "xtrace-causality";
- 
- struct XTraceConfig {
-   bool enabled = false;
-   std::string categories = "reverse,fingerprint";
-   std::string capture_values = "full";
-   std::string capture_assets = "full";
-+  std::string causality = "off";
-   std::string session_id;
-   std::string trace_stem;
- };
-@@ -118,6 +124,8 @@ XTraceConfig ReadConfigFromRuntime() {
-   config.capture_assets =
-       ReadRuntimeString(kCaptureAssetsSwitch, kCaptureAssetsEnv)
-           .value_or("full");
-+  config.causality =
-+      ReadRuntimeString(kCausalitySwitch, kCausalityEnv).value_or("off");
-   config.session_id = MakeSessionId();
-   if (trace_file_path) {
-     config.trace_stem =
-@@ -137,16 +145,21 @@ std::string QuoteJsonString(std::string_view value) {
-   return quoted;
+     DCHECK(!try_catch.HasCaught());
+     result = ScriptEvaluationResult::FromModuleSuccess(
+@@ -992,7 +1174,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
+   // <spec step="8">Clean up after running script with settings.</spec>
+   // Partially implemented in MicrotaskScope destructor and the
+   // v8::Context::Scope destructor.
+-  return result;
++  return log_module_result(std::move(result));
  }
  
--bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
--  if (!config.enabled || category.empty()) {
+ void V8ScriptRunner::ReportException(v8::Isolate* isolate,
+diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
+new file mode 100644
+index 0000000000..f0d71152c1
+--- /dev/null
++++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
+@@ -0,0 +1,1023 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cctype>
++#include <memory>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <unordered_set>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/environment.h"
++#include "base/files/file_path.h"
++#include "base/hash/sha1.h"
++#include "base/json/string_escape.h"
++#include "base/no_destructor.h"
++#include "base/process/process_handle.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "base/threading/platform_thread.h"
++#include "base/time/time.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
++#include "third_party/blink/public/mojom/xtrace/xtrace.mojom-blink.h"
++#include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
++#include "v8/include/v8.h"
++
++namespace blink {
++namespace {
++
++constexpr char kBindingsChannelName[] = "bindings";
++constexpr char kEnableEnv[] = "XTRACE_ENABLE";
++constexpr char kFileEnv[] = "XTRACE_FILE";
++constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
++constexpr char kCaptureValuesEnv[] = "XTRACE_CAPTURE_VALUES";
++constexpr char kCaptureAssetsEnv[] = "XTRACE_CAPTURE_ASSETS";
++constexpr char kCausalityEnv[] = "XTRACE_CAUSALITY";
++constexpr char kEnableSwitch[] = "xtrace-enable";
++constexpr char kFileSwitch[] = "xtrace-file";
++constexpr char kCategoriesSwitch[] = "xtrace-categories";
++constexpr char kCaptureValuesSwitch[] = "xtrace-capture-values";
++constexpr char kCaptureAssetsSwitch[] = "xtrace-capture-assets";
++constexpr char kCausalitySwitch[] = "xtrace-causality";
++
++struct XTraceConfig {
++  bool enabled = false;
++  std::string categories = "reverse,fingerprint";
++  std::string capture_values = "full";
++  std::string capture_assets = "full";
++  std::string causality = "off";
++  std::string session_id;
++  std::string trace_stem;
++};
++
++std::optional<base::FilePath> ReadTraceFilePathFromRuntime() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(kEnableSwitch)) {
++    base::FilePath trace_file = command_line->GetSwitchValuePath(kFileSwitch);
++    if (!trace_file.empty()) {
++      return trace_file;
++    }
++  }
++
++  std::unique_ptr<base::Environment> env = base::Environment::Create();
++  std::optional<std::string> enabled = env->GetVar(kEnableEnv);
++  if (!enabled || *enabled != "1") {
++    return std::nullopt;
++  }
++
++  std::optional<std::string> trace_file = env->GetVar(kFileEnv);
++  if (!trace_file || trace_file->empty()) {
++    return std::nullopt;
++  }
++
++  return base::FilePath::FromUTF8Unsafe(*trace_file);
++}
++
++std::optional<std::string> ReadRuntimeString(const char* switch_name,
++                                             const char* env_name) {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switch_name)) {
++    std::string value = command_line->GetSwitchValueASCII(switch_name);
++    if (!value.empty()) {
++      return value;
++    }
++  }
++
++  std::unique_ptr<base::Environment> env = base::Environment::Create();
++  std::string env_name_string(env_name);
++  std::optional<std::string> value = env->GetVar(env_name_string);
++  if (value && !value->empty()) {
++    return value;
++  }
++
++  return std::nullopt;
++}
++
++std::string MakeSessionId() {
++  const int64_t wall_time_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
++  return base::NumberToString(base::GetCurrentProcId()) + "-" +
++         base::NumberToString(wall_time_us);
++}
++
++XTraceConfig ReadConfigFromRuntime() {
++  XTraceConfig config;
++  std::optional<base::FilePath> trace_file_path = ReadTraceFilePathFromRuntime();
++  config.enabled = trace_file_path.has_value();
++  config.categories = ReadRuntimeString(kCategoriesSwitch, kCategoriesEnv)
++                          .value_or("reverse,fingerprint");
++  config.capture_values =
++      ReadRuntimeString(kCaptureValuesSwitch, kCaptureValuesEnv)
++          .value_or("full");
++  config.capture_assets =
++      ReadRuntimeString(kCaptureAssetsSwitch, kCaptureAssetsEnv)
++          .value_or("full");
++  config.causality =
++      ReadRuntimeString(kCausalitySwitch, kCausalityEnv).value_or("off");
++  config.session_id = MakeSessionId();
++  if (trace_file_path) {
++    config.trace_stem =
++        trace_file_path->BaseName().RemoveExtension().AsUTF8Unsafe();
++  }
++  return config;
++}
++
++const XTraceConfig& GetCachedConfig() {
++  static base::NoDestructor<XTraceConfig> config(ReadConfigFromRuntime());
++  return *config;
++}
++
++std::string QuoteJsonString(std::string_view value) {
++  std::string quoted;
++  base::EscapeJSONString(value, /*put_in_quotes=*/true, &quoted);
++  return quoted;
++}
++
 +// F1/B7: the category decision reads the hub's EFFECTIVE-config snapshot
 +// (launch categories, or the browser's last UpdateConfig), not the static
 +// launch copy. Callers take one snapshot per event and feed the same
@@ -152,33 +467,30 @@ index b2a722741b..c769be9bd7 100644
 +bool CategoriesInclude(std::string_view categories,
 +                       std::string_view category) {
 +  if (category.empty()) {
-     return false;
-   }
--  if (config.categories == "all") {
++    return false;
++  }
 +  if (categories == "all") {
-     return true;
-   }
--
-   for (std::string_view token :
--       base::SplitStringPiece(config.categories, ",", base::TRIM_WHITESPACE,
++    return true;
++  }
++  for (std::string_view token :
 +       base::SplitStringPiece(categories, ",", base::TRIM_WHITESPACE,
-                               base::SPLIT_WANT_NONEMPTY)) {
-     if (token == category) {
-       return true;
-@@ -155,11 +168,55 @@ bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
-   return false;
- }
- 
--uint64_t NextSequenceNumber() {
++                              base::SPLIT_WANT_NONEMPTY)) {
++    if (token == category) {
++      return true;
++    }
++  }
++  return false;
++}
++
 +std::shared_ptr<const xtrace::EffectiveCaptureConfig> EntrySnapshot() {
 +  return xtrace::XTraceProducerHub::Get()->SnapshotConfig();
 +}
 +
 +uint64_t NextActivationSequenceNumber() {
-   static std::atomic<uint64_t> sequence{0};
-   return ++sequence;
- }
- 
++  static std::atomic<uint64_t> sequence{0};
++  return ++sequence;
++}
++
 +bool CausalitySyncEnabled(const XTraceConfig& config) {
 +  return config.enabled && config.causality == "sync";
 +}
@@ -219,29 +531,99 @@ index b2a722741b..c769be9bd7 100644
 +  line->append("\"");
 +}
 +
- std::string Sha1Ref(std::string_view value) {
-   return "sha1:" + base::HexEncode(base::SHA1HashString(value));
- }
-@@ -247,162 +304,263 @@ std::string SanitizeAssetIdForPath(std::string_view asset_id) {
-   return safe.empty() ? "asset" : safe;
- }
- 
--mojom::blink::XTraceHost* GetXTraceHost();
--
- bool AssetAlreadySent(std::string_view asset_id) {
-   thread_local auto* sent_assets = new std::unordered_set<std::string>();
-   auto [_, inserted] = sent_assets->insert(std::string(asset_id));
-   return !inserted;
- }
- 
--std::string BuildScriptAssetFieldsAndSend(const XTraceConfig& config,
--                                          const char* kind,
--                                          const String& url,
--                                          const String& source,
--                                          uint64_t first_seq) {
--  if (!CaptureAssetsEnabled(config) || source.empty()) {
--    return std::string();
--  }
++std::string Sha1Ref(std::string_view value) {
++  return "sha1:" + base::HexEncode(base::SHA1HashString(value));
++}
++
++std::string V8StringToUtf8(v8::Isolate* isolate, v8::Local<v8::String> value) {
++  if (value.IsEmpty()) {
++    return std::string();
++  }
++  v8::String::Utf8Value utf8(isolate, value);
++  if (!*utf8) {
++    return std::string();
++  }
++  return std::string(*utf8, utf8.length());
++}
++
++std::string CaptureJavaScriptStack() {
++  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
++  if (!isolate) {
++    return "[]";
++  }
++
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::StackTrace> stack_trace =
++      v8::StackTrace::CurrentStackTrace(isolate, 16,
++                                        v8::StackTrace::kDetailed);
++  if (stack_trace.IsEmpty() || stack_trace->GetFrameCount() == 0) {
++    return "[]";
++  }
++
++  std::string stack;
++  stack.append("[");
++  for (int i = 0; i < stack_trace->GetFrameCount(); ++i) {
++    v8::Local<v8::StackFrame> frame = stack_trace->GetFrame(isolate, i);
++    if (frame.IsEmpty()) {
++      continue;
++    }
++    if (stack.size() > 1) {
++      stack.append(",");
++    }
++    stack.append("{\"function\":");
++    stack.append(QuoteJsonString(V8StringToUtf8(
++        isolate, frame->GetFunctionName())));
++    stack.append(",\"url\":");
++    stack.append(QuoteJsonString(V8StringToUtf8(
++        isolate, frame->GetScriptNameOrSourceURL())));
++    stack.append(",\"line\":");
++    stack.append(base::NumberToString(frame->GetLineNumber()));
++    stack.append(",\"column\":");
++    stack.append(base::NumberToString(frame->GetColumn()));
++    stack.append(",\"script_id\":");
++    stack.append(base::NumberToString(frame->GetScriptId()));
++    stack.append(",\"is_eval\":");
++    stack.append(frame->IsEval() ? "true" : "false");
++    stack.append(",\"is_constructor\":");
++    stack.append(frame->IsConstructor() ? "true" : "false");
++    stack.append("}");
++  }
++  stack.append("]");
++  return stack;
++}
++
++bool CaptureAssetsEnabled(const XTraceConfig& config) {
++  return config.capture_assets == "summary" || config.capture_assets == "full";
++}
++
++bool CaptureFullAssetsEnabled(const XTraceConfig& config) {
++  return config.capture_assets == "full";
++}
++
++bool IsInternalScriptUrl(const String& url) {
++  std::string url_utf8 = url.Utf8();
++  return url_utf8.starts_with("chrome://") ||
++         url_utf8.starts_with("chrome-untrusted://") ||
++         url_utf8.starts_with("devtools://") ||
++         url_utf8.starts_with("chrome-extension://");
++}
++
++std::string SanitizeAssetIdForPath(std::string_view asset_id) {
++  std::string safe;
++  safe.reserve(asset_id.size());
++  for (char c : asset_id) {
++    unsigned char uc = static_cast<unsigned char>(c);
++    safe.push_back(std::isalnum(uc) ? c : '_');
++  }
++  return safe.empty() ? "asset" : safe;
++}
++
++bool AssetAlreadySent(std::string_view asset_id) {
++  thread_local auto* sent_assets = new std::unordered_set<std::string>();
++  auto [_, inserted] = sent_assets->insert(std::string(asset_id));
++  return !inserted;
++}
++
 +// Event-side asset references (schema v3 §5.3): the truncation quadruple
 +// travels with the event so consumers can judge without table lookups.
 +// The full source never appears in the event line (V06 closure).
@@ -252,22 +634,15 @@ index b2a722741b..c769be9bd7 100644
 +  uint64_t original_size = 0;
 +  bool captured = false;
 +};
- 
++
 +ScriptAssetRef PrepareScriptAssetRef(const XTraceConfig& config,
 +                                     const char* kind,
 +                                     const String& url,
 +                                     const String& source) {
 +  ScriptAssetRef ref;
-   std::string source_utf8 = source.Utf8();
-   std::string url_utf8 = url.Utf8();
-   std::string kind_string(kind ? kind : "unknown");
--  std::string source_hash = Sha1Ref(source_utf8);
--  std::string asset_hash_input = kind_string + "\n" + url_utf8 + "\n" + source_utf8;
--  std::string asset_id = Sha1Ref(asset_hash_input);
--
--  std::string content_path;
--  std::string content;
--  if (CaptureFullAssetsEnabled(config)) {
++  std::string source_utf8 = source.Utf8();
++  std::string url_utf8 = url.Utf8();
++  std::string kind_string(kind ? kind : "unknown");
 +  ref.sha1 = Sha1Ref(source_utf8);
 +  ref.original_size = source_utf8.size();
 +  std::string asset_hash_input =
@@ -275,57 +650,8 @@ index b2a722741b..c769be9bd7 100644
 +  ref.asset_id = Sha1Ref(asset_hash_input);
 +  ref.captured = CaptureFullAssetsEnabled(config);
 +  if (ref.captured) {
-     std::string trace_stem =
-         config.trace_stem.empty() ? "trace_unknown" : config.trace_stem;
--    content_path = "assets/" + trace_stem + "/" +
--                   SanitizeAssetIdForPath(asset_id) + ".js";
--    content = source_utf8;
--  }
--
--  if (!AssetAlreadySent(asset_id)) {
--    std::string manifest;
--    manifest.append("{\"asset_id\":");
--    manifest.append(QuoteJsonString(asset_id));
--    manifest.append(",\"kind\":");
--    manifest.append(QuoteJsonString(kind_string));
--    manifest.append(",\"url\":");
--    manifest.append(QuoteJsonString(url_utf8));
--    manifest.append(",\"content_path\":");
--    manifest.append(QuoteJsonString(content_path));
--    manifest.append(",\"sha1\":");
--    manifest.append(QuoteJsonString(source_hash));
--    manifest.append(",\"size\":");
--    manifest.append(base::NumberToString(source_utf8.size()));
--    manifest.append(",\"truncated\":");
--    manifest.append("false");
--    manifest.append(",\"first_seq\":");
--    manifest.append(base::NumberToString(first_seq));
--    manifest.append(",\"frame_url\":\"\"");
--    manifest.append(",\"origin\":\"\"");
--    manifest.append(",\"original_size\":");
--    manifest.append(base::NumberToString(source_utf8.size()));
--    manifest.append(",\"source\":");
--    manifest.append(QuoteJsonString(source_utf8));
--    manifest.append(",\"retrieval_status\":");
--    manifest.append(QuoteJsonString(CaptureFullAssetsEnabled(config)
--                                        ? "captured"
--                                        : "summary"));
--    manifest.append("}");
--    GetXTraceHost()->LogAsset(String::FromUtf8(content_path),
--                              String::FromUtf8(manifest),
--                              String::FromUtf8(content));
--  }
--
--  std::string fields;
--  fields.append("\"asset_id\":");
--  fields.append(QuoteJsonString(asset_id));
--  fields.append(",\"source_hash\":");
--  fields.append(QuoteJsonString(source_hash));
--  fields.append(",\"source\":");
--  fields.append(QuoteJsonString(source_utf8));
--  fields.append(",\"script_url\":");
--  fields.append(QuoteJsonString(url_utf8));
--  return fields;
++    std::string trace_stem =
++        config.trace_stem.empty() ? "trace_unknown" : config.trace_stem;
 +    ref.content_path = "assets/" + trace_stem + "/" +
 +                       SanitizeAssetIdForPath(ref.asset_id) + ".js";
 +  }
@@ -380,20 +706,14 @@ index b2a722741b..c769be9bd7 100644
 +  row.append("}");
 +  producer->SendAsset(std::move(row), ref.content_path,
 +                      ref.captured ? source.Utf8() : std::string());
- }
- 
--mojom::blink::XTraceHost* GetXTraceHost() {
--  thread_local mojo::Remote<mojom::blink::XTraceHost> host;
--  if (!host.is_bound()) {
--    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
--        host.BindNewPipeAndPassReceiver());
++}
++
 +bool IsActivationTerminal(const char* phase, const char* api) {
 +  if (!phase || !api ||
 +      (std::string_view(phase) != "return" &&
 +       std::string_view(phase) != "exception")) {
 +    return false;
-   }
--  return host.get();
++  }
 +  const std::vector<XTraceActivation>& stack = ActivationStack();
 +  return !stack.empty() && stack.back().api == api;
 +}
@@ -423,18 +743,8 @@ index b2a722741b..c769be9bd7 100644
 +    fields.depth = stack.back().depth + 1;
 +  }
 +  return fields;
- }
- 
--void LogEventWithSequence(const XTraceConfig& config,
--                          const char* category,
--                          const char* phase,
--                          const char* api,
--                          const String& args_json,
--                          uint64_t seq,
--                          std::string_view extra_fields,
--                          bool capture_stack,
--                          std::string_view frame_url,
--                          std::string_view origin) {
++}
++
 +// Schema v3 §3.4: the causality object is always present. `duration_us`
 +// is a decimal string on paired terminal events, otherwise null.
 +void AppendCausalityObject(std::string* line,
@@ -477,22 +787,28 @@ index b2a722741b..c769be9bd7 100644
 +               const String* asset_url = nullptr,
 +               const String* asset_source = nullptr,
 +               std::string_view extra_top_fields = std::string_view(),
-+               const std::string& config_generation = std::string()) {
++               const std::string& config_generation = std::string(),
++               // DP2 ruling (P5 review fix 4): every v3 envelope carries a
++               // top-level channel with a real value. Handwritten hook
++               // entry points (the LogEvent* family) default to "impl";
++               // the generated-callback path passes "bindings"
++               // explicitly. The webidl_entry/webidl_outcome sub-objects
++               // keep their own channel copies for self-containment.
++               const char* channel = "impl") {
 +  xtrace::XTraceThreadProducer* producer =
 +      xtrace::XTraceThreadProducer::Current();
 +  if (!producer) {
 +    return;
 +  }
 +
-   const int64_t wall_time_us =
-       (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
-   const int64_t mono_time_us =
-       base::TimeTicks::Now().since_origin().InMicroseconds();
--  std::string event_id = config.session_id + ":" + base::NumberToString(seq);
- 
-   std::string args = args_json.Utf8();
-   std::string stack_json = capture_stack ? CaptureJavaScriptStack() : "[]";
- 
++  const int64_t wall_time_us =
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
++  const int64_t mono_time_us =
++      base::TimeTicks::Now().since_origin().InMicroseconds();
++
++  std::string args = args_json.Utf8();
++  std::string stack_json = capture_stack ? CaptureJavaScriptStack() : "[]";
++
 +  ScriptAssetRef asset_ref;
 +  bool has_asset_ref = false;
 +  std::string extra_fields;
@@ -512,55 +828,30 @@ index b2a722741b..c769be9bd7 100644
 +      causal_fields ? *causal_fields
 +                    : CurrentCausalityFields(config, phase, api, mono_time_us);
 +
-   std::string line;
--  line.append("{\"schema_version\":1");
--  line.append(",\"event_id\":");
--  line.append(QuoteJsonString(event_id));
--  line.append(",\"session_id\":");
--  line.append(QuoteJsonString(config.session_id));
--  line.append(",\"seq\":");
--  line.append(base::NumberToString(seq));
--  line.append(",\"session_seq\":");
--  line.append(base::NumberToString(seq));
--  line.append(",\"t\":");
--  line.append(QuoteJsonString(phase));
--  line.append(",\"ts\":");
--  line.append(base::NumberToString(wall_time_us));
--  line.append(",\"wall_time_us\":");
--  line.append(base::NumberToString(wall_time_us));
--  line.append(",\"mono_time_us\":");
++  std::string line;
 +  line.append("{\"schema_version\":3");
 +  // config_generation is stamped ONCE, in the identity tail appended by
 +  // AcceptEvent from the caller's effective-config snapshot (F1/B7).
 +  line.append(",\"mono_time_us\":\"");
-   line.append(base::NumberToString(mono_time_us));
++  line.append(base::NumberToString(mono_time_us));
 +  line.append("\",\"wall_time_us\":\"");
 +  line.append(base::NumberToString(wall_time_us));
 +  line.append("\",\"pid\":");
 +  line.append(base::NumberToString(base::GetCurrentProcId()));
 +  line.append(",\"tid\":");
 +  line.append(base::NumberToString(base::PlatformThread::CurrentId().raw()));
-   line.append(",\"category\":");
-   line.append(QuoteJsonString(category));
-   line.append(",\"phase\":");
-   line.append(QuoteJsonString(phase));
--  line.append(",\"pid\":");
--  line.append(base::NumberToString(base::GetCurrentProcId()));
--  line.append(",\"tid\":");
--  line.append(base::NumberToString(base::PlatformThread::CurrentId().raw()));
-   line.append(",\"api\":");
-   line.append(QuoteJsonString(api));
-   line.append(",\"args\":");
-   line.append(args);
-   line.append(",\"stack\":");
-   line.append(stack_json);
--  line.append(",\"frame_url\":");
--  line.append(QuoteJsonString(frame_url));
--  line.append(",\"origin\":");
--  line.append(QuoteJsonString(origin));
--  line.append(",\"result\":null");
--  line.append(",\"error\":null");
--  line.append(",\"truncated\":false");
++  line.append(",\"category\":");
++  line.append(QuoteJsonString(category));
++  line.append(",\"phase\":");
++  line.append(QuoteJsonString(phase));
++  line.append(",\"api\":");
++  line.append(QuoteJsonString(api));
++  line.append(",\"channel\":");
++  line.append(QuoteJsonString(channel ? channel : "impl"));
++  line.append(",\"args\":");
++  line.append(args);
++  line.append(",\"stack\":");
++  line.append(stack_json);
 +  line.append(",\"attribution\":");
 +  if (frame_url.empty() && origin.empty()) {
 +    // Schema v3 §3.3: absence is explicit; never empty-string placeholders
@@ -581,29 +872,26 @@ index b2a722741b..c769be9bd7 100644
 +    }
 +    extra_fields.append(extra_top_fields);
 +  }
-   if (!extra_fields.empty()) {
-     line.append(",");
-     line.append(extra_fields);
-   }
--  line.append("}\n");
++  if (!extra_fields.empty()) {
++    line.append(",");
++    line.append(extra_fields);
++  }
 +  line.append("}");
- 
--  // LogBatch is intentionally not used yet; per-event Log keeps current
--  // ordering/compatibility until renderer-side buffering lands.
--  GetXTraceHost()->Log(String::FromUtf8(line));
++
 +  std::optional<uint64_t> seq =
 +      producer->AcceptEvent(std::move(line), config_generation);
 +  if (seq && has_asset_ref && !AssetAlreadySent(asset_ref.asset_id)) {
 +    SendScriptAssetRow(producer, asset_kind, *asset_url, *asset_source,
 +                       asset_ref, *seq);
 +  }
- }
- 
- }  // namespace
-@@ -411,6 +569,132 @@ bool XTraceLogger::Enabled() {
-   return GetCachedConfig().enabled;
- }
- 
++}
++
++}  // namespace
++
++bool XTraceLogger::Enabled() {
++  return GetCachedConfig().enabled;
++}
++
 +uint64_t XTraceLogger::CurrentActivationToken() {
 +  const std::vector<XTraceActivation>& stack = ActivationStack();
 +  return stack.empty() ? 0 : stack.back().token;
@@ -730,27 +1018,48 @@ index b2a722741b..c769be9bd7 100644
 +  CompleteActivation(token);
 +}
 +
- String XTraceLogger::QuoteJson(const String& value) {
-   return String::FromUtf8(QuoteJsonString(value.Utf8()));
- }
-@@ -445,14 +729,22 @@ void XTraceLogger::LogEvent(const char* category,
-                             const char* api,
-                             const String& args_json) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++String XTraceLogger::QuoteJson(const String& value) {
++  return String::FromUtf8(QuoteJsonString(value.Utf8()));
++}
++
++String XTraceLogger::StringHashRefJson(const String& value) {
++  if (value.IsNull()) {
++    return String("null");
++  }
++  std::string ref = "string_ref:sha1:" + base::HexEncode(
++      base::SHA1HashString(value.Utf8()));
++  return String::FromUtf8(QuoteJsonString(ref));
++}
++
++String XTraceLogger::NetworkCorrelationKey(const String& method,
++                                           const String& url) {
++  std::string material = base::ToUpperASCII(method.Utf8()) + "\n" + url.Utf8();
++  return String::FromUtf8(Sha1Ref(material));
++}
++
++void XTraceLogger::LogCall(const char* api, const String& args_json) {
++  LogEvent("fingerprint", "call", api, args_json);
++}
++
++void XTraceLogger::LogCall(const char* category,
++                           const char* api,
++                           const String& args_json) {
++  LogEvent(category, "call", api, args_json);
++}
++
++void XTraceLogger::LogEvent(const char* category,
++                            const char* phase,
++                            const char* api,
++                            const String& args_json) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  const uint64_t seq = NextSequenceNumber();
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       std::string_view(), true, std::string_view(),
--                       std::string_view());
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -759,28 +1068,23 @@ index b2a722741b..c769be9bd7 100644
 +            /*capture_stack=*/true, std::string_view(), std::string_view(),
 +            nullptr, nullptr, nullptr, nullptr, std::string_view(),
 +            snapshot->generation);
- }
- 
- void XTraceLogger::LogEventWithContext(const char* category,
-@@ -462,15 +754,84 @@ void XTraceLogger::LogEventWithContext(const char* category,
-                                        const String& frame_url,
-                                        const String& origin) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++}
++
++void XTraceLogger::LogEventWithContext(const char* category,
++                                       const char* phase,
++                                       const char* api,
++                                       const String& args_json,
++                                       const String& frame_url,
++                                       const String& origin) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  std::string frame_url_utf8 = frame_url.Utf8();
--  std::string origin_utf8 = origin.Utf8();
--  const uint64_t seq = NextSequenceNumber();
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       std::string_view(), true, frame_url_utf8, origin_utf8);
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -807,8 +1111,9 @@ index b2a722741b..c769be9bd7 100644
 +  if (!CategoriesInclude(snapshot->categories, "reverse")) {
 +    return;
 +  }
-+  // Entry facts as top-level extra fields (channel always explicit —
-+  // DP2 ruling: no default semantics).
++  // Entry facts as a webidl_entry sub-object (channel explicit inside for
++  // self-containment — DP2 ruling: no default semantics). The envelope's
++  // top-level channel is set by EmitEvent's parameter below.
 +  std::string extra;
 +  extra.append("\"webidl_entry\":{");
 +  extra.append("\"channel\":\"bindings\",");
@@ -826,11 +1131,13 @@ index b2a722741b..c769be9bd7 100644
 +  EmitEvent(config, "reverse", "call", api ? api : "WebIDL.entry",
 +            String("[]"),
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
-+            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation);
++            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation,
++            /*channel=*/kBindingsChannelName);
 +}
 +
 +void XTraceLogger::LogGeneratedOutcome(uint64_t call_token,
-+                                        const char* outcome) {
++                                        const char* outcome,
++                                        int selected_overload) {
 +  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
@@ -847,31 +1154,33 @@ index b2a722741b..c769be9bd7 100644
 +  extra.append(base::NumberToString(call_token));
 +  extra.append(",\"outcome\":");
 +  extra.append(QuoteJsonString(outcome ? outcome : "unknown"));
++  if (selected_overload >= 0) {
++    // Dispatcher routing fact (DP1: no second entry event) — the selected
++    // 0-based overload index rides the paired terminal event.
++    extra.append(",\"selected_overload\":\"");
++    extra.append(base::NumberToString(selected_overload));
++    extra.append("\"");
++  }
 +  extra.append("}");
 +  EmitEvent(config, "reverse", "return", "WebIDL.outcome", String("[]"),
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
-+            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation);
- }
- 
- void XTraceLogger::LogEventNoStack(const char* category,
-@@ -478,14 +839,22 @@ void XTraceLogger::LogEventNoStack(const char* category,
-                                    const char* api,
-                                    const String& args_json) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation,
++            /*channel=*/kBindingsChannelName);
++}
++
++void XTraceLogger::LogEventNoStack(const char* category,
++                                   const char* phase,
++                                   const char* api,
++                                   const String& args_json) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  const uint64_t seq = NextSequenceNumber();
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       std::string_view(), false, std::string_view(),
--                       std::string_view());
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -880,28 +1189,23 @@ index b2a722741b..c769be9bd7 100644
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
 +            nullptr, nullptr, nullptr, nullptr, std::string_view(),
 +            snapshot->generation);
- }
- 
- void XTraceLogger::LogEventNoStackWithContext(const char* category,
-@@ -495,15 +864,22 @@ void XTraceLogger::LogEventNoStackWithContext(const char* category,
-                                               const String& frame_url,
-                                               const String& origin) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++}
++
++void XTraceLogger::LogEventNoStackWithContext(const char* category,
++                                              const char* phase,
++                                              const char* api,
++                                              const String& args_json,
++                                              const String& frame_url,
++                                              const String& origin) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  std::string frame_url_utf8 = frame_url.Utf8();
--  std::string origin_utf8 = origin.Utf8();
--  const uint64_t seq = NextSequenceNumber();
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       std::string_view(), false, frame_url_utf8, origin_utf8);
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -910,14 +1214,16 @@ index b2a722741b..c769be9bd7 100644
 +            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr,
 +            nullptr, nullptr, nullptr, std::string_view(),
 +            snapshot->generation);
- }
- 
- void XTraceLogger::LogAssetEvent(const char* category,
-@@ -514,19 +890,25 @@ void XTraceLogger::LogAssetEvent(const char* category,
-                                  const String& url,
-                                  const String& source) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++}
++
++void XTraceLogger::LogAssetEvent(const char* category,
++                                 const char* phase,
++                                 const char* api,
++                                 const String& args_json,
++                                 const char* kind,
++                                 const String& url,
++                                 const String& source) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
@@ -928,41 +1234,33 @@ index b2a722741b..c769be9bd7 100644
 +  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
-     return;
-   }
-   if (IsInternalScriptUrl(url)) {
-     return;
-   }
--
--  const uint64_t seq = NextSequenceNumber();
--  std::string extra_fields =
--      BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       extra_fields, true, std::string_view(),
--                       std::string_view());
++    return;
++  }
++  if (IsInternalScriptUrl(url)) {
++    return;
++  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/true, std::string_view(), std::string_view(),
 +            nullptr, kind, &url, &source, std::string_view(),
 +            snapshot->generation);
- }
- 
- void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-@@ -537,18 +919,30 @@ void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-                                              const String& url,
-                                              const String& source) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++}
++
++void XTraceLogger::LogEventWithOptionalAsset(const char* category,
++                                             const char* phase,
++                                             const char* api,
++                                             const String& args_json,
++                                             const char* kind,
++                                             const String& url,
++                                             const String& source) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  const uint64_t seq = NextSequenceNumber();
--  std::string extra_fields;
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -970,40 +1268,36 @@ index b2a722741b..c769be9bd7 100644
 +  const char* asset_kind = nullptr;
 +  const String* asset_url = nullptr;
 +  const String* asset_source = nullptr;
-   if (!IsInternalScriptUrl(url)) {
--    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
++  if (!IsInternalScriptUrl(url)) {
 +    asset_kind = kind;
 +    asset_url = &url;
 +    asset_source = &source;
-   }
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       extra_fields, false, std::string_view(),
--                       std::string_view());
++  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
 +            nullptr, asset_kind, asset_url, asset_source, std::string_view(),
 +            snapshot->generation);
- }
- 
- void XTraceLogger::LogEventWithOptionalAssetAndContext(
-@@ -562,19 +956,47 @@ void XTraceLogger::LogEventWithOptionalAssetAndContext(
-     const String& frame_url,
-     const String& origin) {
-   const XTraceConfig& config = GetCachedConfig();
--  if (!CategoryEnabled(config, category)) {
++}
++
++void XTraceLogger::LogEventWithOptionalAssetAndContext(
++    const char* category,
++    const char* phase,
++    const char* api,
++    const String& args_json,
++    const char* kind,
++    const String& url,
++    const String& source,
++    const String& frame_url,
++    const String& origin) {
++  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // N3-part2 conservative non-acceptance: until the browser's config
 +      // (initial backfill included) has been applied, this process emits
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-     return;
-   }
--
--  std::string frame_url_utf8 = frame_url.Utf8();
--  std::string origin_utf8 = origin.Utf8();
--  const uint64_t seq = NextSequenceNumber();
--  std::string extra_fields;
++    return;
++  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
 +    return;
@@ -1011,14 +1305,11 @@ index b2a722741b..c769be9bd7 100644
 +  const char* asset_kind = nullptr;
 +  const String* asset_url = nullptr;
 +  const String* asset_source = nullptr;
-   if (!IsInternalScriptUrl(url)) {
--    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
++  if (!IsInternalScriptUrl(url)) {
 +    asset_kind = kind;
 +    asset_url = &url;
 +    asset_source = &source;
-   }
--  LogEventWithSequence(config, category, phase, api, args_json, seq,
--                       extra_fields, false, frame_url_utf8, origin_utf8);
++  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/false, frame_url.Utf8(), origin.Utf8(), nullptr,
 +            asset_kind, asset_url, asset_source, std::string_view(),
@@ -1040,26 +1331,32 @@ index b2a722741b..c769be9bd7 100644
 +void XTraceActivationScope::Complete() {
 +  XTraceLogger::CompleteActivation(token_);
 +  token_ = 0;
- }
- 
- }  // namespace blink
++}
++
++}  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-index f621f4cc3f..9ad4438934 100644
---- a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
+new file mode 100644
+index 0000000000..112fea7d03
+--- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-@@ -5,6 +5,8 @@
- #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
- #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
- 
+@@ -0,0 +1,136 @@
++// Copyright 2026 The XTrace Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in Chromium's LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
++
 +#include <cstdint>
 +
- #include "third_party/blink/renderer/platform/platform_export.h"
- #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
- 
-@@ -13,6 +15,29 @@ namespace blink {
- class PLATFORM_EXPORT XTraceLogger {
-  public:
-   static bool Enabled();
++#include "third_party/blink/renderer/platform/platform_export.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++
++namespace blink {
++
++class PLATFORM_EXPORT XTraceLogger {
++ public:
++  static bool Enabled();
 +  static bool CausalitySyncEnabled();
 +  // P4-E3: the ignition bridge bridges activation_ref to the current
 +  // activation's causality token (0 when no activation is active).
@@ -1083,13 +1380,20 @@ index f621f4cc3f..9ad4438934 100644
 +                                  const String& origin);
 +  static void CompleteActivation(uint64_t token);
 +  static void AbandonActivation(uint64_t token);
-   static void LogCall(const char* api, const String& args_json);
-   static void LogCall(const char* category,
-                       const char* api,
-@@ -27,6 +52,21 @@ class PLATFORM_EXPORT XTraceLogger {
-                                   const String& args_json,
-                                   const String& frame_url,
-                                   const String& origin);
++  static void LogCall(const char* api, const String& args_json);
++  static void LogCall(const char* category,
++                      const char* api,
++                      const String& args_json);
++  static void LogEvent(const char* category,
++                       const char* phase,
++                       const char* api,
++                       const String& args_json);
++  static void LogEventWithContext(const char* category,
++                                  const char* phase,
++                                  const char* api,
++                                  const String& args_json,
++                                  const String& frame_url,
++                                  const String& origin);
 +  // P5-E3: generated-callback entry event (channel always "bindings",
 +  // never defaulted — DP2 ruling). The scope provides the entry facts;
 +  // the logger handles envelope + batching through the standard v3
@@ -1102,16 +1406,51 @@ index f621f4cc3f..9ad4438934 100644
 +                                uint64_t call_token);
 +  // P5-E3: terminal outcome for the same entry (paired by call_token).
 +  // outcome: "ok" | "receiver-error" | "arg-error" | "native-exception" |
-+  // "cache-hit" | "early-return" | "promise-pending"
++  // "call-form-error" | "overload-resolution-failed" |
++  // "lenient-receiver" | "early-return"
++  // selected_overload: 0-based index recorded by RecordOverload on a
++  // dispatcher-routed call; -1 when the entry had no routing fact.
 +  static void LogGeneratedOutcome(uint64_t call_token,
-+                                  const char* outcome);
-   static void LogEventNoStack(const char* category,
-                               const char* phase,
-                               const char* api,
-@@ -65,6 +105,28 @@ class PLATFORM_EXPORT XTraceLogger {
-   static String NetworkCorrelationKey(const String& method, const String& url);
- };
- 
++                                  const char* outcome,
++                                  int selected_overload = -1);
++  static void LogEventNoStack(const char* category,
++                              const char* phase,
++                              const char* api,
++                              const String& args_json);
++  static void LogEventNoStackWithContext(const char* category,
++                                         const char* phase,
++                                         const char* api,
++                                         const String& args_json,
++                                         const String& frame_url,
++                                         const String& origin);
++  static void LogAssetEvent(const char* category,
++                            const char* phase,
++                            const char* api,
++                            const String& args_json,
++                            const char* kind,
++                            const String& url,
++                            const String& source);
++  static void LogEventWithOptionalAsset(const char* category,
++                                        const char* phase,
++                                        const char* api,
++                                        const String& args_json,
++                                        const char* kind,
++                                        const String& url,
++                                        const String& source);
++  static void LogEventWithOptionalAssetAndContext(const char* category,
++                                                  const char* phase,
++                                                  const char* api,
++                                                  const String& args_json,
++                                                  const char* kind,
++                                                  const String& url,
++                                                  const String& source,
++                                                  const String& frame_url,
++                                                  const String& origin);
++  static String QuoteJson(const String& value);
++  static String StringHashRefJson(const String& value);
++  static String NetworkCorrelationKey(const String& method, const String& url);
++};
++
 +// Keeps the renderer activation stack balanced across all early returns.
 +// Script runners call Complete() only after the terminal record is emitted;
 +// destruction otherwise discards the local stack entry without fabricating a
@@ -1134,6 +1473,6 @@ index f621f4cc3f..9ad4438934 100644
 +  uint64_t token_ = 0;
 +};
 +
- }  // namespace blink
- 
- #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_

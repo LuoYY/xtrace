@@ -1000,10 +1000,10 @@ index 0000000000..46b1cc1b44
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..a0bf64e2d3
+index 0000000000..1d7123aa0d
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1210 @@
+@@ -0,0 +1,1218 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1508,14 +1508,17 @@ index 0000000000..a0bf64e2d3
 +      return;
 +    }
 +    uint64_t final_seq = 0, eligible = 0, enqueued = 0, dropped = 0;
++    uint64_t nadc_partial = 0;
 +    base::StringToUint64(watermark->final_producer_seq, &final_seq);
 +    base::StringToUint64(watermark->eligible, &eligible);
 +    base::StringToUint64(watermark->enqueued, &enqueued);
 +    base::StringToUint64(watermark->dropped, &dropped);
++    base::StringToUint64(watermark->nadc_partial, &nadc_partial);
 +    state->final_producer_seq = final_seq;
 +    state->eligible = eligible;
 +    state->enqueued = enqueued;
 +    state->dropped = dropped;
++    state->nadc_partial = nadc_partial;
 +    state->assets_out = watermark->assets_out;
 +    state->watermark_received = true;
 +    state->pipe_alive = false;  // watermark is the pipe's last word
@@ -2075,6 +2078,11 @@ index 0000000000..a0bf64e2d3
 +                null_or(state->watermark_received, state->dropped) +
 +                ",\"assets_out\":" +
 +                null_or(state->watermark_received, state->assets_out) +
++                // DP1 (P5): NADC entries rejected by the TryEnter precheck —
++                // reported alongside the drop counters, same null discipline
++                // for unconfirmed producers.
++                ",\"nadc_partial\":" +
++                null_or(state->watermark_received, state->nadc_partial) +
 +                // Writer-side counters are measured for every producer.
 +                ",\"accepted\":\"" + base::NumberToString(state->accepted) +
 +                "\",\"written\":\"" + base::NumberToString(state->written) +
@@ -2216,10 +2224,10 @@ index 0000000000..a0bf64e2d3
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..fa2f6f7fc1
+index 0000000000..32dfc94547
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,274 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2477,6 +2485,7 @@ index 0000000000..fa2f6f7fc1
 +  uint64_t eligible = 0;
 +  uint64_t enqueued = 0;
 +  uint64_t dropped = 0;
++  uint64_t nadc_partial = 0;  // DP1 (P5): TryEnter-rejected NADC entries
 +  uint32_t assets_out = 0;
 +  bool watermark_received = false;
 +  // F1/B7: highest config_generation observed in this producer's accepted
@@ -2495,10 +2504,10 @@ index 0000000000..fa2f6f7fc1
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 new file mode 100644
-index 0000000000..e6245c6a22
+index 0000000000..a5374de0de
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,304 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2557,6 +2566,7 @@ index 0000000000..e6245c6a22
 +  wm->enqueued = base::NumberToString(enqueued);
 +  wm->dropped = base::NumberToString(dropped);
 +  wm->assets_out = 0;
++  wm->nadc_partial = "0";
 +  return wm;
 +}
 +
@@ -2852,10 +2862,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..2625d1d221
+index 0000000000..5bf47061e7
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,100 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2914,6 +2924,9 @@ index 0000000000..2625d1d221
 +  string enqueued;
 +  string dropped;
 +  uint32 assets_out;
++  // DP1 (P5): NADC entries on this producer thread rejected by the
++  // allocation-free TryEnter precheck — accounted, never silently dropped.
++  string nadc_partial;
 +};
 +
 +// Data plane: one pipe per producer thread. Batch is the only event path
@@ -3216,26 +3229,165 @@ index 473f01ca40..58c21e35f1 100644
    isolate->SetPromiseRejectCallback(PromiseRejectHandlerInWorker);
    isolate->SetExceptionPropagationCallback(ExceptionPropagationCallback);
    isolate->SetModifyCodeGenerationFromStringsCallback(
+diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/__init__.py b/third_party/blink/renderer/bindings/scripts/bind_gen/__init__.py
+index d40d806f69..26a5ba3ec7 100644
+--- a/third_party/blink/renderer/bindings/scripts/bind_gen/__init__.py
++++ b/third_party/blink/renderer/bindings/scripts/bind_gen/__init__.py
+@@ -36,6 +36,7 @@ from .callback_interface import generate_callback_interfaces
+ from .dictionary import generate_dictionaries
+ from .enumeration import generate_enumerations
+ from .interface import generate_interfaces
++from .interface import generate_xtrace_coverage_table
+ from .namespace import generate_namespaces
+ from .observable_array import generate_observable_arrays
+ from .sync_iterator import generate_sync_iterators
+diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/blink_v8_bridge.py b/third_party/blink/renderer/bindings/scripts/bind_gen/blink_v8_bridge.py
+index 4fb1a9e0be..eea0ea9020 100644
+--- a/third_party/blink/renderer/bindings/scripts/bind_gen/blink_v8_bridge.py
++++ b/third_party/blink/renderer/bindings/scripts/bind_gen/blink_v8_bridge.py
+@@ -6,6 +6,7 @@ import web_idl
+ 
+ from . import name_style
+ from .union_name_mapper import UnionNameMapper
++from .code_node import EmptyNode
+ from .code_node import FormatNode
+ from .code_node import Likeliness
+ from .code_node import SymbolDefinitionNode
+@@ -14,9 +15,44 @@ from .code_node import TextNode
+ from .code_node_cxx import CxxIfElseNode
+ from .code_node_cxx import CxxLikelyIfNode
+ from .code_node_cxx import CxxUnlikelyIfNode
++from .codegen_accumulator import CodeGenAccumulator
+ from .codegen_format import format_template as _format
+ 
+ 
++# XTrace P5: first-batch interfaces for generated-callback instrumentation
++# (frozen by the P5 design ruling). Single source of truth shared by
++# interface.py (scope emission, routing facts, coverage fragments) and this
++# module (argument-conversion outcome marks) so the allowlist can never
++# fork between the two injection families.
++_XTRACE_FIRST_BATCH_INTERFACES = frozenset({
++    "URL", "Element", "Response", "Performance", "NADCAttributeTest",
++})
++
++
++def xtrace_is_first_batch(cg_context):
++    """True when the codegen target belongs to the XTrace first batch."""
++    if cg_context is None or getattr(cg_context, "interface", None) is None:
++        return False
++    return str(cg_context.interface.identifier) in _XTRACE_FIRST_BATCH_INTERFACES
++
++
++def make_xtrace_outcome_mark(cg_context, outcome):
++    """P5 review fix 2: emit the innermost-scope outcome mark at a generated
++    error path. Returns EmptyNode for non-first-batch targets so the ~5000
++    remaining interfaces keep zero generated code for XTrace."""
++    assert isinstance(outcome, str)
++    if not xtrace_is_first_batch(cg_context):
++        return EmptyNode()
++    node = TextNode(
++        "blink::xtrace::XTraceGeneratedScope::MarkOutcome(\"{}\");".format(
++            outcome))
++    node.accumulate(CodeGenAccumulator.require_include_headers([
++        "third_party/blink/renderer/platform/xtrace/"
++        "xtrace_generated_scope.h",
++    ]))
++    return node
++
++
+ def blink_class_name(idl_definition):
+     """
+     Returns the class name of Blink implementation.
+@@ -885,7 +921,14 @@ def make_v8_to_blink_value(blink_var_name,
+         exception_exit_node = CxxUnlikelyIfNode(
+             cond="${exception_state}.HadException()",
+             attribute="[[unlikely]]",
+-            body=T(error_exit_return_statement))
++            body=[
++                # P5 review fix 2: argument conversion failure — the
++                # exception was set by NativeValueTraits, before any
++                # Blink implementation call (those are marked separately
++                # as native-exception at their post-call checks).
++                make_xtrace_outcome_mark(cg_context, "arg-error"),
++                T(error_exit_return_statement),
++            ])
+ 
+         if not (default_expr or fast_path_cond):
+             return SymbolDefinitionNode(symbol_node, [
 diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-index 38de3c2227..1bda6de58d 100644
+index 38de3c2227..98bf625af4 100644
 --- a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
 +++ b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-@@ -841,6 +841,73 @@ def make_bindings_trace_event(cg_context):
+@@ -3,6 +3,8 @@
+ # found in the LICENSE file.
+ 
+ import itertools
++import json
++import os
+ 
+ import web_idl
+ 
+@@ -12,8 +14,10 @@ from .blink_v8_bridge import blink_type_info
+ from .blink_v8_bridge import make_default_value_expr
+ from .blink_v8_bridge import make_v8_to_blink_value
+ from .blink_v8_bridge import make_v8_to_blink_value_variadic
++from .blink_v8_bridge import make_xtrace_outcome_mark
+ from .blink_v8_bridge import native_value_tag
+ from .blink_v8_bridge import v8_bridge_class_name
++from .blink_v8_bridge import xtrace_is_first_batch
+ from .code_node import EmptyNode
+ from .code_node import FormatNode
+ from .code_node import ListNode
+@@ -801,10 +805,18 @@ def bind_return_value(code_node, cg_context, overriding_args=None):
+                 error_exit_return_statement = "return v8::Intercepted::kYes;"
+             else:
+                 error_exit_return_statement = "return;"
++            # P5 review fix 2: this check follows the native call — argument
++            # conversion failures return EARLY inside the loop, so reaching
++            # here with a pending exception means the Blink implementation
++            # threw (native-exception path).
+             nodes.append(
+                 CxxUnlikelyIfNode(cond="${exception_state}.HadException()",
+                                   attribute="[[unlikely]]",
+-                                  body=T(error_exit_return_statement)))
++                                  body=[
++                                      make_xtrace_outcome_mark(
++                                          cg_context, "native-exception"),
++                                      T(error_exit_return_statement),
++                                  ]))
+ 
+         if "ReflectOnly" in cg_context.member_like.extended_attributes:
+             # [ReflectOnly]
+@@ -841,6 +853,142 @@ def make_bindings_trace_event(cg_context):
      return TextNode("BLINK_BINDINGS_TRACE_EVENT(\"{}\");".format(
          _make_bindings_logging_id(cg_context)))
  
 +# P5-E2 (design DP1 + ruling §9): first-batch instrumented interfaces. The
 +# scope code is ONLY generated for these — zero overhead for everything
 +# else. Expanding this set requires an architect ruling (handoff §7).
++# The set itself lives in blink_v8_bridge.py (shared with the conversion
++# outcome marks); the alias below keeps the historical name working.
 +_XTRACE_FIRST_BATCH_INTERFACES = frozenset({
 +    "URL", "Element", "Response", "Performance", "NADCAttributeTest",
 +})
 +
 +
 +def _is_xtrace_first_batch(cg_context):
-+    if cg_context.interface is None:
-+        return False
-+    return str(cg_context.interface.identifier) in _XTRACE_FIRST_BATCH_INTERFACES
++    return xtrace_is_first_batch(cg_context)
++
++
++# P5 review fix 3: generation-time coverage registry. Every ACTUAL scope
++# injection records itself here; generate_interface flushes a per-interface
++# fragment under gen/xtrace/coverage/ and the post-run aggregator (see
++# generate_bindings.py) derives gen/xtrace/webidl_coverage.json from the
++# fragments. The table is therefore same-source with the artifact — it can
++# no longer understate the injected member set.
++_XTRACE_COVERAGE_INJECTIONS = {}  # interface -> member -> set(entry_kind)
++
++
++def _xtrace_record_injection(interface_name, entry_kind, member_name):
++    members = _XTRACE_COVERAGE_INJECTIONS.setdefault(interface_name, {})
++    members.setdefault(member_name, set()).add(entry_kind)
 +
 +
 +def make_xtrace_scope(cg_context, entry_kind):
@@ -3270,6 +3422,17 @@ index 38de3c2227..1bda6de58d 100644
 +    elif cg_context.constructor_group is not None:
 +        member_name = "constructor"
 +        overload_count = len(cg_context.constructor_group)
++    # Property-bearing contexts (the common case) still carry the group on
++    # the context: resolve the real overload cardinality so dispatchers
++    # and constructors report N instead of 0.
++    if (overload_count == 0 and cg_context.operation_group is not None
++            and len(cg_context.operation_group) > 1):
++        overload_count = len(cg_context.operation_group)
++    if (overload_count == 0 and cg_context.constructor_group is not None
++            and len(cg_context.constructor_group) > 1):
++        overload_count = len(cg_context.constructor_group)
++
++    _xtrace_record_injection(interface_name, entry_kind, member_name)
 +
 +    node = TextNode(
 +        "blink::xtrace::XTraceGeneratedScope xtrace_generated_scope("
@@ -3291,10 +3454,173 @@ index 38de3c2227..1bda6de58d 100644
 +        ]))
 +    return node
 +
++
++def make_xtrace_scope_no_info(cg_context, entry_kind):
++    """P5 review fix 5: Fast API / [NoAllocDirectCall] callbacks have no
++    v8::FunctionCallbackInfo — emit the five-argument scope constructor
++    instead. The caller must gate the whole construction behind
++    XTraceGeneratedScope::TryEnter() and mark the rejected path with
++    MarkNadcPartial() (DP1 precheck protocol)."""
++    assert isinstance(cg_context, CodeGenContext)
++    assert entry_kind == "nadc-callback"
++
++    if not _is_xtrace_first_batch(cg_context):
++        return EmptyNode()
++
++    CodeGenAccumulator.require_include_headers([
++        "third_party/blink/renderer/platform/xtrace/"
++        "xtrace_generated_scope.h",
++    ])
++
++    api_name = _make_bindings_logging_id(cg_context)
++    interface_name = str(cg_context.interface.identifier)
++    member_name = ""
++    if cg_context.property_ is not None:
++        member_name = str(cg_context.property_.identifier)
++    elif cg_context.operation_group is not None and len(
++            cg_context.operation_group) > 0:
++        member_name = str(cg_context.operation_group[0].identifier)
++
++    _xtrace_record_injection(interface_name, entry_kind, member_name)
++
++    node = TextNode(
++        "blink::xtrace::XTraceGeneratedScope xtrace_generated_scope("
++        "\"{api}\", "
++        "blink::xtrace::XTraceGeneratedScope::kNadcCallback, "
++        "\"{interface}\", \"{member}\", 0);".format(
++            api=api_name,
++            interface=interface_name,
++            member=member_name))
++    node.accumulate(
++        CodeGenAccumulator.require_include_headers([
++            "third_party/blink/renderer/platform/xtrace/"
++            "xtrace_generated_scope.h",
++        ]))
++    return node
++
  
  def make_check_argument_length(cg_context):
      assert isinstance(cg_context, CodeGenContext)
-@@ -1889,6 +1956,7 @@ def make_attribute_get_callback_def(cg_context, function_name):
+@@ -885,6 +1033,9 @@ def make_check_argument_length(cg_context):
+                                     "ExceptionMessages::NotEnoughArguments"
+                                     "({}, ${info}.Length()));"),
+                                    num_of_required_args),
++                                 # P5 review fix 2: path-classified outcome.
++                                 make_xtrace_outcome_mark(cg_context,
++                                                          "arg-error"),
+                                  T("return;"),
+                              ])
+ 
+@@ -898,9 +1049,12 @@ def make_check_constructor_call(cg_context):
+         CxxUnlikelyIfNode(
+             cond="!${info}.IsConstructCall()",
+             attribute=None,
+-            body=T("V8ThrowException::ThrowTypeError(${isolate}, "
+-                   "ExceptionMessages::ConstructorCalledAsFunction());\n"
+-                   "return;")),
++            body=[
++                T("V8ThrowException::ThrowTypeError(${isolate}, "
++                  "ExceptionMessages::ConstructorCalledAsFunction());"),
++                make_xtrace_outcome_mark(cg_context, "call-form-error"),
++                T("return;"),
++            ]),
+     ])
+     if not cg_context.is_legacy_factory_function:
+         node.append(
+@@ -909,8 +1063,11 @@ def make_check_constructor_call(cg_context):
+                     "V8PerIsolateData::From(${isolate})->InWrapperConstructor()"
+                 ),
+                 attribute=None,
+-                body=T("bindings::V8SetReturnValue(${info}, ${v8_receiver});\n"
+-                       "return;")))
++                body=[
++                    T("bindings::V8SetReturnValue(${info}, ${v8_receiver});"),
++                    make_xtrace_outcome_mark(cg_context, "early-return"),
++                    T("return;"),
++                ]))
+     node.accumulate(
+         CodeGenAccumulator.require_include_headers([
+             "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
+@@ -968,7 +1125,10 @@ def make_check_receiver(cg_context):
+             CxxUnlikelyIfNode(
+                 cond="!${class_name}::HasInstance(${isolate}, ${v8_receiver})",
+                 attribute=None,
+-                body=T("return;")),
++                body=[
++                    make_xtrace_outcome_mark(cg_context, "lenient-receiver"),
++                    T("return;"),
++                ])
+         ])
+ 
+     if cg_context.is_return_type_promise_type:
+@@ -979,6 +1139,7 @@ def make_check_receiver(cg_context):
+                 body=[
+                     T("V8ThrowException::ThrowTypeError(${isolate}, "
+                       "\"Illegal invocation\");"),
++                    make_xtrace_outcome_mark(cg_context, "receiver-error"),
+                     T("return;"),
+                 ])
+         ])
+@@ -1136,6 +1297,17 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+             cg_context, overload_index=func_like.overload_index)
+         return TextNode(_format(pattern, value=value, func_name=func_name))
+ 
++    def xtrace_routing_pattern(base_pattern):
++        # P5 review fix 1 (B1): dispatcher routing fact. Prepend the
++        # RecordOverload call to the delegation statement itself so the
++        # mark fires exactly when the branch is taken (never before a
++        # failing type test).
++        if not _is_xtrace_first_batch(cg_context):
++            return base_pattern
++        record = ("xtrace_generated_scope.RecordOverload({});\n".format(
++            func_like.overload_index))
++        return record + base_pattern
++
+     # {begin,end}_condifitional_scope allow nesting some of the checks in
+     # an additional conditional to save on expensive checks. If no dispatches
+     # are generated in the nested block, the conditional is also omitted.
+@@ -1155,11 +1327,13 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+ 
+     def dispatch_if(expr):
+         if expr is True:
+-            pattern = "return {func_name}(${info});"
++            pattern = xtrace_routing_pattern("return {func_name}(${info});")
+         else:
+             pattern = ("if (" + expr + ") {{\n"
+-                       "  return {func_name}(${info});\n"
+-                       "}}")
++                       "  " +
++                       xtrace_routing_pattern(
++                           "return {func_name}(${info});") +
++                       "\n}}")
+         node = make_node(pattern)
+         conditional = expr_from_exposure(func_like.exposure)
+         if not conditional.is_always_true:
+@@ -1172,7 +1346,8 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+     if len(items) == 1:
+         func_like = items[0].function_like
+         can_fail = False
+-        return make_node("return {func_name}(${info});"), can_fail
++        return make_node(
++            xtrace_routing_pattern("return {func_name}(${info});")), can_fail
+ 
+     # 12.2. If V is undefined, ...
+     func_like = find(lambda t, u: t.is_optional)
+@@ -1353,8 +1528,11 @@ def make_overload_dispatcher(cg_context):
+         EmptyNode(),
+         make_check_argument_length(cg_context),
+         T("V8ThrowException::ThrowTypeError(${isolate}, "
+-          "\"Overload resolution failed.\");\n"
+-          "return;"),
++          "\"Overload resolution failed.\");"),
++        # P5 review fix 2: distinguishable outcome for the no-branch-matched
++        # path (a different failure than NotEnoughArguments).
++        make_xtrace_outcome_mark(cg_context, "overload-resolution-failed"),
++        T("return;"),
+     ])
+ 
+ 
+@@ -1889,6 +2067,7 @@ def make_attribute_get_callback_def(cg_context, function_name):
          EmptyNode(),
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3302,7 +3628,58 @@ index 38de3c2227..1bda6de58d 100644
          make_report_coop_access(cg_context),
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
-@@ -2023,6 +2091,7 @@ def make_attribute_set_callback_def(cg_context, function_name):
+@@ -1992,11 +2171,45 @@ def make_attribute_set_nadc_callback_def(cg_context):
+         body.append(TextNode("<% handle_scope.request_symbol_definition() %>"))
+         blink_arguments.append("${exception_state}")
+ 
+-    body.append(
+-        FormatNode("${blink_receiver}->{member_func}({blink_arguments});",
+-                   member_func=name_style.api_func(
+-                       "set", cg_context.attribute.identifier),
+-                   blink_arguments=", ".join(blink_arguments)))
++    # NOTE: built by concatenation, not str.format — the ${...} template
++    # variables are substituted by the code-node renderer, and .format()
++    # would treat them as format holes.
++    set_call_text = ("${blink_receiver}->"
++                     + name_style.api_func(
++                         "set", cg_context.attribute.identifier)
++                     + "(" + ", ".join(blink_arguments) + ");")
++
++    # P5 review fix 5 (DP1 precheck protocol): the no-allocation fast path
++    # may only instrument through the allocation-free TryEnter precheck.
++    # Rejected entries are accounted by MarkNadcPartial (watermark counter)
++    # — never forced, never silently dropped.
++    if not _is_xtrace_first_batch(cg_context):
++        body.append(FormatNode(set_call_text))
++        return func_name, func_def
++
++    CodeGenAccumulator.require_include_headers([
++        "third_party/blink/renderer/platform/xtrace/"
++        "xtrace_generated_scope.h",
++    ])
++    api_name = _make_bindings_logging_id(cg_context)
++    interface_name = str(cg_context.interface.identifier)
++    member_name = str(cg_context.attribute.identifier)
++    _xtrace_record_injection(interface_name, "nadc-callback", member_name)
++    body.append(TextNode(
++        "if (blink::xtrace::XTraceGeneratedScope::TryEnter()) {"))
++    body.append(TextNode(
++        "blink::xtrace::XTraceGeneratedScope xtrace_generated_scope("
++        "\"{api}\", "
++        "blink::xtrace::XTraceGeneratedScope::kNadcCallback, "
++        "\"{interface}\", \"{member}\", 0);".format(
++            api=api_name,
++            interface=interface_name,
++            member=member_name)))
++    body.append(TextNode(set_call_text))
++    body.append(TextNode(
++        "} else {\n"
++        "blink::xtrace::XTraceGeneratedScope::MarkNadcPartial();\n"
++        "}"))
+     return func_name, func_def
+ 
+ 
+@@ -2023,6 +2236,7 @@ def make_attribute_set_callback_def(cg_context, function_name):
          EmptyNode(),
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3310,7 +3687,19 @@ index 38de3c2227..1bda6de58d 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2184,6 +2253,7 @@ def make_constructor_entry(cg_context):
+@@ -2165,7 +2379,10 @@ def make_overload_dispatcher_function_def(cg_context, function_name):
+ 
+     if cg_context.operation_group:
+         body.append(make_promise_return_context(cg_context))
+-        body.append(make_operation_entry(cg_context))
++        # P5: dispatchers carry their own entry kind — the routing fact
++        # (RecordOverload below) pairs with kOverloadDispatcher entries.
++        body.append(make_operation_entry(cg_context,
++                                         entry_kind="overload-dispatcher"))
+         body.append(EmptyNode())
+         body.append(EmptyNode())
+ 
+@@ -2184,6 +2401,7 @@ def make_constructor_entry(cg_context):
      return SequenceNode([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3318,7 +3707,7 @@ index 38de3c2227..1bda6de58d 100644
          EmptyNode(),
          make_check_constructor_call(cg_context),
      ])
-@@ -2299,6 +2369,7 @@ def make_exposed_construct_callback_def(cg_context, function_name):
+@@ -2299,6 +2517,7 @@ def make_exposed_construct_callback_def(cg_context, function_name):
      body.extend([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3326,7 +3715,7 @@ index 38de3c2227..1bda6de58d 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2320,6 +2391,7 @@ def make_legacy_factory_function_property_callback_def(cg_context,
+@@ -2320,6 +2539,7 @@ def make_legacy_factory_function_property_callback_def(cg_context,
      body.extend([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3334,14 +3723,231 @@ index 38de3c2227..1bda6de58d 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2586,6 +2658,7 @@ def make_operation_entry(cg_context):
+@@ -2558,34 +2778,78 @@ def make_no_alloc_direct_call_callback_def(cg_context, function_name,
+ 
+     is_return_type_void = function_like.return_type.is_undefined
+ 
++    call_nodes = SequenceNode()
+     if is_return_type_void:
+-        body.append(
++        call_nodes.append(
+             F("${blink_receiver}->{member_func}({blink_arguments});",
+               member_func=backward_compatible_api_func(cg_context),
+               blink_arguments=", ".join(blink_arguments)))
+     else:
+-        body.append(
++        call_nodes.append(
+             F("auto&& return_value = ${blink_receiver}->{member_func}({blink_arguments});",
+               member_func=backward_compatible_api_func(cg_context),
+               blink_arguments=", ".join(blink_arguments)))
+     if cg_context.may_throw_exception:
+-        body.append(
++        call_nodes.append(
+             CxxUnlikelyIfNode(cond="${exception_state}.HadException()",
+                               attribute="[[unlikely]]",
+-                              body=T("return;")))
++                              body=[
++                                  # P5 review fix 2: post-native-call throw.
++                                  make_xtrace_outcome_mark(
++                                      cg_context, "native-exception"),
++                                  T("return;"),
++                              ]))
+ 
+     if not is_return_type_void:
+-        body.extend([T("return return_value;")])
++        call_nodes.extend([T("return return_value;")])
++
++    # P5 review fix 5 (DP1 precheck protocol) — same gate as the NADC
++    # attribute setter: instrument the no-allocation fast path only when
++    # the allocation-free precheck accepts; account rejections.
++    if not _is_xtrace_first_batch(cg_context):
++        body.append(call_nodes)
++        return func_def
++
++    CodeGenAccumulator.require_include_headers([
++        "third_party/blink/renderer/platform/xtrace/"
++        "xtrace_generated_scope.h",
++    ])
++    api_name = _make_bindings_logging_id(cg_context)
++    interface_name = str(cg_context.interface.identifier)
++    member_name = ""
++    if cg_context.operation_group is not None and len(
++            cg_context.operation_group) > 0:
++        member_name = str(cg_context.operation_group[0].identifier)
++    elif cg_context.property_ is not None:
++        member_name = str(cg_context.property_.identifier)
++    _xtrace_record_injection(interface_name, "nadc-callback", member_name)
++    body.append(TextNode(
++        "if (blink::xtrace::XTraceGeneratedScope::TryEnter()) {"))
++    body.append(TextNode(
++        "blink::xtrace::XTraceGeneratedScope xtrace_generated_scope("
++        "\"{api}\", "
++        "blink::xtrace::XTraceGeneratedScope::kNadcCallback, "
++        "\"{interface}\", \"{member}\", 0);".format(
++            api=api_name,
++            interface=interface_name,
++            member=member_name)))
++    body.append(call_nodes)
++    body.append(TextNode(
++        "} else {\n"
++        "blink::xtrace::XTraceGeneratedScope::MarkNadcPartial();\n"
++        "}"))
+ 
+     return func_def
+ 
+ 
+-def make_operation_entry(cg_context):
++def make_operation_entry(cg_context, entry_kind="operation"):
+     assert isinstance(cg_context, CodeGenContext)
++    assert entry_kind in ("operation", "overload-dispatcher")
+ 
      return SequenceNode([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
-+        make_xtrace_scope(cg_context, "operation"),
++        make_xtrace_scope(cg_context, entry_kind),
      ])
  
  
+@@ -7304,6 +7568,112 @@ def generate_class_like(class_like,
+                                 path_manager.gen_path_to(impl_source_path))
+ 
+ 
++def _xtrace_write_coverage_fragment(interface_name):
++    """P5 review fix 3: flush this interface's ACTUAL injection set to
++    gen/xtrace/coverage/<Interface>.json. One task per interface means one
++    writer per file — no cross-process races. Best-effort: generation
++    itself must never fail on coverage bookkeeping."""
++    members = _XTRACE_COVERAGE_INJECTIONS.pop(interface_name, None)
++    if members is None:
++        return
++    try:
++        fragment = {
++            "interface": interface_name,
++            "members": {
++                member: sorted(kinds)
++                for member, kinds in sorted(members.items())
++            },
++        }
++        out_dir = PathManager.gen_path_to("xtrace/coverage")
++        os.makedirs(out_dir, exist_ok=True)
++        with open(os.path.join(out_dir,
++                               "{}.json".format(interface_name)), "w") as f:
++            json.dump(fragment, f, sort_keys=True, indent=1)
++    except OSError:
++        pass
++
++
++def generate_xtrace_coverage_table():
++    """P5 review fix 3: aggregate the per-interface fragments into the
++    generation-frozen coverage table gen/xtrace/webidl_coverage.json.
++    Runs in the driver process AFTER the task queue settles (see
++    generate_bindings.py). Derivation rules (DP4):
++      - injected member without a no-alloc gate  -> "supported"
++      - injected member routed through TryEnter  -> "partial" (+reason)
++      - first-batch member with no injection     -> "unavailable" (+reason)
++    The table is same-source with the generated artifact by construction;
++    tests/test_webidl_coverage_consistency.py enforces the equality."""
++    web_idl_database = package_initializer().web_idl_database()
++    fragments = {}
++    try:
++        coverage_dir = PathManager.gen_path_to("xtrace/coverage")
++        for entry in sorted(os.listdir(coverage_dir)):
++            if not entry.endswith(".json"):
++                continue
++            with open(os.path.join(coverage_dir, entry)) as f:
++                fragment = json.load(f)
++            name = fragment.get("interface")
++            if name in _XTRACE_FIRST_BATCH_INTERFACES:
++                fragments[name] = fragment.get("members", {})
++    except OSError:
++        pass
++
++    interfaces_payload = {}
++    for interface_name in sorted(_XTRACE_FIRST_BATCH_INTERFACES):
++        interface = web_idl_database.find(
++            web_idl.Identifier(interface_name))
++        injected = fragments.get(interface_name, {})
++        members_payload = {}
++        # Enumerate the interface's full member list so non-injected
++        # members surface as "unavailable" instead of silently vanishing.
++        declared = set()
++        if interface is not None:
++            for attribute in interface.attributes:
++                declared.add(str(attribute.identifier))
++            for operation in interface.operations:
++                name = str(operation.identifier)
++                if not name:
++                    # Stringifier-style pseudo-operations with empty
++                    # identifiers have no generated callback member.
++                    continue
++                declared.add(name)
++            if interface.constructors or interface.legacy_factory_functions:
++                declared.add("constructor")
++        for member in sorted(set(injected) | declared):
++            kinds = injected.get(member)
++            if kinds is None:
++                members_payload[member] = {
++                    "status": "unavailable",
++                    "reason": "not injected by the bind_gen allowlist",
++                }
++            elif "nadc-callback" in kinds:
++                members_payload[member] = {
++                    "status": "partial",
++                    "entry_kinds": sorted(kinds),
++                    "reason": ("NoAllocDirectCall: bounded-buffer "
++                               "TryEnter precheck (DP1)"),
++                }
++            else:
++                members_payload[member] = {
++                    "status": "supported",
++                    "entry_kinds": sorted(kinds),
++                }
++        interfaces_payload[interface_name] = {
++            "members": members_payload,
++        }
++
++    table = {
++        "version": 2,
++        "generator": ("bind_gen interface.py actual-injection registry "
++                      "(fragments under gen/xtrace/coverage/)"),
++        "interfaces": interfaces_payload,
++    }
++    out_path = PathManager.gen_path_to("xtrace/webidl_coverage.json")
++    os.makedirs(os.path.dirname(out_path), exist_ok=True)
++    with open(out_path, "w") as f:
++        json.dump(table, f, sort_keys=True, indent=1)
++
++
+ def generate_interface(interface_identifier):
+     assert isinstance(interface_identifier, web_idl.Identifier)
+ 
+@@ -7311,6 +7681,7 @@ def generate_interface(interface_identifier):
+     interface = web_idl_database.find(interface_identifier)
+ 
+     generate_class_like(interface)
++    _xtrace_write_coverage_fragment(str(interface_identifier))
+ 
+ 
+ def generate_install_properties_per_feature(function_name,
+diff --git a/third_party/blink/renderer/bindings/scripts/generate_bindings.py b/third_party/blink/renderer/bindings/scripts/generate_bindings.py
+index 50d6418c34..62c1763d1d 100644
+--- a/third_party/blink/renderer/bindings/scripts/generate_bindings.py
++++ b/third_party/blink/renderer/bindings/scripts/generate_bindings.py
+@@ -131,6 +131,14 @@ def main():
+     task_queue.run(report_progress)
+     print_to_console('\n')
+ 
++    # XTrace P5 review fix 3: after every interface task has settled,
++    # aggregate the per-interface coverage fragments (written by the
++    # generation workers) into the generation-frozen table. The table is
++    # derived from the SAME injections that produced the generated code,
++    # so it can never understate the instrumented member set.
++    if 'interface' in options.tasks:
++        bind_gen.generate_xtrace_coverage_table()
++
+ 
+ if __name__ == '__main__':
+     main()
 diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink/renderer/core/dom/document.cc
 index 3e0ab53396..a6698aede2 100644
 --- a/third_party/blink/renderer/core/dom/document.cc
@@ -14715,10 +15321,10 @@ index 0000000000..59d49da5e7
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
 new file mode 100644
-index 0000000000..81a0474cbb
+index 0000000000..d545433a61
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,194 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14733,11 +15339,49 @@ index 0000000000..81a0474cbb
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_producer.h"
 +
++// The thread-local scope stack below is a fixed-size array of intra-thread
++// stack pointers with a depth bound; the accesses are guarded and local.
++#ifdef UNSAFE_BUFFERS_BUILD
++#pragma allow_unsafe_buffers
++#endif
++
 +namespace blink::xtrace {
 +
 +namespace {
 +
 +constexpr char kBindingsChannel[] = "bindings";
++
++// P5 review fix 2: innermost-active-scope stack for path-classified
++// outcome marking. Overload bodies are separate generated functions from
++// the dispatcher that owns the scope, so error paths mark through this
++// thread-local stack instead of taking a parameter (signatures stay
++// stock). Push/pop in ctor/dtor makes nesting (an operation triggering
++// bindings during its body) collapse to the innermost scope naturally.
++// Plain stack pointers of the same thread — deliberately NOT raw_ptr<>
++// (these are intra-thread stack references, not heap/partition memory),
++// which is why the chain lives here and not as a class member.
++constexpr int kMaxScopeDepth = 64;
++thread_local XTraceGeneratedScope* t_scope_stack[kMaxScopeDepth] = {};
++thread_local int t_scope_depth = 0;
++
++void PushScopeStack(XTraceGeneratedScope* scope) {
++  // Depth beyond the bound degrades to no marking for the overflowing
++  // scope (honest omission, never a wrong mark: MarkOutcome keeps
++  // targeting the innermost pushed scope).
++  if (t_scope_depth < kMaxScopeDepth) {
++    t_scope_stack[t_scope_depth++] = scope;
++  }
++}
++
++void PopScopeStack(XTraceGeneratedScope* scope) {
++  if (t_scope_depth > 0 && t_scope_stack[t_scope_depth - 1] == scope) {
++    --t_scope_depth;
++  }
++}
++
++XTraceGeneratedScope* TopScopeStack() {
++  return t_scope_depth > 0 ? t_scope_stack[t_scope_depth - 1] : nullptr;
++}
 +
 +std::atomic<uint64_t>& CallTokenSequence() {
 +  static std::atomic<uint64_t> sequence{0};
@@ -14786,16 +15430,41 @@ index 0000000000..81a0474cbb
 +      api, kEntryKindNames[static_cast<unsigned>(kind)], interface_name,
 +      member_name, overload_count, token_);
 +  (void)info;  // receiver/args capture is E4 value-capture work
++
++  PushScopeStack(this);
++}
++
++XTraceGeneratedScope::XTraceGeneratedScope(
++    const char* api,
++    EntryKind kind,
++    const char* interface_name,
++    const char* member_name,
++    unsigned overload_count) {
++  // NADC/Fast API variant (no FunctionCallbackInfo). Only constructed
++  // behind a passed TryEnter() precheck — see make_attribute_set_nadc_*
++  // and make_no_alloc_direct_call_* in bind_gen.
++  if (!BindingsInstrumentationEnabled()) {
++    return;
++  }
++  token_ = ++CallTokenSequence();
++  active_ = true;
++  XTraceLogger::LogGeneratedEntry(
++      api, kEntryKindNames[static_cast<unsigned>(kind)], interface_name,
++      member_name, overload_count, token_);
++  PushScopeStack(this);
 +}
 +
 +XTraceGeneratedScope::~XTraceGeneratedScope() {
 +  // RAII completion: records the terminal outcome for this entry. For
 +  // promise-returning operations the destructor fires when the SYNCHRONOUS
 +  // callback returns (settlement is post-P5 by ruling); the outcome
-+  // records the synchronous phase only.
++  // records the synchronous phase only. The selected overload index (when
++  // a dispatcher routed) rides the same paired event — one entry, one
++  // terminal fact, routing included (DP1: no second entry event).
 +  if (active_) {
 +    active_ = false;
-+    XTraceLogger::LogGeneratedOutcome(token_, outcome_);
++    PopScopeStack(this);
++    XTraceLogger::LogGeneratedOutcome(token_, outcome_, selected_overload_);
 +  }
 +}
 +
@@ -14803,30 +15472,59 @@ index 0000000000..81a0474cbb
 +  outcome_ = outcome;
 +}
 +
++// static
++void XTraceGeneratedScope::MarkOutcome(const char* outcome) {
++  XTraceGeneratedScope* scope = TopScopeStack();
++  if (scope != nullptr && scope->active_) {
++    scope->outcome_ = outcome ? outcome : "unknown";
++  }
++}
++
 +void XTraceGeneratedScope::RecordOverload(unsigned selected_index) {
 +  if (!active_) {
 +    return;
 +  }
-+  // Appends routing facts to the in-flight entry event (no new event —
-+  // DP1 hard rule). Logged as a follow-up fact within the same token.
-+  // Full detail with E4 dedup work; basic index now.
-+  (void)selected_index;
++  // Routing fact for the in-flight entry: the 0-based overload index is
++  // carried by the paired outcome event (token join), keeping the entry
++  // event single and immutable (DP1 hard rule).
++  selected_overload_ = static_cast<int>(selected_index);
 +}
 +
 +// static
 +bool XTraceGeneratedScope::TryEnter() {
-+  // Allocation-free precheck: the producer hub's bounded buffer state is
-+  // readable without locks for this check (atomic watermark).
-+  return BindingsInstrumentationEnabled();
++  // Allocation-free precheck (DP1): config gate, live producer, and the
++  // bounded buffer's remaining room. Must stay allocation-free — it runs
++  // ahead of any allocation on the [NoAllocDirectCall] fast path.
++  if (!BindingsInstrumentationEnabled()) {
++    return false;
++  }
++  XTraceThreadProducer* producer = XTraceThreadProducer::Current();
++  if (producer == nullptr) {
++    return false;
++  }
++  return producer->BufferHasRoom();
++}
++
++// static
++void XTraceGeneratedScope::MarkNadcPartial() {
++  // DP1 ruling condition: a rejected NADC entry is accounted, never
++  // silently dropped. Atomic increments only — this runs on the
++  // no-allocation fast path.
++  XTraceThreadProducer* producer = XTraceThreadProducer::Current();
++  if (producer != nullptr) {
++    producer->RecordNadcPartial();
++    return;
++  }
++  XTraceProducerHub::Get()->RecordNadcPartialNoProducer();
 +}
 +
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
 new file mode 100644
-index 0000000000..510a20b623
+index 0000000000..4a1da7bd49
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,108 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14877,6 +15575,17 @@ index 0000000000..510a20b623
 +                       const char* member_name,
 +                       unsigned overload_count,
 +                       const v8::FunctionCallbackInfo<v8::Value>& info);
++
++  // Fast API / NADC variant: [NoAllocDirectCall] callbacks have no
++  // FunctionCallbackInfo. Identical semantics otherwise; only reachable
++  // behind a passed TryEnter() precheck (the caller must stay
++  // allocation-free when the precheck fails).
++  XTraceGeneratedScope(const char* api,
++                       EntryKind kind,
++                       const char* interface_name,
++                       const char* member_name,
++                       unsigned overload_count);
++
 +  ~XTraceGeneratedScope();
 +
 +  XTraceGeneratedScope(const XTraceGeneratedScope&) = delete;
@@ -14884,7 +15593,8 @@ index 0000000000..510a20b623
 +
 +  // Called by overload-dispatcher generated bodies after the branch is
 +  // selected; appends routing facts to the already-emitted entry event
-+  // (does NOT create a second event — DP1 hard rule).
++  // (does NOT create a second event — DP1 hard rule). The selected index
++  // (0-based, IDL declaration order) rides the paired outcome event.
 +  void RecordOverload(unsigned selected_index);
 +
 +  // E3: set the terminal outcome (default "ok" in destructor). Called by
@@ -14892,16 +15602,32 @@ index 0000000000..510a20b623
 +  // destructor records "ok".
 +  void SetOutcome(const char* outcome);
 +
++  // Path-classified outcome marking for generated code (P5 review fix 2).
++  // Static so overload bodies — separate functions from the dispatcher
++  // holding the scope — can mark the innermost ACTIVE scope through a
++  // thread-local chain. No allocation, no V8 API re-entry; safe to call
++  // from any generated error path. No-op when no scope is active
++  // (non-first-batch interfaces emit no call sites at all).
++  static void MarkOutcome(const char* outcome);
++
 +  // NADC/no-alloc entry precheck (design §DP1 + §9 ruling): returns true
 +  // when the bounded-buffer path can accept an event without allocating.
 +  // Must be called before ANY allocation in the callback. When false the
 +  // entry is marked partial in the coverage bookkeeping — never forced.
 +  static bool TryEnter();
 +
++  // DP1 ruling condition: when TryEnter() rejects an NADC entry (buffer
++  // cannot accommodate), the fact is accounted — never silently dropped.
++  // Allocation-free atomic increment on the owning thread producer's
++  // settlement counters; falls back to a hub-level counter when no thread
++  // producer exists yet.
++  static void MarkNadcPartial();
++
 + private:
 +  uint64_t token_ = 0;
 +  bool active_ = false;
 +  const char* outcome_ = "ok";
++  int selected_overload_ = -1;  // set by RecordOverload; -1 = not routed
 +};
 +
 +}  // namespace blink::xtrace
@@ -14909,10 +15635,10 @@ index 0000000000..510a20b623
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..250a60922b
+index 0000000000..999f235574
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,486 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15377,16 +16103,34 @@ index 0000000000..250a60922b
 +  watermark->enqueued = base::NumberToString(enqueued_);
 +  watermark->dropped = base::NumberToString(dropped_);
 +  watermark->assets_out = assets_out_;
++  // DP1 (P5 review fix 5): NADC entries rejected by the TryEnter precheck.
++  // Settled with the same closure discipline as the other counters so a
++  // rejected entry is accounted, never silently dropped.
++  watermark->nadc_partial = base::NumberToString(
++      nadc_partial_.load(std::memory_order_relaxed));
 +  host()->SubmitWatermark(std::move(watermark));
++}
++
++bool XTraceThreadProducer::BufferHasRoom() const {
++  // Allocation-free precheck (DP1): the capture window must be open and
++  // the bounded buffer below capacity. The sticky drop-newest state
++  // counts as no-room (AcceptEvent rejects everything from the first
++  // overflow on — the precheck must agree with it). Sequence-confined
++  // read, matching AcceptEvent's access discipline.
++  if (settled_ || overflowed_ || XTraceProducerHub::Get()->stopping()) {
++    return false;
++  }
++  return buffer_.size() <
++         XTraceProducerHub::Get()->config().buffer_capacity;
 +}
 +
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..990de79841
+index 0000000000..0ec96d6524
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,250 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15508,10 +16252,21 @@ index 0000000000..990de79841
 +  const std::string& process_epoch() const { return process_epoch_; }
 +  const ProducerRuntimeConfig& config() const { return config_; }
 +
++  // DP1 ruling condition (P5 review fix 5): NADC entries rejected by the
++  // TryEnter precheck are accounted, never silently dropped. Producer-less
++  // rejections land on this process-wide fallback counter (queryable by
++  // tests and diagnostics; the per-producer counter settles in the
++  // watermark).
++  void RecordNadcPartialNoProducer() { ++nadc_partial_no_producer_; }
++  uint64_t nadc_partial_no_producer() const {
++    return nadc_partial_no_producer_.load(std::memory_order_relaxed);
++  }
++
 + private:
 +  XTraceProducerHub();
 +
 +  std::atomic<bool> stopping_{false};
++  std::atomic<uint64_t> nadc_partial_no_producer_{0};
 +  // P3-E4/F1 config propagation: one immutable snapshot; writers swap the
 +  // pointer under config_lock_, readers copy the shared_ptr once per event.
 +  mutable base::Lock config_lock_;
@@ -15571,6 +16326,18 @@ index 0000000000..990de79841
 +  // this thread's pipe, deactivate. Idempotent; runs on the owning thread.
 +  void Settle();
 +
++  // DP1 (P5 review fix 5): allocation-free capacity precheck for the
++  // [NoAllocDirectCall] fast path — true when the bounded buffer still has
++  // room and the capture window is open. Sequence-confined like AcceptEvent.
++  bool BufferHasRoom() const;
++
++  // DP1: account one NADC entry rejected by TryEnter (atomic only; this
++  // runs on the no-allocation fast path). Settled in the watermark.
++  void RecordNadcPartial() { ++nadc_partial_; }
++  uint64_t nadc_partial() const {
++    return nadc_partial_.load(std::memory_order_relaxed);
++  }
++
 +  bool settled() const { return settled_; }
 +
 +  blink::mojom::XTraceHost* host();
@@ -15603,6 +16370,7 @@ index 0000000000..990de79841
 +  uint64_t eligible_ = 0;
 +  uint64_t enqueued_ = 0;
 +  uint64_t dropped_ = 0;
++  std::atomic<uint64_t> nadc_partial_{0};
 +  uint32_t assets_out_ = 0;
 +  bool settled_ = false;
 +  bool overflowed_ = false;
@@ -15615,10 +16383,10 @@ index 0000000000..990de79841
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_PRODUCER_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
 new file mode 100644
-index 0000000000..578c2fd929
+index 0000000000..5ad058d1b8
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer_unittest.cc
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,319 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15839,6 +16607,80 @@ index 0000000000..578c2fd929
 +  EXPECT_EQ(XTraceProducerHub::Get()->current_generation(), "7");
 +}
 +
++// P5 review fix 5 (DP1 ruling condition): the NADC TryEnter partial path.
++// A buffer that cannot accommodate must reject the precheck and ACCOUNT the
++// rejected entry — never crash, never silently drop.
++TEST_F(XTraceProducerTest, NadcTryEnterRejectsWhenBufferFull) {
++  XTraceThreadProducer::SetHostFactoryForTesting(base::BindRepeating(
++      [](FakeXTraceHost* h) { return static_cast<blink::mojom::XTraceHost*>(h); },
++      base::Unretained(&host_)));
++  base::Thread thread("xtrace-nadc-full");
++  ASSERT_TRUE(thread.Start());
++  thread.task_runner()->PostTask(FROM_HERE, base::BindOnce([]() {
++    XTraceProducerHub* hub = XTraceProducerHub::Get();
++    hub->SetBufferCapacityForTesting(2);
++    XTraceThreadProducer* p = XTraceThreadProducer::Current();
++    ASSERT_TRUE(p);
++    // Fresh bounded buffer: the allocation-free precheck accepts.
++    EXPECT_TRUE(p->BufferHasRoom());
++    // Fill to capacity: the precheck must now reject — this is the state
++    // an NADC fast callback observes before deciding to instrument.
++    ASSERT_TRUE(p->AcceptEvent("{\"api\":\"a\"}", "0").has_value());
++    ASSERT_TRUE(p->AcceptEvent("{\"api\":\"b\"}", "0").has_value());
++    EXPECT_FALSE(p->BufferHasRoom());
++    // The rejected path accounts through the partial counter (what
++    // XTraceGeneratedScope::MarkNadcPartial does on this thread) instead
++    // of forcing an event through the no-allocation protocol.
++    p->RecordNadcPartial();
++    p->RecordNadcPartial();
++    EXPECT_EQ(p->nadc_partial(), 2u);
++    // No crash, and the buffer state is unchanged by the accounting.
++    EXPECT_FALSE(p->BufferHasRoom());
++  }));
++  thread.Stop();  // thread teardown settles -> watermark
++  XTraceThreadProducer::SetHostFactoryForTesting({});
++
++  // Settlement carries the partial count with the same closure discipline
++  // as eligible/enqueued/dropped — the rejected entries are traceable in
++  // the manifest, not lost.
++  ASSERT_EQ(host_.watermark_count(), 1u);
++  auto wm = host_.last_watermark();
++  EXPECT_EQ(DecOrZero(wm->eligible), 2u);
++  EXPECT_EQ(DecOrZero(wm->nadc_partial), 2u);
++}
++
++TEST_F(XTraceProducerTest, NadcPartialHubFallbackWithoutProducer) {
++  // Rejections with no thread producer to carry them (MarkNadcPartial's
++  // fallback branch) land on the hub-level counter: accounted, queryable,
++  // and crash-free. (Current() is not probed here: on a capture-enabled
++  // process it lazily creates a producer on the calling thread.)
++  XTraceProducerHub* hub = XTraceProducerHub::Get();
++  const uint64_t before = hub->nadc_partial_no_producer();
++  hub->RecordNadcPartialNoProducer();
++  hub->RecordNadcPartialNoProducer();
++  hub->RecordNadcPartialNoProducer();
++  EXPECT_EQ(hub->nadc_partial_no_producer() - before, 3u);
++}
++
++TEST_F(XTraceProducerTest, BufferHasRoomRejectsAfterSettle) {
++  XTraceThreadProducer::SetHostFactoryForTesting(base::BindRepeating(
++      [](FakeXTraceHost* h) { return static_cast<blink::mojom::XTraceHost*>(h); },
++      base::Unretained(&host_)));
++  base::Thread thread("xtrace-nadc-settled");
++  ASSERT_TRUE(thread.Start());
++  thread.task_runner()->PostTask(FROM_HERE, base::BindOnce([]() {
++    XTraceThreadProducer* p = XTraceThreadProducer::Current();
++    ASSERT_TRUE(p);
++    EXPECT_TRUE(p->BufferHasRoom());
++    p->Settle();
++    // Outside the capture window the precheck must reject — a settled
++    // producer accepts nothing, not even a prechecked NADC entry.
++    EXPECT_FALSE(p->BufferHasRoom());
++  }));
++  thread.Stop();
++  XTraceThreadProducer::SetHostFactoryForTesting({});
++}
++
 +TEST_F(XTraceProducerTest, AcceptEventStampsCallerGeneration) {
 +  // F1/B7: the identity tail carries the generation passed by the event
 +  // entry (its filter snapshot), not a re-read of the hub at accept time.
@@ -15864,1878 +16706,3 @@ index 0000000000..578c2fd929
 +
 +}  // namespace
 +}  // namespace blink::xtrace
-diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index fee9425c5c..89eb629e19 100644
---- a/chrome/browser/chrome_content_browser_client.cc
-+++ b/chrome/browser/chrome_content_browser_client.cc
-@@ -16,21 +16,27 @@
- #include <vector>
- 
- #include "base/base_switches.h"
-+#include "base/atomic_sequence_num.h"
- #include "base/byte_count.h"
- #include "base/check_deref.h"
- #include "base/check_op.h"
- #include "base/command_line.h"
- #include "base/containers/fixed_flat_map.h"
- #include "base/containers/fixed_flat_set.h"
-+#include "base/containers/span.h"
- #include "base/containers/to_vector.h"
- #include "base/dcheck_is_on.h"
-+#include "base/environment.h"
- #include "base/feature_list.h"
- #include "base/files/file_path.h"
-+#include "base/files/file_util.h"
- #include "base/functional/bind.h"
- #include "base/functional/callback.h"
- #include "base/functional/callback_helpers.h"
-+#include "base/hash/sha1.h"
- #include "base/i18n/base_i18n_switches.h"
- #include "base/i18n/character_encoding.h"
-+#include "base/json/json_writer.h"
- #include "base/memory/raw_ptr.h"
- #include "base/memory/scoped_refptr.h"
- #include "base/memory/self_deleting.h"
-@@ -40,6 +46,7 @@
- #include "base/notimplemented.h"
- #include "base/notreached.h"
- #include "base/path_service.h"
-+#include "base/process/process_handle.h"
- #include "base/stl_util.h"
- #include "base/strings/strcat.h"
- #include "base/strings/string_number_conversions.h"
-@@ -48,6 +55,8 @@
- #include "base/strings/stringprintf.h"
- #include "base/supports_user_data.h"
- #include "base/task/sequenced_task_runner.h"
-+#include "base/task/thread_pool.h"
-+#include "base/time/time.h"
- #include "base/types/expected.h"
- #include "base/types/expected_macros.h"
- #include "base/values.h"
-@@ -332,6 +341,7 @@
- #include "components/version_info/version_info.h"
- #include "components/webapps/common/web_app_id.h"
- #include "components/webui/chrome_urls/pref_names.h"
-+#include "content/browser/xtrace/xtrace_host_impl.h"  // nogncheck
- #include "content/public/browser/attribution_data_model.h"
- #include "content/public/browser/browser_accessibility_state.h"
- #include "content/public/browser/browser_child_process_host.h"
-@@ -380,6 +390,7 @@
- #include "content/public/common/origin_util.h"
- #include "content/public/common/url_utils.h"
- #include "content/public/common/window_container_type.mojom-shared.h"
-+#include "crypto/sha2.h"
- #include "device/fido/public/features.h"
- #include "device/vr/buildflags/buildflags.h"
- #include "extensions/browser/browser_frame_context_data.h"
-@@ -394,11 +405,14 @@
- #include "media/media_buildflags.h"
- #include "media/mojo/buildflags.h"
- #include "media/mojo/mojom/speech_recognizer.mojom.h"
-+#include "mojo/public/cpp/bindings/receiver.h"
- #include "mojo/public/cpp/bindings/remote.h"
-+#include "mojo/public/cpp/bindings/self_owned_receiver.h"
- #include "net/base/data_url.h"
- #include "net/base/url_util.h"
- #include "net/cookies/cookie_setting_override.h"
- #include "net/cookies/site_for_cookies.h"
-+#include "net/http/http_response_headers.h"
- #include "net/ssl/client_cert_store.h"
- #include "net/ssl/ssl_cert_request_info.h"
- #include "net/ssl/ssl_private_key.h"
-@@ -409,16 +423,19 @@
- #include "sandbox/policy/switches.h"
- #include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom.h"
- #include "services/metrics/public/cpp/ukm_source_id.h"
-+#include "services/network/public/cpp/data_element.h"
- #include "services/network/public/cpp/features.h"
- #include "services/network/public/cpp/is_potentially_trustworthy.h"
- #include "services/network/public/cpp/network_switches.h"
- #include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
- #include "services/network/public/cpp/permissions_policy/permissions_policy_features.h"
- #include "services/network/public/cpp/resource_request.h"
-+#include "services/network/public/cpp/resource_request_body.h"
- #include "services/network/public/cpp/self_deleting_url_loader_factory.h"
- #include "services/network/public/cpp/web_sandbox_flags.h"
- #include "services/network/public/mojom/cert_verifier_service.mojom.h"
- #include "services/network/public/mojom/fetch_api.mojom.h"
-+#include "services/network/public/mojom/early_hints.mojom.h"
- #include "services/network/public/mojom/network_service.mojom.h"
- #include "services/network/public/mojom/url_loader_factory.mojom.h"
- #include "services/network/public/mojom/web_transport.mojom.h"
-@@ -3123,6 +3140,14 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
-         embedder_support::kOriginTrialPublicKey,
-         switches::kReaderModeHeuristics,
-         translate::switches::kTranslateSecurityOrigin,
-+        "xtrace-capture-values",
-+        "xtrace-capture-assets",
-+        "xtrace-categories",
-+        "xtrace-causality",
-+        "xtrace-enable",
-+        "xtrace-file",
-+        "xtrace-max-body-bytes",
-+        "xtrace-max-header-value-bytes",
-     };
- 
-     command_line->CopySwitchesFrom(browser_command_line, kSwitchNames);
-@@ -6001,6 +6026,795 @@ GetClientDataHeader(content::FrameTreeNodeId frame_tree_node_id) {
- }
- #endif
- 
-+namespace {
-+
-+constexpr char kXTraceEnableEnv[] = "XTRACE_ENABLE";
-+constexpr char kXTraceFileEnv[] = "XTRACE_FILE";
-+constexpr char kXTraceMaxBodyBytesEnv[] = "XTRACE_MAX_BODY_BYTES";
-+constexpr char kXTraceMaxHeaderValueBytesEnv[] =
-+    "XTRACE_MAX_HEADER_VALUE_BYTES";
-+constexpr char kXTraceEnableSwitch[] = "xtrace-enable";
-+constexpr char kXTraceFileSwitch[] = "xtrace-file";
-+constexpr char kXTraceMaxBodyBytesSwitch[] = "xtrace-max-body-bytes";
-+constexpr char kXTraceMaxHeaderValueBytesSwitch[] =
-+    "xtrace-max-header-value-bytes";
-+
-+base::AtomicSequenceNumber g_xtrace_browser_network_sequence;
-+
-+std::optional<base::FilePath> ReadXTraceBrowserNetworkTraceFilePath() {
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+  if (command_line->HasSwitch(kXTraceEnableSwitch)) {
-+    base::FilePath trace_file =
-+        command_line->GetSwitchValuePath(kXTraceFileSwitch);
-+    if (!trace_file.empty()) {
-+      return trace_file;
-+    }
-+  }
-+
-+  std::unique_ptr<base::Environment> env = base::Environment::Create();
-+  std::optional<std::string> enabled = env->GetVar(kXTraceEnableEnv);
-+  if (!enabled || *enabled != "1") {
-+    return std::nullopt;
-+  }
-+
-+  std::optional<std::string> trace_file = env->GetVar(kXTraceFileEnv);
-+  if (!trace_file || trace_file->empty()) {
-+    return std::nullopt;
-+  }
-+  return base::FilePath::FromUTF8Unsafe(*trace_file);
-+}
-+
-+bool IsXTraceBrowserNetworkEnabled() {
-+  return ReadXTraceBrowserNetworkTraceFilePath().has_value();
-+}
-+
-+uint64_t ReadXTraceBrowserNetworkUInt64(const char* switch_name,
-+                                        const char* env_name,
-+                                        uint64_t default_value) {
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+  std::string value;
-+  if (command_line->HasSwitch(switch_name)) {
-+    value = command_line->GetSwitchValueASCII(switch_name);
-+  } else {
-+    std::unique_ptr<base::Environment> env = base::Environment::Create();
-+    std::string env_name_string(env_name);
-+    std::optional<std::string> env_value = env->GetVar(env_name_string);
-+    if (env_value) {
-+      value = *env_value;
-+    }
-+  }
-+
-+  uint64_t parsed = 0;
-+  if (!value.empty() && base::StringToUint64(value, &parsed)) {
-+    return parsed;
-+  }
-+  return default_value;
-+}
-+
-+base::DictValue CreateXTraceTruncationItem(std::string_view path,
-+                                           uint64_t original_size,
-+                                           uint64_t preview_size,
-+                                           std::string_view hash,
-+                                           std::string_view preview) {
-+  base::DictValue item;
-+  item.Set("path", std::string(path));
-+  item.Set("original_size", static_cast<double>(original_size));
-+  item.Set("preview_size", static_cast<double>(preview_size));
-+  item.Set("hash", std::string(hash));
-+  item.Set("preview", std::string(preview));
-+  return item;
-+}
-+
-+void AppendXTraceTruncationItem(base::ListValue* truncation_items,
-+                                base::DictValue* top_level_truncation,
-+                                bool* has_top_level_truncation,
-+                                std::string_view path,
-+                                uint64_t original_size,
-+                                uint64_t preview_size,
-+                                std::string_view hash,
-+                                std::string_view preview) {
-+  if (!*has_top_level_truncation) {
-+    *top_level_truncation = CreateXTraceTruncationItem(
-+        path, original_size, preview_size, hash, preview);
-+    *has_top_level_truncation = true;
-+  }
-+  truncation_items->Append(CreateXTraceTruncationItem(
-+      path, original_size, preview_size, hash, preview));
-+}
-+
-+base::ListValue CreateXTraceRequestHeadersJson(
-+    const net::HttpRequestHeaders& request_headers,
-+    uint64_t max_header_value_bytes,
-+    bool* truncated,
-+    base::ListValue* truncation_items,
-+    base::DictValue* top_level_truncation,
-+    bool* has_top_level_truncation) {
-+  base::ListValue headers;
-+  size_t header_index = 0;
-+  for (net::HttpRequestHeaders::Iterator it(request_headers); it.GetNext();) {
-+    base::DictValue header;
-+    std::string name(it.name());
-+    std::string value(it.value());
-+    std::string captured_value(value);
-+    header.Set("name", name);
-+    header.Set("name_length", static_cast<int>(name.size()));
-+    header.Set("value_length", static_cast<int>(value.size()));
-+    if (max_header_value_bytes > 0 &&
-+        value.size() > max_header_value_bytes) {
-+      captured_value = value.substr(0, max_header_value_bytes);
-+      const std::string value_hash =
-+          base::HexEncodeLower(crypto::SHA256HashString(value));
-+      header.Set("value_sha256", value_hash);
-+      header.Set("value_truncated", true);
-+      *truncated = true;
-+      AppendXTraceTruncationItem(
-+          truncation_items, top_level_truncation, has_top_level_truncation,
-+          base::StrCat({"args[0].headers[", base::NumberToString(header_index),
-+                        "].value"}),
-+          value.size(), captured_value.size(), value_hash, captured_value);
-+    }
-+    header.Set("value", captured_value);
-+    headers.Append(std::move(header));
-+    ++header_index;
-+  }
-+  return headers;
-+}
-+
-+base::ListValue CreateXTraceResponseHeadersJson(
-+    const net::HttpResponseHeaders* response_headers,
-+    uint64_t max_header_value_bytes,
-+    bool* truncated,
-+    base::ListValue* truncation_items,
-+    base::DictValue* top_level_truncation,
-+    bool* has_top_level_truncation) {
-+  base::ListValue headers;
-+  if (!response_headers) {
-+    return headers;
-+  }
-+
-+  size_t header_iterator = 0;
-+  size_t header_index = 0;
-+  std::string name;
-+  std::string value;
-+  while (response_headers->EnumerateHeaderLines(&header_iterator, &name,
-+                                                &value)) {
-+    base::DictValue header;
-+    std::string captured_value(value);
-+    header.Set("name", name);
-+    header.Set("name_length", static_cast<int>(name.size()));
-+    header.Set("value_length", static_cast<int>(value.size()));
-+    if (max_header_value_bytes > 0 &&
-+        value.size() > max_header_value_bytes) {
-+      captured_value = value.substr(0, max_header_value_bytes);
-+      const std::string value_hash =
-+          base::HexEncodeLower(crypto::SHA256HashString(value));
-+      header.Set("value_sha256", value_hash);
-+      header.Set("value_truncated", true);
-+      *truncated = true;
-+      AppendXTraceTruncationItem(
-+          truncation_items, top_level_truncation, has_top_level_truncation,
-+          base::StrCat({"args[0].response_headers[",
-+                        base::NumberToString(header_index), "].value"}),
-+          value.size(), captured_value.size(), value_hash, captured_value);
-+    }
-+    header.Set("value", captured_value);
-+    headers.Append(std::move(header));
-+    ++header_index;
-+  }
-+  return headers;
-+}
-+
-+base::DictValue CreateXTraceUploadBodyJson(
-+    const network::ResourceRequestBody* request_body,
-+    uint64_t max_body_bytes,
-+    bool* truncated,
-+    base::ListValue* truncation_items,
-+    base::DictValue* top_level_truncation,
-+    bool* has_top_level_truncation) {
-+  base::DictValue upload;
-+  if (!request_body) {
-+    upload.Set("element_count", 0);
-+    upload.Set("total_bytes", 0.0);
-+    upload.Set("in_memory_bytes", 0.0);
-+    upload.Set("has_file", false);
-+    upload.Set("has_blob", false);
-+    upload.Set("has_data_pipe", false);
-+    upload.Set("has_chunked_data_pipe", false);
-+    upload.Set("truncated", false);
-+    return upload;
-+  }
-+
-+  const std::vector<network::DataElement>* elements = request_body->elements();
-+  uint64_t total_bytes = 0;
-+  uint64_t in_memory_bytes = 0;
-+  bool has_file = false;
-+  bool has_data_pipe = false;
-+  bool has_chunked_data_pipe = false;
-+  bool has_unknown_size = false;
-+  std::string body_bytes;
-+
-+  for (const network::DataElement& element : *elements) {
-+    switch (element.type()) {
-+      case network::DataElement::Tag::kBytes: {
-+        const std::string_view bytes =
-+            element.As<network::DataElementBytes>().AsStringView();
-+        total_bytes += bytes.size();
-+        in_memory_bytes += bytes.size();
-+        body_bytes.append(bytes);
-+        break;
-+      }
-+      case network::DataElement::Tag::kFile: {
-+        const network::DataElementFile& file =
-+            element.As<network::DataElementFile>();
-+        total_bytes += file.length();
-+        has_file = true;
-+        break;
-+      }
-+      case network::DataElement::Tag::kDataPipe:
-+        has_data_pipe = true;
-+        has_unknown_size = true;
-+        break;
-+      case network::DataElement::Tag::kChunkedDataPipe:
-+        has_chunked_data_pipe = true;
-+        has_unknown_size = true;
-+        break;
-+    }
-+  }
-+
-+  upload.Set("element_count", static_cast<int>(elements->size()));
-+  upload.Set("total_bytes", static_cast<double>(total_bytes));
-+  upload.Set("in_memory_bytes", static_cast<double>(in_memory_bytes));
-+  upload.Set("has_file", has_file);
-+  upload.Set("has_blob", has_data_pipe);
-+  upload.Set("has_data_pipe", has_data_pipe);
-+  upload.Set("has_chunked_data_pipe", has_chunked_data_pipe);
-+  upload.Set("has_unknown_size", has_unknown_size);
-+  if (!body_bytes.empty()) {
-+    std::string captured_body(body_bytes);
-+    const std::string body_hash =
-+        base::HexEncodeLower(crypto::SHA256HashString(body_bytes));
-+    bool body_truncated = false;
-+    if (max_body_bytes > 0 && body_bytes.size() > max_body_bytes) {
-+      captured_body = body_bytes.substr(0, max_body_bytes);
-+      body_truncated = true;
-+      *truncated = true;
-+      AppendXTraceTruncationItem(
-+          truncation_items, top_level_truncation, has_top_level_truncation,
-+          "args[0].upload_body.body_hex", body_bytes.size(),
-+          captured_body.size(), body_hash,
-+          base::HexEncode(base::as_byte_span(captured_body)));
-+    }
-+    upload.Set("body_hex", base::HexEncode(base::as_byte_span(captured_body)));
-+    upload.Set("body_sha256", body_hash);
-+    upload.Set("truncated", body_truncated);
-+  } else {
-+    upload.Set("truncated", false);
-+  }
-+  return upload;
-+}
-+
-+std::string CreateXTraceNetworkCorrelationKey(std::string_view method,
-+                                              const GURL& url) {
-+  std::string material =
-+      base::ToUpperASCII(std::string(method)) + "\n" + url.spec();
-+  return "sha1:" + base::HexEncode(base::SHA1HashString(material));
-+}
-+
-+std::string CreateXTraceBrowserNetworkEventJson(
-+    std::string_view api,
-+    const network::ResourceRequest& request,
-+    const GURL& url,
-+    std::string_view method) {
-+  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
-+  const base::ProcessId pid = base::GetCurrentProcId();
-+  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
-+  const int64_t mono_time_us =
-+      base::TimeTicks::Now().since_origin().InMicroseconds();
-+  bool truncated = false;
-+  bool has_top_level_truncation = false;
-+  base::DictValue top_level_truncation;
-+  base::ListValue truncation_items;
-+  const uint64_t max_body_bytes = ReadXTraceBrowserNetworkUInt64(
-+      kXTraceMaxBodyBytesSwitch, kXTraceMaxBodyBytesEnv, 0);
-+  const uint64_t max_header_value_bytes = ReadXTraceBrowserNetworkUInt64(
-+      kXTraceMaxHeaderValueBytesSwitch, kXTraceMaxHeaderValueBytesEnv, 0);
-+
-+  base::DictValue arg;
-+  arg.Set("url", url.spec());
-+  arg.Set("method", std::string(method));
-+  arg.Set("network_correlation_key",
-+          CreateXTraceNetworkCorrelationKey(method, url));
-+  arg.Set("request_initiator",
-+          request.request_initiator ? request.request_initiator->Serialize()
-+                                    : std::string());
-+  arg.Set("referrer", request.referrer.spec());
-+  arg.Set("resource_type", request.resource_type);
-+  arg.Set("destination", static_cast<int>(request.destination));
-+  arg.Set("mode", static_cast<int>(request.mode));
-+  arg.Set("credentials_mode", static_cast<int>(request.credentials_mode));
-+  arg.Set("redirect_mode", static_cast<int>(request.redirect_mode));
-+  arg.Set("load_flags", request.load_flags);
-+  arg.Set("is_fetch_like_api", request.is_fetch_like_api);
-+  arg.Set("is_fetch_later_api", request.is_fetch_later_api);
-+  arg.Set("keepalive", request.keepalive);
-+  arg.Set("has_user_gesture", request.has_user_gesture);
-+  arg.Set("originated_from_service_worker",
-+          request.originated_from_service_worker);
-+  arg.Set("headers",
-+          CreateXTraceRequestHeadersJson(
-+              request.headers, max_header_value_bytes, &truncated,
-+              &truncation_items, &top_level_truncation,
-+              &has_top_level_truncation));
-+  const bool has_request_body = request.request_body != nullptr;
-+  arg.Set("has_request_body", has_request_body);
-+  if (has_request_body) {
-+    arg.Set("upload_body",
-+            CreateXTraceUploadBodyJson(
-+                request.request_body.get(), max_body_bytes, &truncated,
-+                &truncation_items, &top_level_truncation,
-+                &has_top_level_truncation));
-+  }
-+
-+  base::ListValue args;
-+  args.Append(std::move(arg));
-+
-+  base::DictValue event;
-+  event.Set("schema_version", 1);
-+  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-+                                      ":", base::NumberToString(seq)}));
-+  event.Set("session_id",
-+            base::StrCat({"browser-network:", base::NumberToString(pid)}));
-+  event.Set("seq", seq);
-+  event.Set("session_seq", seq);
-+  event.Set("t", api == "BrowserNetwork.redirect" ? "redirect" : "call");
-+  event.Set("ts", static_cast<double>(wall_time_us));
-+  event.Set("wall_time_us", static_cast<double>(wall_time_us));
-+  event.Set("mono_time_us", static_cast<double>(mono_time_us));
-+  event.Set("category", "network");
-+  event.Set("phase", api == "BrowserNetwork.redirect" ? "lifecycle" : "call");
-+  event.Set("pid", pid);
-+  event.Set("tid", 0);
-+  event.Set("api", std::string(api));
-+  event.Set("args", std::move(args));
-+  event.Set("stack", base::ListValue());
-+  event.Set("frame_url", request.referrer.spec());
-+  event.Set("origin", request.request_initiator
-+                          ? request.request_initiator->Serialize()
-+                          : std::string());
-+  event.Set("result", base::Value());
-+  event.Set("error", base::Value());
-+  event.Set("truncated", truncated);
-+  if (has_top_level_truncation) {
-+    top_level_truncation.Set("items", std::move(truncation_items));
-+    event.Set("truncation", std::move(top_level_truncation));
-+  }
-+
-+  std::string json;
-+  base::JSONWriter::Write(event, &json);
-+  return json;
-+}
-+
-+std::string CreateXTraceBrowserNetworkResponseEventJson(
-+    const network::ResourceRequest& request,
-+    const GURL& response_url,
-+    const network::mojom::URLResponseHead& response_head) {
-+  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
-+  const base::ProcessId pid = base::GetCurrentProcId();
-+  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
-+  const int64_t mono_time_us =
-+      base::TimeTicks::Now().since_origin().InMicroseconds();
-+  bool truncated = false;
-+  bool has_top_level_truncation = false;
-+  base::DictValue top_level_truncation;
-+  base::ListValue truncation_items;
-+  const uint64_t max_header_value_bytes = ReadXTraceBrowserNetworkUInt64(
-+      kXTraceMaxHeaderValueBytesSwitch, kXTraceMaxHeaderValueBytesEnv, 0);
-+  const net::HttpResponseHeaders* response_headers =
-+      response_head.headers.get();
-+
-+  base::DictValue arg;
-+  arg.Set("url", response_url.spec());
-+  arg.Set("method", request.method);
-+  arg.Set("network_correlation_key",
-+          CreateXTraceNetworkCorrelationKey(request.method, response_url));
-+  arg.Set("request_initiator",
-+          request.request_initiator ? request.request_initiator->Serialize()
-+                                    : std::string());
-+  arg.Set("referrer", request.referrer.spec());
-+  arg.Set("response_code",
-+          response_headers ? response_headers->response_code() : 0);
-+  arg.Set("status_line",
-+          response_headers ? response_headers->GetStatusLine() : std::string());
-+  arg.Set("mime_type", response_head.mime_type);
-+  arg.Set("charset", response_head.charset);
-+  arg.Set("content_length",
-+          static_cast<double>(response_head.content_length));
-+  arg.Set("encoded_data_length",
-+          static_cast<double>(response_head.encoded_data_length));
-+  arg.Set("network_accessed", response_head.network_accessed);
-+  arg.Set("was_fetched_via_cache", response_head.was_fetched_via_cache);
-+  arg.Set("was_fetched_via_service_worker",
-+          response_head.was_fetched_via_service_worker);
-+  arg.Set("response_headers",
-+          CreateXTraceResponseHeadersJson(
-+              response_headers, max_header_value_bytes, &truncated,
-+              &truncation_items, &top_level_truncation,
-+              &has_top_level_truncation));
-+
-+  base::ListValue args;
-+  args.Append(std::move(arg));
-+
-+  base::DictValue event;
-+  event.Set("schema_version", 1);
-+  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-+                                      ":", base::NumberToString(seq)}));
-+  event.Set("session_id",
-+            base::StrCat({"browser-network:", base::NumberToString(pid)}));
-+  event.Set("seq", seq);
-+  event.Set("session_seq", seq);
-+  event.Set("t", "return");
-+  event.Set("ts", static_cast<double>(wall_time_us));
-+  event.Set("wall_time_us", static_cast<double>(wall_time_us));
-+  event.Set("mono_time_us", static_cast<double>(mono_time_us));
-+  event.Set("category", "network");
-+  event.Set("phase", "return");
-+  event.Set("pid", pid);
-+  event.Set("tid", 0);
-+  event.Set("api", "BrowserNetwork.response");
-+  event.Set("args", std::move(args));
-+  event.Set("stack", base::ListValue());
-+  event.Set("frame_url", request.referrer.spec());
-+  event.Set("origin", request.request_initiator
-+                          ? request.request_initiator->Serialize()
-+                          : std::string());
-+  event.Set("result", base::Value());
-+  event.Set("error", base::Value());
-+  event.Set("truncated", truncated);
-+  if (has_top_level_truncation) {
-+    top_level_truncation.Set("items", std::move(truncation_items));
-+    event.Set("truncation", std::move(top_level_truncation));
-+  }
-+
-+  std::string json;
-+  base::JSONWriter::Write(event, &json);
-+  return json;
-+}
-+
-+std::string CreateXTraceBrowserNetworkCompleteEventJson(
-+    const network::ResourceRequest& request,
-+    const network::URLLoaderCompletionStatus& completion_status) {
-+  const int seq = g_xtrace_browser_network_sequence.GetNext() + 1;
-+  const base::ProcessId pid = base::GetCurrentProcId();
-+  const int64_t wall_time_us = base::Time::Now().ToInternalValue();
-+  const int64_t mono_time_us =
-+      base::TimeTicks::Now().since_origin().InMicroseconds();
-+  const int64_t completion_time_us =
-+      completion_status.completion_time.is_null()
-+          ? 0
-+          : completion_status.completion_time.since_origin().InMicroseconds();
-+
-+  base::DictValue arg;
-+  arg.Set("url", request.url.spec());
-+  arg.Set("method", request.method);
-+  arg.Set("network_correlation_key",
-+          CreateXTraceNetworkCorrelationKey(request.method, request.url));
-+  arg.Set("request_initiator",
-+          request.request_initiator ? request.request_initiator->Serialize()
-+                                    : std::string());
-+  arg.Set("referrer", request.referrer.spec());
-+  arg.Set("error_code", completion_status.error_code);
-+  arg.Set("extended_error_code", completion_status.extended_error_code);
-+  arg.Set("exists_in_cache", completion_status.exists_in_cache);
-+  arg.Set("completion_time_mono_us",
-+          static_cast<double>(completion_time_us));
-+  arg.Set("encoded_data_length",
-+          static_cast<double>(completion_status.encoded_data_length));
-+  arg.Set("encoded_body_length",
-+          static_cast<double>(completion_status.encoded_body_length));
-+  arg.Set("decoded_body_length",
-+          static_cast<double>(completion_status.decoded_body_length));
-+  arg.Set("trust_token_operation_status",
-+          static_cast<int>(completion_status.trust_token_operation_status));
-+  arg.Set("has_ssl_info", completion_status.ssl_info.has_value());
-+  arg.Set("should_report_orb_blocking",
-+          completion_status.should_report_orb_blocking);
-+  arg.Set("resolve_error_info_error",
-+          completion_status.resolve_error_info.error);
-+  arg.Set("resolve_error_info_is_secure_network_error",
-+          completion_status.resolve_error_info.is_secure_network_error);
-+  arg.Set("should_collapse_initiator",
-+          completion_status.should_collapse_initiator);
-+
-+  if (completion_status.cors_error_status) {
-+    const network::CorsErrorStatus& cors_error =
-+        *completion_status.cors_error_status;
-+    base::DictValue cors;
-+    cors.Set("cors_error", static_cast<int>(cors_error.cors_error));
-+    cors.Set("failed_parameter", cors_error.failed_parameter);
-+    cors.Set("resource_address_space",
-+             static_cast<int>(cors_error.resource_address_space));
-+    cors.Set("inconsistent_address_space",
-+             static_cast<int>(cors_error.inconsistent_address_space));
-+    cors.Set("has_authorization_covered_by_wildcard_on_preflight",
-+             cors_error.has_authorization_covered_by_wildcard_on_preflight);
-+    cors.Set("issue_id", cors_error.issue_id.ToString());
-+    arg.Set("cors_error_status", std::move(cors));
-+  } else {
-+    arg.Set("cors_error_status", base::Value());
-+  }
-+
-+  if (completion_status.blocked_by_response_reason) {
-+    arg.Set("blocked_by_response_reason",
-+            static_cast<int>(*completion_status.blocked_by_response_reason));
-+  } else {
-+    arg.Set("blocked_by_response_reason", base::Value());
-+  }
-+
-+  base::ListValue args;
-+  args.Append(std::move(arg));
-+
-+  base::DictValue event;
-+  event.Set("schema_version", 1);
-+  event.Set("event_id", base::StrCat({"browser-network:", base::NumberToString(pid),
-+                                      ":", base::NumberToString(seq)}));
-+  event.Set("session_id",
-+            base::StrCat({"browser-network:", base::NumberToString(pid)}));
-+  event.Set("seq", seq);
-+  event.Set("session_seq", seq);
-+  event.Set("t", "return");
-+  event.Set("ts", static_cast<double>(wall_time_us));
-+  event.Set("wall_time_us", static_cast<double>(wall_time_us));
-+  event.Set("mono_time_us", static_cast<double>(mono_time_us));
-+  event.Set("category", "network");
-+  event.Set("phase", "complete");
-+  event.Set("pid", pid);
-+  event.Set("tid", 0);
-+  event.Set("api", "BrowserNetwork.complete");
-+  event.Set("args", std::move(args));
-+  event.Set("stack", base::ListValue());
-+  event.Set("frame_url", request.referrer.spec());
-+  event.Set("origin", request.request_initiator
-+                          ? request.request_initiator->Serialize()
-+                          : std::string());
-+  event.Set("result", base::Value());
-+  if (completion_status.error_code != 0 ||
-+      completion_status.extended_error_code != 0 ||
-+      completion_status.cors_error_status ||
-+      completion_status.blocked_by_response_reason) {
-+    base::DictValue error;
-+    error.Set("code", completion_status.error_code);
-+    error.Set("extended_error_code",
-+              completion_status.extended_error_code);
-+    error.Set("resolve_error_info_error",
-+              completion_status.resolve_error_info.error);
-+    event.Set("error", std::move(error));
-+  } else {
-+    event.Set("error", base::Value());
-+  }
-+  event.Set("truncated", false);
-+
-+  std::string json;
-+  base::JSONWriter::Write(event, &json);
-+  return json;
-+}
-+
-+scoped_refptr<base::SequencedTaskRunner>
-+GetXTraceBrowserNetworkTaskRunner() {
-+  return content::XTraceHostImpl::GetTaskRunner();
-+}
-+
-+void WriteXTraceBrowserNetworkEvent(std::string event_json) {
-+  std::optional<base::FilePath> trace_file =
-+      ReadXTraceBrowserNetworkTraceFilePath();
-+  if (!trace_file || event_json.empty()) {
-+    return;
-+  }
-+  if (!base::CreateDirectory(trace_file->DirName())) {
-+    return;
-+  }
-+  std::string stamped_event_json =
-+      content::XTraceHostImpl::StampGlobalSequenceForWrite(
-+          std::move(event_json));
-+  stamped_event_json.push_back('\n');
-+  base::AppendToFile(*trace_file, stamped_event_json);
-+}
-+
-+void LogXTraceBrowserNetworkEvent(std::string event_json) {
-+  if (event_json.empty()) {
-+    return;
-+  }
-+  GetXTraceBrowserNetworkTaskRunner()->PostTask(
-+      FROM_HERE, base::BindOnce(&WriteXTraceBrowserNetworkEvent,
-+                                std::move(event_json)));
-+}
-+
-+class XTraceBrowserNetworkThrottle final : public blink::URLLoaderThrottle {
-+ public:
-+  XTraceBrowserNetworkThrottle() = default;
-+  ~XTraceBrowserNetworkThrottle() override = default;
-+  XTraceBrowserNetworkThrottle(const XTraceBrowserNetworkThrottle&) = delete;
-+  XTraceBrowserNetworkThrottle& operator=(const XTraceBrowserNetworkThrottle&) =
-+      delete;
-+
-+  void WillStartRequest(network::ResourceRequest* request,
-+                        bool* defer) override {
-+    if (!request) {
-+      return;
-+    }
-+    request_ = *request;
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkEventJson(
-+        "BrowserNetwork.request", *request, request->url, request->method));
-+  }
-+
-+  void WillRedirectRequest(
-+      net::RedirectInfo* redirect_info,
-+      const network::mojom::URLResponseHead& response_head,
-+      bool* defer,
-+      network::HttpRequestHeadersUpdateParams* headers_update_params) override {
-+    if (!redirect_info || !request_) {
-+      return;
-+    }
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkEventJson(
-+        "BrowserNetwork.redirect", *request_, redirect_info->new_url,
-+        redirect_info->new_method));
-+    request_->url = redirect_info->new_url;
-+    request_->method = redirect_info->new_method;
-+  }
-+
-+  void WillProcessResponse(const GURL& response_url,
-+                           network::mojom::URLResponseHead* response_head,
-+                           bool* defer) override {
-+    if (!response_head || !request_) {
-+      return;
-+    }
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkResponseEventJson(
-+        *request_, response_url, *response_head));
-+  }
-+
-+ private:
-+  std::optional<network::ResourceRequest> request_;
-+};
-+
-+class XTraceBrowserNetworkURLLoaderClient final
-+    : public network::mojom::URLLoaderClient {
-+ public:
-+  XTraceBrowserNetworkURLLoaderClient(
-+      const network::ResourceRequest& request,
-+      mojo::PendingRemote<network::mojom::URLLoaderClient> client)
-+      : request_(request), client_(std::move(client)) {}
-+
-+  XTraceBrowserNetworkURLLoaderClient(
-+      const XTraceBrowserNetworkURLLoaderClient&) = delete;
-+  XTraceBrowserNetworkURLLoaderClient& operator=(
-+      const XTraceBrowserNetworkURLLoaderClient&) = delete;
-+
-+ private:
-+  void OnReceiveEarlyHints(network::mojom::EarlyHintsPtr early_hints) override {
-+    client_->OnReceiveEarlyHints(std::move(early_hints));
-+  }
-+
-+  void OnReceiveResponse(
-+      network::mojom::URLResponseHeadPtr response_head,
-+      mojo::ScopedDataPipeConsumerHandle body,
-+      std::optional<mojo_base::BigBuffer> cached_metadata) override {
-+    if (response_head) {
-+      LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkResponseEventJson(
-+          request_, request_.url, *response_head));
-+    }
-+    client_->OnReceiveResponse(std::move(response_head), std::move(body),
-+                               std::move(cached_metadata));
-+  }
-+
-+  void OnReceiveRedirect(
-+      const net::RedirectInfo& redirect_info,
-+      network::mojom::URLResponseHeadPtr response_head) override {
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkEventJson(
-+        "BrowserNetwork.redirect", request_, redirect_info.new_url,
-+        redirect_info.new_method));
-+    request_.url = redirect_info.new_url;
-+    request_.method = redirect_info.new_method;
-+    client_->OnReceiveRedirect(redirect_info, std::move(response_head));
-+  }
-+
-+  void OnUploadProgress(int64_t current_position,
-+                        int64_t total_size,
-+                        OnUploadProgressCallback ack_callback) override {
-+    client_->OnUploadProgress(current_position, total_size,
-+                              std::move(ack_callback));
-+  }
-+
-+  void OnTransferSizeUpdated(int32_t transfer_size_diff) override {
-+    client_->OnTransferSizeUpdated(transfer_size_diff);
-+  }
-+
-+  void OnComplete(
-+      const network::URLLoaderCompletionStatus& completion_status) override {
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkCompleteEventJson(
-+        request_, completion_status));
-+    client_->OnComplete(completion_status);
-+  }
-+
-+  network::ResourceRequest request_;
-+  mojo::Remote<network::mojom::URLLoaderClient> client_;
-+};
-+
-+mojo::PendingRemote<network::mojom::URLLoaderClient>
-+CreateXTraceBrowserNetworkURLLoaderClientRemote(
-+    const network::ResourceRequest& request,
-+    mojo::PendingRemote<network::mojom::URLLoaderClient> client) {
-+  mojo::PendingRemote<network::mojom::URLLoaderClient> wrapped_client;
-+  mojo::PendingReceiver<network::mojom::URLLoaderClient> wrapped_receiver =
-+      wrapped_client.InitWithNewPipeAndPassReceiver();
-+  mojo::MakeSelfOwnedReceiver(
-+      std::make_unique<XTraceBrowserNetworkURLLoaderClient>(
-+          request, std::move(client)),
-+      std::move(wrapped_receiver));
-+  return wrapped_client;
-+}
-+
-+class XTraceBrowserNetworkProxyingURLLoaderFactory
-+    : public network::SelfDeletingURLLoaderFactory {
-+ public:
-+  XTraceBrowserNetworkProxyingURLLoaderFactory(
-+      mojo::PendingReceiver<network::mojom::URLLoaderFactory> loader_receiver,
-+      mojo::PendingRemote<network::mojom::URLLoaderFactory>
-+          target_factory_remote,
-+      base::SelfDeletingPassKey pass_key)
-+      : network::SelfDeletingURLLoaderFactory(std::move(loader_receiver),
-+                                              pass_key) {
-+    target_factory_.Bind(std::move(target_factory_remote));
-+    target_factory_.set_disconnect_handler(base::BindOnce(
-+        &XTraceBrowserNetworkProxyingURLLoaderFactory::OnTargetFactoryError,
-+        base::Unretained(this)));
-+  }
-+  XTraceBrowserNetworkProxyingURLLoaderFactory(
-+      const XTraceBrowserNetworkProxyingURLLoaderFactory&) = delete;
-+  XTraceBrowserNetworkProxyingURLLoaderFactory& operator=(
-+      const XTraceBrowserNetworkProxyingURLLoaderFactory&) = delete;
-+
-+  static void MaybeProxyRequest(
-+      content::BrowserContext* browser_context,
-+      network::URLLoaderFactoryBuilder& factory_builder) {
-+    if (!browser_context || !IsXTraceBrowserNetworkEnabled()) {
-+      return;
-+    }
-+
-+    auto [receiver, remote] = factory_builder.Append();
-+    base::MakeSelfDeleting<XTraceBrowserNetworkProxyingURLLoaderFactory>(
-+        std::move(receiver), std::move(remote));
-+  }
-+
-+  void CreateLoaderAndStart(
-+      mojo::PendingReceiver<network::mojom::URLLoader> loader_receiver,
-+      int32_t request_id,
-+      uint32_t options,
-+      const network::ResourceRequest& request,
-+      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
-+      const net::MutableNetworkTrafficAnnotationTag& traffic_annotation)
-+      override {
-+    LogXTraceBrowserNetworkEvent(CreateXTraceBrowserNetworkEventJson(
-+        "BrowserNetwork.request", request, request.url, request.method));
-+    mojo::PendingRemote<network::mojom::URLLoaderClient> wrapped_client =
-+        CreateXTraceBrowserNetworkURLLoaderClientRemote(request,
-+                                                        std::move(client));
-+    target_factory_->CreateLoaderAndStart(std::move(loader_receiver),
-+                                          request_id, options, request,
-+                                          std::move(wrapped_client),
-+                                          traffic_annotation);
-+  }
-+
-+ private:
-+  ~XTraceBrowserNetworkProxyingURLLoaderFactory() override = default;
-+
-+  void OnTargetFactoryError() { DisconnectReceiversAndDestroy(); }
-+
-+  mojo::Remote<network::mojom::URLLoaderFactory> target_factory_;
-+};
-+
-+}  // namespace
-+
- std::unique_ptr<blink::URLLoaderThrottle> CreateGoogleURLLoaderThrottle(
- #if BUILDFLAG(IS_ANDROID)
-     const std::string& client_data_header,
-@@ -6059,6 +6873,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
-   Profile* profile = Profile::FromBrowserContext(browser_context);
-   DCHECK(profile);
- 
-+  if (IsXTraceBrowserNetworkEnabled()) {
-+    result.push_back(std::make_unique<XTraceBrowserNetworkThrottle>());
-+  }
-+
-   ChromeNavigationUIData* chrome_navigation_ui_data =
-       static_cast<ChromeNavigationUIData*>(navigation_ui_data);
- 
-@@ -6151,6 +6969,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottlesForKeepAlive(
-   Profile* profile = Profile::FromBrowserContext(browser_context);
-   DCHECK(profile);
- 
-+  if (IsXTraceBrowserNetworkEnabled()) {
-+    result.push_back(std::make_unique<XTraceBrowserNetworkThrottle>());
-+  }
-+
- #if BUILDFLAG(IS_ANDROID)
-   auto [client_data_header, unused_is_custom_tab] =
-       GetClientDataHeader(frame_tree_node_id);
-@@ -6755,6 +7577,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
- #endif  // BUILDFLAG (ENABLE_EXTENSIONS_CORE)
- #endif  // BUILDFLAG(ENABLE_GUEST_VIEW)
- 
-+  XTraceBrowserNetworkProxyingURLLoaderFactory::MaybeProxyRequest(
-+      browser_context, factory_builder);
-+
-   // WARNING: This must be the last interceptor in the chain as the proxying
-   // URLLoaderFactory installed by this needs to be the one actually sending
-   // packets over the network (to effectively target `bound_network`).
-diff --git a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-index ecb68ce4e2..8da7876994 100644
---- a/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-+++ b/third_party/blink/renderer/bindings/core/v8/v8_script_runner.cc
-@@ -68,6 +68,7 @@
- #include "third_party/blink/renderer/platform/loader/fetch/url_loader/cached_metadata_handler.h"
- #include "third_party/blink/renderer/platform/scheduler/public/event_loop.h"
- #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
-+#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
- 
- namespace blink {
- 
-@@ -77,6 +78,140 @@ namespace {
- // This limit was arrived at arbitrarily. crbug.com/449744
- const int kMaxRecursionDepth = 44;
- 
-+const char* XTraceScriptEvaluationResultType(
-+    ScriptEvaluationResult::ResultType result_type) {
-+  switch (result_type) {
-+    case ScriptEvaluationResult::ResultType::kNotRun:
-+      return "not_run";
-+    case ScriptEvaluationResult::ResultType::kSuccess:
-+      return "success";
-+    case ScriptEvaluationResult::ResultType::kException:
-+      return "exception";
-+    case ScriptEvaluationResult::ResultType::kAborted:
-+      return "aborted";
-+  }
-+  return "unknown";
-+}
-+
-+const char* XTraceModuleImportPhase(v8::ModuleImportPhase phase) {
-+  switch (phase) {
-+    case v8::ModuleImportPhase::kSource:
-+      return "source";
-+    case v8::ModuleImportPhase::kDefer:
-+      return "defer";
-+    case v8::ModuleImportPhase::kEvaluation:
-+      return "evaluation";
-+  }
-+  return "unknown";
-+}
-+
-+const char* XTraceClassicScriptAssetKind(
-+    ScriptSourceLocationType source_location_type) {
-+  switch (source_location_type) {
-+    case ScriptSourceLocationType::kExternalFile:
-+      return "external-script";
-+    case ScriptSourceLocationType::kInline:
-+    case ScriptSourceLocationType::kInlineInsideDocumentWrite:
-+    case ScriptSourceLocationType::kInlineInsideGeneratedElement:
-+      return "inline-script";
-+    case ScriptSourceLocationType::kJavascriptUrl:
-+      return "javascript-url";
-+    case ScriptSourceLocationType::kEvalForScheduledAction:
-+      return "dynamic-code";
-+    case ScriptSourceLocationType::kInspector:
-+      return "inspector-code";
-+    case ScriptSourceLocationType::kInternal:
-+      return "internal-script";
-+    case ScriptSourceLocationType::kUnknown:
-+      return "classic-script";
-+  }
-+  return "classic-script";
-+}
-+
-+String XTraceContextUrl(ExecutionContext* execution_context) {
-+  return execution_context ? execution_context->Url().GetString() : String();
-+}
-+
-+String XTraceContextOrigin(ExecutionContext* execution_context) {
-+  if (!execution_context || !execution_context->GetSecurityOrigin()) {
-+    return String();
-+  }
-+  return execution_context->GetSecurityOrigin()->ToString();
-+}
-+
-+void LogXTraceClassicScriptEvaluate(
-+    ExecutionContext* execution_context,
-+    const ClassicScript* classic_script,
-+    int script_id,
-+    const ScriptEvaluationResult& result) {
-+  if (!XTraceLogger::Enabled()) {
-+    return;
-+  }
-+
-+  const String& script_url = classic_script->SourceUrl();
-+  const TextPosition& start_position = classic_script->StartPosition();
-+  const String context_url = XTraceContextUrl(execution_context);
-+  const String context_origin = XTraceContextOrigin(execution_context);
-+  String args = String::Format(
-+      "[{\"script_url\":%s,\"script_url_ref\":%s,\"context_url\":%s,"
-+      "\"context_url_ref\":%s,\"context_origin\":%s,"
-+      "\"context_origin_ref\":%s,\"script_id\":%d,\"source_length\":%u,"
-+      "\"start_line\":%d,"
-+      "\"start_column\":%d,\"result_type\":%s}]",
-+      XTraceLogger::QuoteJson(script_url).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(script_url).Utf8().c_str(),
-+      XTraceLogger::QuoteJson(context_url).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(context_url).Utf8().c_str(),
-+      XTraceLogger::QuoteJson(context_origin).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(context_origin).Utf8().c_str(),
-+      script_id,
-+      classic_script->SourceText().length(),
-+      start_position.line_.ZeroBasedInt(),
-+      start_position.column_.ZeroBasedInt(),
-+      XTraceLogger::QuoteJson(String(XTraceScriptEvaluationResultType(
-+                                  result.GetResultType())))
-+          .Utf8()
-+          .c_str());
-+  XTraceLogger::LogEventWithOptionalAssetAndContext(
-+      "reverse", "return", "ClassicScript.evaluate", args,
-+      XTraceClassicScriptAssetKind(classic_script->SourceLocationType()),
-+      script_url, classic_script->SourceText().ToString(), context_url,
-+      context_origin);
-+}
-+
-+void LogXTraceModuleScriptEvaluate(ExecutionContext* execution_context,
-+                                   ModuleScript* module_script,
-+                                   v8::ModuleImportPhase phase,
-+                                   const ScriptEvaluationResult& result) {
-+  if (!XTraceLogger::Enabled()) {
-+    return;
-+  }
-+
-+  const String script_url = module_script->SourceUrl().GetString();
-+  const String context_url = XTraceContextUrl(execution_context);
-+  const String context_origin = XTraceContextOrigin(execution_context);
-+  String args = String::Format(
-+      "[{\"script_url\":%s,\"script_url_ref\":%s,\"context_url\":%s,"
-+      "\"context_url_ref\":%s,\"context_origin\":%s,"
-+      "\"context_origin_ref\":%s,\"import_phase\":%s,\"result_type\":%s}]",
-+      XTraceLogger::QuoteJson(script_url).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(script_url).Utf8().c_str(),
-+      XTraceLogger::QuoteJson(context_url).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(context_url).Utf8().c_str(),
-+      XTraceLogger::QuoteJson(context_origin).Utf8().c_str(),
-+      XTraceLogger::StringHashRefJson(context_origin).Utf8().c_str(),
-+      XTraceLogger::QuoteJson(String(XTraceModuleImportPhase(phase)))
-+          .Utf8()
-+          .c_str(),
-+      XTraceLogger::QuoteJson(String(XTraceScriptEvaluationResultType(
-+                                  result.GetResultType())))
-+          .Utf8()
-+          .c_str());
-+  XTraceLogger::LogEventNoStackWithContext(
-+      "reverse", "return", "ModuleScript.evaluate", args, context_url,
-+      context_origin);
-+}
-+
- // In order to make sure all pending messages to be processed in
- // v8::Function::Call, we don't call throwStackOverflowException
- // directly. Instead, we create a v8::Function of
-@@ -547,10 +682,17 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
- 
-   ExecutionContext* execution_context = ExecutionContext::From(script_state);
-   DCHECK(execution_context->IsContextThread());
-+  int xtrace_script_id = v8::UnboundScript::kNoScriptId;
-+  auto log_classic_result =
-+      [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
-+    LogXTraceClassicScriptEvaluate(execution_context, classic_script,
-+                                   xtrace_script_id, result);
-+    return result;
-+  };
- 
-   if (policy == ExecuteScriptPolicy::kDoNotExecuteScriptWhenScriptsDisabled &&
-       !execution_context->CanExecuteScripts(kAboutToExecuteScript)) {
--    return ScriptEvaluationResult::FromClassicNotRun();
-+    return log_classic_result(ScriptEvaluationResult::FromClassicNotRun());
-   }
- 
-   v8::Isolate* isolate = script_state->GetIsolate();
-@@ -626,6 +768,7 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-                                       compile_options, no_cache_reason,
-                                       can_use_crowdsourced_compile_hints)
-             .ToLocal(&script)) {
-+      xtrace_script_id = script->ScriptId();
-       DEVTOOLS_TIMELINE_TRACE_EVENT_WITH_CATEGORIES(
-           TRACE_DISABLED_BY_DEFAULT("devtools.target-rundown"),
-           "ScriptCompiled", inspector_target_rundown_event::Data,
-@@ -702,7 +845,7 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-     if (!try_catch.CanContinue()) {
-       if (worker_or_worklet_global_scope)
-         worker_or_worklet_global_scope->ScriptController()->ForbidExecution();
--      return ScriptEvaluationResult::FromClassicAborted();
-+      return log_classic_result(ScriptEvaluationResult::FromClassicAborted());
-     }
- 
-     if (!try_catch.HasCaught()) {
-@@ -711,7 +854,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-       v8::Local<v8::Value> result;
-       bool success = maybe_result.ToLocal(&result);
-       DCHECK(success);
--      return ScriptEvaluationResult::FromClassicSuccess(result);
-+      return log_classic_result(
-+          ScriptEvaluationResult::FromClassicSuccess(result));
-     }
- 
-     DCHECK(maybe_result.IsEmpty());
-@@ -729,7 +873,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-       // reported to WorkerGlobalScope.onerror via `TryCatch::SetVerbose(true)`
-       // called at top-level worker script evaluation.
-       try_catch.ReThrow();
--      return ScriptEvaluationResult::FromClassicExceptionRethrown();
-+      return log_classic_result(
-+          ScriptEvaluationResult::FromClassicExceptionRethrown());
-     }
- 
-     // Step 8.1.3. Otherwise, rethrow errors is false. Perform the following
-@@ -737,8 +882,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-     if (!rethrow_errors.ShouldRethrow()) {
-       // #report-the-error for rethrow errors == true is already handled via
-       // `TryCatch::SetVerbose(true)` above.
--      return ScriptEvaluationResult::FromClassicException(
--          try_catch.Exception());
-+      return log_classic_result(
-+          ScriptEvaluationResult::FromClassicException(try_catch.Exception()));
-     }
-   }
-   // |v8::TryCatch| is (and should be) exited, before ThrowException() below.
-@@ -757,7 +902,8 @@ ScriptEvaluationResult V8ScriptRunner::CompileAndRunScript(
-       isolate,
-       V8ThrowDOMException::CreateOrEmpty(
-           isolate, DOMExceptionCode::kNetworkError, rethrow_errors.Message()));
--  return ScriptEvaluationResult::FromClassicExceptionRethrown();
-+  return log_classic_result(
-+      ScriptEvaluationResult::FromClassicExceptionRethrown());
- }
- 
- v8::MaybeLocal<v8::Value> V8ScriptRunner::CallAsConstructor(
-@@ -883,6 +1029,12 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
-   DCHECK_EQ(Modulator::From(script_state), module_script->SettingsObject());
-   ExecutionContext* execution_context = ExecutionContext::From(script_state);
-   v8::Isolate* isolate = script_state->GetIsolate();
-+  auto log_module_result =
-+      [&](ScriptEvaluationResult result) -> ScriptEvaluationResult {
-+    LogXTraceModuleScriptEvaluate(execution_context, module_script, phase,
-+                                  result);
-+    return result;
-+  };
- 
-   // TODO(crbug.com/1151165): Ideally v8::Context should be entered before
-   // CanExecuteScripts().
-@@ -891,7 +1043,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
-   // <spec step="3">Check if we can run script with settings. If this returns
-   // "do not run" then return NormalCompletion(empty).</spec>
-   if (!execution_context->CanExecuteScripts(kAboutToExecuteScript)) {
--    return ScriptEvaluationResult::FromModuleNotRun();
-+    return log_module_result(ScriptEvaluationResult::FromModuleNotRun());
-   }
- 
-   // <spec step="4">Prepare to run script given settings.</spec>
-@@ -948,7 +1100,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
-             : record->Evaluate(script_state->GetContext());
- 
-     if (!try_catch.CanContinue())
--      return ScriptEvaluationResult::FromModuleAborted();
-+      return log_module_result(ScriptEvaluationResult::FromModuleAborted());
- 
-     DCHECK(!try_catch.HasCaught());
-     result = ScriptEvaluationResult::FromModuleSuccess(
-@@ -992,7 +1144,7 @@ ScriptEvaluationResult V8ScriptRunner::EvaluateModule(
-   // <spec step="8">Clean up after running script with settings.</spec>
-   // Partially implemented in MicrotaskScope destructor and the
-   // v8::Context::Scope destructor.
--  return result;
-+  return log_module_result(std::move(result));
- }
- 
- void V8ScriptRunner::ReportException(v8::Isolate* isolate,
-diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-new file mode 100644
-index 0000000000..b2a722741b
---- /dev/null
-+++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -0,0 +1,580 @@
-+// Copyright 2026 The XTrace Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in Chromium's LICENSE file.
-+
-+#include "third_party/blink/renderer/platform/xtrace/xtrace_logger.h"
-+
-+#include <atomic>
-+#include <cctype>
-+#include <memory>
-+#include <optional>
-+#include <string>
-+#include <string_view>
-+#include <unordered_set>
-+#include <vector>
-+
-+#include "base/command_line.h"
-+#include "base/environment.h"
-+#include "base/files/file_path.h"
-+#include "base/hash/sha1.h"
-+#include "base/json/string_escape.h"
-+#include "base/no_destructor.h"
-+#include "base/process/process_handle.h"
-+#include "base/strings/string_number_conversions.h"
-+#include "base/strings/string_split.h"
-+#include "base/strings/string_util.h"
-+#include "base/threading/platform_thread.h"
-+#include "base/time/time.h"
-+#include "mojo/public/cpp/bindings/remote.h"
-+#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
-+#include "third_party/blink/public/mojom/xtrace/xtrace.mojom-blink.h"
-+#include "third_party/blink/public/platform/platform.h"
-+#include "v8/include/v8.h"
-+
-+namespace blink {
-+namespace {
-+
-+constexpr char kEnableEnv[] = "XTRACE_ENABLE";
-+constexpr char kFileEnv[] = "XTRACE_FILE";
-+constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
-+constexpr char kCaptureValuesEnv[] = "XTRACE_CAPTURE_VALUES";
-+constexpr char kCaptureAssetsEnv[] = "XTRACE_CAPTURE_ASSETS";
-+constexpr char kEnableSwitch[] = "xtrace-enable";
-+constexpr char kFileSwitch[] = "xtrace-file";
-+constexpr char kCategoriesSwitch[] = "xtrace-categories";
-+constexpr char kCaptureValuesSwitch[] = "xtrace-capture-values";
-+constexpr char kCaptureAssetsSwitch[] = "xtrace-capture-assets";
-+
-+struct XTraceConfig {
-+  bool enabled = false;
-+  std::string categories = "reverse,fingerprint";
-+  std::string capture_values = "full";
-+  std::string capture_assets = "full";
-+  std::string session_id;
-+  std::string trace_stem;
-+};
-+
-+std::optional<base::FilePath> ReadTraceFilePathFromRuntime() {
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+  if (command_line->HasSwitch(kEnableSwitch)) {
-+    base::FilePath trace_file = command_line->GetSwitchValuePath(kFileSwitch);
-+    if (!trace_file.empty()) {
-+      return trace_file;
-+    }
-+  }
-+
-+  std::unique_ptr<base::Environment> env = base::Environment::Create();
-+  std::optional<std::string> enabled = env->GetVar(kEnableEnv);
-+  if (!enabled || *enabled != "1") {
-+    return std::nullopt;
-+  }
-+
-+  std::optional<std::string> trace_file = env->GetVar(kFileEnv);
-+  if (!trace_file || trace_file->empty()) {
-+    return std::nullopt;
-+  }
-+
-+  return base::FilePath::FromUTF8Unsafe(*trace_file);
-+}
-+
-+std::optional<std::string> ReadRuntimeString(const char* switch_name,
-+                                             const char* env_name) {
-+  const base::CommandLine* command_line =
-+      base::CommandLine::ForCurrentProcess();
-+  if (command_line->HasSwitch(switch_name)) {
-+    std::string value = command_line->GetSwitchValueASCII(switch_name);
-+    if (!value.empty()) {
-+      return value;
-+    }
-+  }
-+
-+  std::unique_ptr<base::Environment> env = base::Environment::Create();
-+  std::string env_name_string(env_name);
-+  std::optional<std::string> value = env->GetVar(env_name_string);
-+  if (value && !value->empty()) {
-+    return value;
-+  }
-+
-+  return std::nullopt;
-+}
-+
-+std::string MakeSessionId() {
-+  const int64_t wall_time_us =
-+      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
-+  return base::NumberToString(base::GetCurrentProcId()) + "-" +
-+         base::NumberToString(wall_time_us);
-+}
-+
-+XTraceConfig ReadConfigFromRuntime() {
-+  XTraceConfig config;
-+  std::optional<base::FilePath> trace_file_path = ReadTraceFilePathFromRuntime();
-+  config.enabled = trace_file_path.has_value();
-+  config.categories = ReadRuntimeString(kCategoriesSwitch, kCategoriesEnv)
-+                          .value_or("reverse,fingerprint");
-+  config.capture_values =
-+      ReadRuntimeString(kCaptureValuesSwitch, kCaptureValuesEnv)
-+          .value_or("full");
-+  config.capture_assets =
-+      ReadRuntimeString(kCaptureAssetsSwitch, kCaptureAssetsEnv)
-+          .value_or("full");
-+  config.session_id = MakeSessionId();
-+  if (trace_file_path) {
-+    config.trace_stem =
-+        trace_file_path->BaseName().RemoveExtension().AsUTF8Unsafe();
-+  }
-+  return config;
-+}
-+
-+const XTraceConfig& GetCachedConfig() {
-+  static base::NoDestructor<XTraceConfig> config(ReadConfigFromRuntime());
-+  return *config;
-+}
-+
-+std::string QuoteJsonString(std::string_view value) {
-+  std::string quoted;
-+  base::EscapeJSONString(value, /*put_in_quotes=*/true, &quoted);
-+  return quoted;
-+}
-+
-+bool CategoryEnabled(const XTraceConfig& config, std::string_view category) {
-+  if (!config.enabled || category.empty()) {
-+    return false;
-+  }
-+  if (config.categories == "all") {
-+    return true;
-+  }
-+
-+  for (std::string_view token :
-+       base::SplitStringPiece(config.categories, ",", base::TRIM_WHITESPACE,
-+                              base::SPLIT_WANT_NONEMPTY)) {
-+    if (token == category) {
-+      return true;
-+    }
-+  }
-+  return false;
-+}
-+
-+uint64_t NextSequenceNumber() {
-+  static std::atomic<uint64_t> sequence{0};
-+  return ++sequence;
-+}
-+
-+std::string Sha1Ref(std::string_view value) {
-+  return "sha1:" + base::HexEncode(base::SHA1HashString(value));
-+}
-+
-+std::string V8StringToUtf8(v8::Isolate* isolate, v8::Local<v8::String> value) {
-+  if (value.IsEmpty()) {
-+    return std::string();
-+  }
-+  v8::String::Utf8Value utf8(isolate, value);
-+  if (!*utf8) {
-+    return std::string();
-+  }
-+  return std::string(*utf8, utf8.length());
-+}
-+
-+std::string CaptureJavaScriptStack() {
-+  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
-+  if (!isolate) {
-+    return "[]";
-+  }
-+
-+  v8::HandleScope handle_scope(isolate);
-+  v8::Local<v8::StackTrace> stack_trace =
-+      v8::StackTrace::CurrentStackTrace(isolate, 16,
-+                                        v8::StackTrace::kDetailed);
-+  if (stack_trace.IsEmpty() || stack_trace->GetFrameCount() == 0) {
-+    return "[]";
-+  }
-+
-+  std::string stack;
-+  stack.append("[");
-+  for (int i = 0; i < stack_trace->GetFrameCount(); ++i) {
-+    v8::Local<v8::StackFrame> frame = stack_trace->GetFrame(isolate, i);
-+    if (frame.IsEmpty()) {
-+      continue;
-+    }
-+    if (stack.size() > 1) {
-+      stack.append(",");
-+    }
-+    stack.append("{\"function\":");
-+    stack.append(QuoteJsonString(V8StringToUtf8(
-+        isolate, frame->GetFunctionName())));
-+    stack.append(",\"url\":");
-+    stack.append(QuoteJsonString(V8StringToUtf8(
-+        isolate, frame->GetScriptNameOrSourceURL())));
-+    stack.append(",\"line\":");
-+    stack.append(base::NumberToString(frame->GetLineNumber()));
-+    stack.append(",\"column\":");
-+    stack.append(base::NumberToString(frame->GetColumn()));
-+    stack.append(",\"script_id\":");
-+    stack.append(base::NumberToString(frame->GetScriptId()));
-+    stack.append(",\"is_eval\":");
-+    stack.append(frame->IsEval() ? "true" : "false");
-+    stack.append(",\"is_constructor\":");
-+    stack.append(frame->IsConstructor() ? "true" : "false");
-+    stack.append("}");
-+  }
-+  stack.append("]");
-+  return stack;
-+}
-+
-+bool CaptureAssetsEnabled(const XTraceConfig& config) {
-+  return config.capture_assets == "summary" || config.capture_assets == "full";
-+}
-+
-+bool CaptureFullAssetsEnabled(const XTraceConfig& config) {
-+  return config.capture_assets == "full";
-+}
-+
-+bool IsInternalScriptUrl(const String& url) {
-+  std::string url_utf8 = url.Utf8();
-+  return url_utf8.starts_with("chrome://") ||
-+         url_utf8.starts_with("chrome-untrusted://") ||
-+         url_utf8.starts_with("devtools://") ||
-+         url_utf8.starts_with("chrome-extension://");
-+}
-+
-+std::string SanitizeAssetIdForPath(std::string_view asset_id) {
-+  std::string safe;
-+  safe.reserve(asset_id.size());
-+  for (char c : asset_id) {
-+    unsigned char uc = static_cast<unsigned char>(c);
-+    safe.push_back(std::isalnum(uc) ? c : '_');
-+  }
-+  return safe.empty() ? "asset" : safe;
-+}
-+
-+mojom::blink::XTraceHost* GetXTraceHost();
-+
-+bool AssetAlreadySent(std::string_view asset_id) {
-+  thread_local auto* sent_assets = new std::unordered_set<std::string>();
-+  auto [_, inserted] = sent_assets->insert(std::string(asset_id));
-+  return !inserted;
-+}
-+
-+std::string BuildScriptAssetFieldsAndSend(const XTraceConfig& config,
-+                                          const char* kind,
-+                                          const String& url,
-+                                          const String& source,
-+                                          uint64_t first_seq) {
-+  if (!CaptureAssetsEnabled(config) || source.empty()) {
-+    return std::string();
-+  }
-+
-+  std::string source_utf8 = source.Utf8();
-+  std::string url_utf8 = url.Utf8();
-+  std::string kind_string(kind ? kind : "unknown");
-+  std::string source_hash = Sha1Ref(source_utf8);
-+  std::string asset_hash_input = kind_string + "\n" + url_utf8 + "\n" + source_utf8;
-+  std::string asset_id = Sha1Ref(asset_hash_input);
-+
-+  std::string content_path;
-+  std::string content;
-+  if (CaptureFullAssetsEnabled(config)) {
-+    std::string trace_stem =
-+        config.trace_stem.empty() ? "trace_unknown" : config.trace_stem;
-+    content_path = "assets/" + trace_stem + "/" +
-+                   SanitizeAssetIdForPath(asset_id) + ".js";
-+    content = source_utf8;
-+  }
-+
-+  if (!AssetAlreadySent(asset_id)) {
-+    std::string manifest;
-+    manifest.append("{\"asset_id\":");
-+    manifest.append(QuoteJsonString(asset_id));
-+    manifest.append(",\"kind\":");
-+    manifest.append(QuoteJsonString(kind_string));
-+    manifest.append(",\"url\":");
-+    manifest.append(QuoteJsonString(url_utf8));
-+    manifest.append(",\"content_path\":");
-+    manifest.append(QuoteJsonString(content_path));
-+    manifest.append(",\"sha1\":");
-+    manifest.append(QuoteJsonString(source_hash));
-+    manifest.append(",\"size\":");
-+    manifest.append(base::NumberToString(source_utf8.size()));
-+    manifest.append(",\"truncated\":");
-+    manifest.append("false");
-+    manifest.append(",\"first_seq\":");
-+    manifest.append(base::NumberToString(first_seq));
-+    manifest.append(",\"frame_url\":\"\"");
-+    manifest.append(",\"origin\":\"\"");
-+    manifest.append(",\"original_size\":");
-+    manifest.append(base::NumberToString(source_utf8.size()));
-+    manifest.append(",\"source\":");
-+    manifest.append(QuoteJsonString(source_utf8));
-+    manifest.append(",\"retrieval_status\":");
-+    manifest.append(QuoteJsonString(CaptureFullAssetsEnabled(config)
-+                                        ? "captured"
-+                                        : "summary"));
-+    manifest.append("}");
-+    GetXTraceHost()->LogAsset(String::FromUtf8(content_path),
-+                              String::FromUtf8(manifest),
-+                              String::FromUtf8(content));
-+  }
-+
-+  std::string fields;
-+  fields.append("\"asset_id\":");
-+  fields.append(QuoteJsonString(asset_id));
-+  fields.append(",\"source_hash\":");
-+  fields.append(QuoteJsonString(source_hash));
-+  fields.append(",\"source\":");
-+  fields.append(QuoteJsonString(source_utf8));
-+  fields.append(",\"script_url\":");
-+  fields.append(QuoteJsonString(url_utf8));
-+  return fields;
-+}
-+
-+mojom::blink::XTraceHost* GetXTraceHost() {
-+  thread_local mojo::Remote<mojom::blink::XTraceHost> host;
-+  if (!host.is_bound()) {
-+    Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
-+        host.BindNewPipeAndPassReceiver());
-+  }
-+  return host.get();
-+}
-+
-+void LogEventWithSequence(const XTraceConfig& config,
-+                          const char* category,
-+                          const char* phase,
-+                          const char* api,
-+                          const String& args_json,
-+                          uint64_t seq,
-+                          std::string_view extra_fields,
-+                          bool capture_stack,
-+                          std::string_view frame_url,
-+                          std::string_view origin) {
-+  const int64_t wall_time_us =
-+      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
-+  const int64_t mono_time_us =
-+      base::TimeTicks::Now().since_origin().InMicroseconds();
-+  std::string event_id = config.session_id + ":" + base::NumberToString(seq);
-+
-+  std::string args = args_json.Utf8();
-+  std::string stack_json = capture_stack ? CaptureJavaScriptStack() : "[]";
-+
-+  std::string line;
-+  line.append("{\"schema_version\":1");
-+  line.append(",\"event_id\":");
-+  line.append(QuoteJsonString(event_id));
-+  line.append(",\"session_id\":");
-+  line.append(QuoteJsonString(config.session_id));
-+  line.append(",\"seq\":");
-+  line.append(base::NumberToString(seq));
-+  line.append(",\"session_seq\":");
-+  line.append(base::NumberToString(seq));
-+  line.append(",\"t\":");
-+  line.append(QuoteJsonString(phase));
-+  line.append(",\"ts\":");
-+  line.append(base::NumberToString(wall_time_us));
-+  line.append(",\"wall_time_us\":");
-+  line.append(base::NumberToString(wall_time_us));
-+  line.append(",\"mono_time_us\":");
-+  line.append(base::NumberToString(mono_time_us));
-+  line.append(",\"category\":");
-+  line.append(QuoteJsonString(category));
-+  line.append(",\"phase\":");
-+  line.append(QuoteJsonString(phase));
-+  line.append(",\"pid\":");
-+  line.append(base::NumberToString(base::GetCurrentProcId()));
-+  line.append(",\"tid\":");
-+  line.append(base::NumberToString(base::PlatformThread::CurrentId().raw()));
-+  line.append(",\"api\":");
-+  line.append(QuoteJsonString(api));
-+  line.append(",\"args\":");
-+  line.append(args);
-+  line.append(",\"stack\":");
-+  line.append(stack_json);
-+  line.append(",\"frame_url\":");
-+  line.append(QuoteJsonString(frame_url));
-+  line.append(",\"origin\":");
-+  line.append(QuoteJsonString(origin));
-+  line.append(",\"result\":null");
-+  line.append(",\"error\":null");
-+  line.append(",\"truncated\":false");
-+  if (!extra_fields.empty()) {
-+    line.append(",");
-+    line.append(extra_fields);
-+  }
-+  line.append("}\n");
-+
-+  // LogBatch is intentionally not used yet; per-event Log keeps current
-+  // ordering/compatibility until renderer-side buffering lands.
-+  GetXTraceHost()->Log(String::FromUtf8(line));
-+}
-+
-+}  // namespace
-+
-+bool XTraceLogger::Enabled() {
-+  return GetCachedConfig().enabled;
-+}
-+
-+String XTraceLogger::QuoteJson(const String& value) {
-+  return String::FromUtf8(QuoteJsonString(value.Utf8()));
-+}
-+
-+String XTraceLogger::StringHashRefJson(const String& value) {
-+  if (value.IsNull()) {
-+    return String("null");
-+  }
-+  std::string ref = "string_ref:sha1:" + base::HexEncode(
-+      base::SHA1HashString(value.Utf8()));
-+  return String::FromUtf8(QuoteJsonString(ref));
-+}
-+
-+String XTraceLogger::NetworkCorrelationKey(const String& method,
-+                                           const String& url) {
-+  std::string material = base::ToUpperASCII(method.Utf8()) + "\n" + url.Utf8();
-+  return String::FromUtf8(Sha1Ref(material));
-+}
-+
-+void XTraceLogger::LogCall(const char* api, const String& args_json) {
-+  LogEvent("fingerprint", "call", api, args_json);
-+}
-+
-+void XTraceLogger::LogCall(const char* category,
-+                           const char* api,
-+                           const String& args_json) {
-+  LogEvent(category, "call", api, args_json);
-+}
-+
-+void XTraceLogger::LogEvent(const char* category,
-+                            const char* phase,
-+                            const char* api,
-+                            const String& args_json) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  const uint64_t seq = NextSequenceNumber();
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       std::string_view(), true, std::string_view(),
-+                       std::string_view());
-+}
-+
-+void XTraceLogger::LogEventWithContext(const char* category,
-+                                       const char* phase,
-+                                       const char* api,
-+                                       const String& args_json,
-+                                       const String& frame_url,
-+                                       const String& origin) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  std::string frame_url_utf8 = frame_url.Utf8();
-+  std::string origin_utf8 = origin.Utf8();
-+  const uint64_t seq = NextSequenceNumber();
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       std::string_view(), true, frame_url_utf8, origin_utf8);
-+}
-+
-+void XTraceLogger::LogEventNoStack(const char* category,
-+                                   const char* phase,
-+                                   const char* api,
-+                                   const String& args_json) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  const uint64_t seq = NextSequenceNumber();
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       std::string_view(), false, std::string_view(),
-+                       std::string_view());
-+}
-+
-+void XTraceLogger::LogEventNoStackWithContext(const char* category,
-+                                              const char* phase,
-+                                              const char* api,
-+                                              const String& args_json,
-+                                              const String& frame_url,
-+                                              const String& origin) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  std::string frame_url_utf8 = frame_url.Utf8();
-+  std::string origin_utf8 = origin.Utf8();
-+  const uint64_t seq = NextSequenceNumber();
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       std::string_view(), false, frame_url_utf8, origin_utf8);
-+}
-+
-+void XTraceLogger::LogAssetEvent(const char* category,
-+                                 const char* phase,
-+                                 const char* api,
-+                                 const String& args_json,
-+                                 const char* kind,
-+                                 const String& url,
-+                                 const String& source) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+  if (IsInternalScriptUrl(url)) {
-+    return;
-+  }
-+
-+  const uint64_t seq = NextSequenceNumber();
-+  std::string extra_fields =
-+      BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       extra_fields, true, std::string_view(),
-+                       std::string_view());
-+}
-+
-+void XTraceLogger::LogEventWithOptionalAsset(const char* category,
-+                                             const char* phase,
-+                                             const char* api,
-+                                             const String& args_json,
-+                                             const char* kind,
-+                                             const String& url,
-+                                             const String& source) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  const uint64_t seq = NextSequenceNumber();
-+  std::string extra_fields;
-+  if (!IsInternalScriptUrl(url)) {
-+    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
-+  }
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       extra_fields, false, std::string_view(),
-+                       std::string_view());
-+}
-+
-+void XTraceLogger::LogEventWithOptionalAssetAndContext(
-+    const char* category,
-+    const char* phase,
-+    const char* api,
-+    const String& args_json,
-+    const char* kind,
-+    const String& url,
-+    const String& source,
-+    const String& frame_url,
-+    const String& origin) {
-+  const XTraceConfig& config = GetCachedConfig();
-+  if (!CategoryEnabled(config, category)) {
-+    return;
-+  }
-+
-+  std::string frame_url_utf8 = frame_url.Utf8();
-+  std::string origin_utf8 = origin.Utf8();
-+  const uint64_t seq = NextSequenceNumber();
-+  std::string extra_fields;
-+  if (!IsInternalScriptUrl(url)) {
-+    extra_fields = BuildScriptAssetFieldsAndSend(config, kind, url, source, seq);
-+  }
-+  LogEventWithSequence(config, category, phase, api, args_json, seq,
-+                       extra_fields, false, frame_url_utf8, origin_utf8);
-+}
-+
-+}  // namespace blink
-diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-new file mode 100644
-index 0000000000..f621f4cc3f
---- /dev/null
-+++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-@@ -0,0 +1,70 @@
-+// Copyright 2026 The XTrace Authors
-+// Use of this source code is governed by a BSD-style license that can be
-+// found in Chromium's LICENSE file.
-+
-+#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
-+#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_
-+
-+#include "third_party/blink/renderer/platform/platform_export.h"
-+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
-+
-+namespace blink {
-+
-+class PLATFORM_EXPORT XTraceLogger {
-+ public:
-+  static bool Enabled();
-+  static void LogCall(const char* api, const String& args_json);
-+  static void LogCall(const char* category,
-+                      const char* api,
-+                      const String& args_json);
-+  static void LogEvent(const char* category,
-+                       const char* phase,
-+                       const char* api,
-+                       const String& args_json);
-+  static void LogEventWithContext(const char* category,
-+                                  const char* phase,
-+                                  const char* api,
-+                                  const String& args_json,
-+                                  const String& frame_url,
-+                                  const String& origin);
-+  static void LogEventNoStack(const char* category,
-+                              const char* phase,
-+                              const char* api,
-+                              const String& args_json);
-+  static void LogEventNoStackWithContext(const char* category,
-+                                         const char* phase,
-+                                         const char* api,
-+                                         const String& args_json,
-+                                         const String& frame_url,
-+                                         const String& origin);
-+  static void LogAssetEvent(const char* category,
-+                            const char* phase,
-+                            const char* api,
-+                            const String& args_json,
-+                            const char* kind,
-+                            const String& url,
-+                            const String& source);
-+  static void LogEventWithOptionalAsset(const char* category,
-+                                        const char* phase,
-+                                        const char* api,
-+                                        const String& args_json,
-+                                        const char* kind,
-+                                        const String& url,
-+                                        const String& source);
-+  static void LogEventWithOptionalAssetAndContext(const char* category,
-+                                                  const char* phase,
-+                                                  const char* api,
-+                                                  const String& args_json,
-+                                                  const char* kind,
-+                                                  const String& url,
-+                                                  const String& source,
-+                                                  const String& frame_url,
-+                                                  const String& origin);
-+  static String QuoteJson(const String& value);
-+  static String StringHashRefJson(const String& value);
-+  static String NetworkCorrelationKey(const String& method, const String& url);
-+};
-+
-+}  // namespace blink
-+
-+#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_LOGGER_H_

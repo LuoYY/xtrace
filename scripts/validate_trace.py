@@ -2161,6 +2161,124 @@ def validate_schema_v3_event(event: dict, index: int) -> None:
             )
 
 
+# P5 WebIDL generator instrumentation contract (review fixes 2+4):
+# entry/outcome pairing, path-classified outcome values, routing facts,
+# and the DP2 top-level channel discipline.
+V3_WEBIDL_ENTRY_KINDS = (
+    "getter", "setter", "overload-dispatcher", "constructor",
+    "nadc-callback", "operation",
+)
+V3_WEBIDL_OUTCOMES = (
+    "ok", "receiver-error", "arg-error", "native-exception",
+    "call-form-error", "overload-resolution-failed", "lenient-receiver",
+    "early-return", "unknown",
+)
+
+
+def validate_v3_webidl(events: list[dict]) -> None:
+    # call_token is a per-process monotonic sequence (renderer-side
+    # atomic): uniqueness and pairing are scoped to the producer.
+    entry_tokens: dict[str, set[str]] = {}
+    outcome_tokens: dict[str, set[str]] = {}
+    for index, event in enumerate(events):
+        entry = event.get("webidl_entry")
+        outcome = event.get("webidl_outcome")
+        if entry is None and outcome is None:
+            # DP2 (review fix 4): non-webidl renderer events carry a real
+            # top-level channel. Legacy captures without the field stay
+            # valid; a wrong value never does.
+            channel = event.get("channel")
+            if channel is not None and channel != "impl":
+                raise TraceValidationError(
+                    f"Event {index}: top-level channel {channel!r} on a"
+                    " non-webidl event must be 'impl'"
+                )
+            continue
+        if event.get("channel") != "bindings":
+            raise TraceValidationError(
+                f"Event {index}: webidl event top-level channel must be"
+                " 'bindings' (DP2 ruling), got"
+                f" {event.get('channel')!r}"
+            )
+        if entry is not None:
+            if not isinstance(entry, dict):
+                raise TraceValidationError(
+                    f"Event {index}: webidl_entry must be an object")
+            for field in ("channel", "entry_kind", "interface", "member",
+                          "overload_count", "call_token"):
+                if field not in entry:
+                    raise TraceValidationError(
+                        f"Event {index}: webidl_entry missing {field}")
+            if entry["channel"] != "bindings":
+                raise TraceValidationError(
+                    f"Event {index}: webidl_entry.channel must be 'bindings'")
+            if entry["entry_kind"] not in V3_WEBIDL_ENTRY_KINDS:
+                raise TraceValidationError(
+                    f"Event {index}: unknown webidl_entry.entry_kind"
+                    f" {entry['entry_kind']!r}")
+            token = str(entry["call_token"])
+            producer = str(event.get("producer_id", ""))
+            seen = entry_tokens.setdefault(producer, set())
+            if token in seen:
+                raise TraceValidationError(
+                    f"Event {index}: duplicate webidl entry token"
+                    f" {token} on producer {producer}")
+            seen.add(token)
+        if outcome is not None:
+            if not isinstance(outcome, dict):
+                raise TraceValidationError(
+                    f"Event {index}: webidl_outcome must be an object")
+            for field in ("channel", "call_token", "outcome"):
+                if field not in outcome:
+                    raise TraceValidationError(
+                        f"Event {index}: webidl_outcome missing {field}")
+            if outcome["channel"] != "bindings":
+                raise TraceValidationError(
+                    f"Event {index}: webidl_outcome.channel must be"
+                    " 'bindings'")
+            if outcome["outcome"] not in V3_WEBIDL_OUTCOMES:
+                raise TraceValidationError(
+                    f"Event {index}: unknown webidl_outcome.outcome"
+                    f" {outcome['outcome']!r}")
+            selected = outcome.get("selected_overload")
+            if selected is not None:
+                if not isinstance(selected, str) or not selected.isdigit():
+                    raise TraceValidationError(
+                        f"Event {index}: selected_overload must be a"
+                        " non-negative decimal string"
+                    )
+            token = str(outcome["call_token"])
+            producer = str(event.get("producer_id", ""))
+            seen = outcome_tokens.setdefault(producer, set())
+            if token in seen:
+                raise TraceValidationError(
+                    f"Event {index}: duplicate webidl outcome token"
+                    f" {token} on producer {producer}")
+            seen.add(token)
+    # DP1 pairing: one entry, one terminal outcome, joined by
+    # (producer, call_token).
+    unpaired = [
+        f"{producer}:{token}"
+        for producer, tokens in entry_tokens.items()
+        for token in tokens - outcome_tokens.get(producer, set())
+    ]
+    if unpaired:
+        raise TraceValidationError(
+            "webidl entries without paired outcomes"
+            f" (producer:token {sorted(unpaired)[:5]}...)"
+        )
+    orphans = [
+        f"{producer}:{token}"
+        for producer, tokens in outcome_tokens.items()
+        for token in tokens - entry_tokens.get(producer, set())
+    ]
+    if orphans:
+        raise TraceValidationError(
+            "webidl outcomes without paired entries"
+            f" (producer:token {sorted(orphans)[:5]}...)"
+        )
+
+
 def validate_v3_file_order(events: list[dict]) -> None:
     last_writer_seq = 0
     for index, event in enumerate(events, start=1):
@@ -3796,6 +3914,7 @@ def validate_trace(
             validate_v3_capture_identity(events, manifest)
             validate_v3_manifest(manifest, per_producer)
             validate_v3_ignition_causality(events)
+            validate_v3_webidl(events)
             validate_v3_identity(manifest)
             validate_v3_assets(path)
         else:

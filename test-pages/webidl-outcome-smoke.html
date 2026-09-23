@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<!-- P5 review fixes 1+2 evidence probe: path-classified outcomes and
+     overload routing facts for the first-batch generated callbacks.
+     Each case records its observed JS-side result; the trace's
+     webidl_entry/webidl_outcome pairs are asserted by the driver. -->
+<html>
+<head><meta charset="utf-8"><title>xtrace webidl outcome smoke</title></head>
+<body>
+<div id="probe" class="probe-class">probe</div>
+<pre id="result"></pre>
+<script>
+(async () => {
+  const el = document.getElementById('probe');
+  const out = {};
+
+  // [ok] normal operation — routing-free single-signature entry.
+  try { out.ok_getAttribute = el.getAttribute('id'); } catch (e) { out.ok_getAttribute = 'throw:' + e.name; }
+
+  // [ok + routing 1] Element.scroll(x, y) — overload index 1 (two-arg form).
+  try { await el.scroll(0, 0); out.ok_scroll_xy = 'resolved'; } catch (e) { out.ok_scroll_xy = 'throw:' + e.name; }
+
+  // [ok + routing 0] Element.scroll(options) — overload index 0 (dictionary form).
+  try { await el.scroll({ top: 1, left: 0 }); out.ok_scroll_options = 'resolved'; } catch (e) { out.ok_scroll_options = 'throw:' + e.name; }
+
+  // [arg-error] URL constructor with no arguments — NotEnoughArguments.
+  try { out.arg_error_url_ctor = String(new URL()); } catch (e) { out.arg_error_url_ctor = 'throw:' + e.name; }
+
+  // [arg-error] Element.getAttribute with no arguments.
+  try { out.arg_error_getAttribute = el.getAttribute(); } catch (e) { out.arg_error_getAttribute = 'throw:' + e.name; }
+
+  // [receiver-error] promise-returning operation invoked with a wrong
+  // receiver — Illegal invocation inside the overload body.
+  try { await Element.prototype.scroll.call({}, 0, 0); out.receiver_error_scroll = 'resolved'; } catch (e) { out.receiver_error_scroll = 'throw:' + e.name; }
+
+  // [native-exception] URL constructor with an unparseable URL — the
+  // Blink DOMURL::Create call throws through ExceptionState.
+  try { out.native_exception_url = String(new URL('://invalid—url')); } catch (e) { out.native_exception_url = 'throw:' + e.name; }
+
+  // [call-form-error] URL called as a plain function.
+  try { out.call_form_url = String(URL('https://example.com/')); } catch (e) { out.call_form_url = 'throw:' + e.name; }
+
+  // [ok] attribute roundtrip for the getter/setter entry kinds.
+  try { el.id = 'probe2'; out.ok_setter_getter = el.id; } catch (e) { out.ok_setter_getter = 'throw:' + e.name; }
+
+  document.getElementById('result').textContent = JSON.stringify(out, null, 1);
+})();
+</script>
+</body>
+</html>

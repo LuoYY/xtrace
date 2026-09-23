@@ -1,6 +1,6 @@
 # XTrace Trace Schema v3
 
-- 版本：v1.2（P2-E1 产出，架构师 R1 审查通过；v1.1 并入单调钟基准、producer_id `lseq`、args 适配包装三处修订；v1.2 并入未确认 producer 计数 null 规则、bnet producer_id 格式、带内控制端点说明——实现以本文件为准）。
+- 版本：v1.2（P2-E1 产出，架构师 R1 审查通过；v1.1 并入单调钟基准、producer_id `lseq`、args 适配包装三处修订；v1.2 并入未确认 producer 计数 null 规则、bnet producer_id 格式、带内控制端点说明——实现以本文件为准）。**v1.2 P5 终审修订（2026-09-24，只加不改）**：①顶层 `channel` 字段——渲染器/浏览器手写钩事件为 `"impl"`，WebIDL 生成回调事件为 `"bindings"`（DP2 裁决：无模糊缺省；历史无字段 trace 由校验器兼容）；②`webidl_outcome.selected_overload`——overload 派发器路由事实（0 基索引十进制串，未路由则缺省），与入口事件按 `(producer_id, call_token)` 配对（token 为进程内序号，配对按 producer 作用域）；③manifest `producers[].nadc_partial`——TryEnter 预检查拒绝的 NADC 入口计数，未确认 producer 同 null 纪律。P5.5 值观测字段（`value_tap`/`dump`/`sampled_out` 等式）保留为 v1.3。
 - 依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §6（协议/身份/证据模型）、§7（写入/背压/停止）、§6.6（旧缺陷收口）、§13.1（已收敛决策）；语义以草稿为准，本文件不另造契约。
 - 现状基线：v1/v2 语义见 [trace-schema-v1.md](trace-schema-v1.md)、[trace-schema-v2.md](trace-schema-v2.md)。**P2 起，新 capture 一律输出 v3；v1/v2 trace 由导入适配器只读兼容，不做原地升级。单个 capture 不混写多个 schema 版本。**
 

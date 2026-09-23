@@ -288,14 +288,18 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn('upload.Set("body_hex"', client)
         self.assertIn('upload.Set("body_sha256", body_hash);', client)
 
-        # P2-E8 layering: 0001 carries the full browser-network
-        # implementation for chrome_content_browser_client.cc (HEAD ->
-        # old-0001 state); 0004 carries only the schema-v3 delta on top.
-        native_patch = (
-            ROOT
-            / "patches"
-            / "0001-xtrace-native-logger.patch"
-        ).read_text(encoding="utf-8")
+        # The chromium patch stack is regenerated with disjoint per-file
+        # ownership; the browser-network code may live in any chromium
+        # patch, so the assertion scans the whole stack.
+        native_patch = "".join(
+            (ROOT / "patches" / name).read_text(encoding="utf-8")
+            for name in (
+                "0001-xtrace-native-logger.patch",
+                "0003-xtrace-schema-v2-renderer.patch",
+                "0004-xtrace-schema-v2-browser.patch",
+                "0005-chromiumx-naming.patch",
+            )
+        )
         for marker in (
             "BrowserNetwork.complete",
             "CreateXTraceBrowserNetworkCompleteEventJson",
