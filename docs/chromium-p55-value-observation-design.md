@@ -1,6 +1,6 @@
 # P5.5 设计提案：值观测二期（vPC 流截获 / 值级 tap / 物化 dump）
 
-- 版本：v1.0（2026-09-23，架构师提案，待裁决）。
+- 版本：v1.1（2026-09-23；v1.1 补入 T1/T2——挑战会话身份（nav_chain）与 VM 会话关联，及对应验收锚点与决策点 6；v1.0 架构师提案待裁决）。
 - 依据：[P4 交接](chromium-p4-ignition-observer-handoff.md)（observer/scope selector/两阶段弱回调）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P5 设计](chromium-p5-design.md) DP3（反扰动分派表）；真实样本语料 `analysis/pmos-{xj,sc,jibei}-sgcc-20260923/`（瑞数 JSVMP 三站四份挑战脚本，本地 gitignored）。
 - 定位：P4 交付的是**物理层**（V8 字节码执行前事件）；本提案打开**虚拟层**——VM 自己的指令流、虚拟寄存器值、运行期物化的表数据。目标是让瑞数级 JSVMP 的 cookie/签名计算从"黑盒"变成"可重建的计算图"。
 
@@ -12,6 +12,7 @@
 2. **虚拟寄存器值不可见**：计算过程的中间值全部在 VM 内部的 JS 数组/变量里。
 3. **表数据运行期才物化**：`$_ts.cd` 大 blob 与 meta 加密内容只有解码后才成为可用常量表。
 4. **环境读取面不可枚举**：API 名运行期解码，静态分析拿不到读取清单。
+5. **挑战链在导航处断裂**：两段式挑战（412 脚本算 cookie → reload → 200 脚本续算/校验）是两次 VM 执行、两个 document——没有会话身份，T4/T5 的值观测只是两段孤立片段，"一阶段写出的 cookie 值是否就是重载请求里被校验的值"无法闭环断言。
 
 服务端校验 cookie 使"伪造"不可行——唯一正路是**还原计算**。本提案的三个能力就是还原链的三段。
 
@@ -63,13 +64,34 @@
 
 现有资产通道已捕获脚本源码（dynamic-code）。T5 补的是**运行期物化值**——源码里不存在的、只有执行后才存在的数据（解码表、VM 字节码数组、计算中间态）。两者合起来才是"该会话 VM 的完整自描述"。
 
-## 6. 范围与配置接口（决策点）
+## 6. 能力 T1/T2：挑战会话身份与 VM 会话关联（跨导航因果）
+
+### 问题
+
+瑞数两段式（以及所有"挑战 → 跳转 → 真页"形态）把一次逻辑会话切成两个 document：一阶段脚本在 document A 算 cookie 并写 `document.cookie`，导航后 document B 的二阶段脚本与业务代码带着该 cookie 请求服务端。v3 的 `causality` 只覆盖 renderer 线程内同步链，`attribution.document` 只到单文档身份——**链在导航处断裂**（这正是此前工具清单 T1/T2 的落位，P3 全量 crosswalk 是后续项，本节只交付挑战所需子集）。
+
+### T1：挑战会话身份（nav_chain）
+
+- browser 侧在现有 `manifest.identity` 段（P3 交付的 frame_tree_node_id → document_token 映射）上增量记录**导航后继**：同 frame 内 document N → document N+1 的替换关系 `{from_document, to_document, cause: reload|navigation|redirect, wall_us}`。
+- 同一 frame 的导航序列共享 `nav_chain_id`；capture 内挑战相关的 document 通过 identity 段挂到同一链上。事件行不新增字段（保持轻量——与 crosswalk 落 manifest 的既定决策一致），nav_chain 信息全部在 manifest。
+- **硬验收锚点**：一阶段写入的 cookie 值，必须能在重载请求的 Cookie 头中被定位（renderer cookie 钩与 browser-network producer 均带值）；且两端事件经 identity 段属于同一 nav_chain。该锚点同时验证了身份模型与因果闭环。
+
+### T2：VM 会话关联
+
+- 同一 nav_chain 内、URL 匹配挑战脚本形态（随机路径 + 版本标记）的多个 script 激活，按文档顺序编 stage，归为同一 challenge_session 的 VM 执行序列。
+- T4/T5 的产物（vPC 序列、dump 资产、值 tap 流）按 (nav_chain, stage) 组织呈现——分析器面对的是"一次挑战会话的两段 VM 执行"，而非两个孤立 capture 段。两段字节码不同（打包层多态）但 handler 语义指纹稳定，stage 间关联由 §9.2 的语义聚类兜底。
+
+### 范围边界（防蔓延）
+
+本节的导航身份只覆盖**同 frame 导航后继**。BFCache、redirect 链全景、跨 frame/进程归属、SW 场景仍属 P3 身份映射的后续修订，不在本提案交付范围。
+
+## 7. 范围与配置接口（决策点）
 
 - scope selector（N3 交付的三命名空间）扩展**函数与 offset 粒度**：`scripts:[url_pattern], functions:[name/script-local-id], offsets:[(function,start,end)]`。
 - 域接口两个候选：**(a)** `startCapture` 的 config 对象扩展 `valueObservation` 子段；**(b)** 独立 `XTrace.startValueTap` / `XTrace.startDump` 方法。推荐 (a)——与 capture 生命周期/终态/计数同一治理，避免第二种 capture 状态机（B1 教训：不做第二套生命周期）。
 - 配置快照进 manifest（自描述原则）；`getCapabilities` 披露 valueObservation 的可用范围与预算上限。
 
-## 7. v3 字段扩展（只加不改）
+## 8. v3 字段扩展（只加不改）
 
 ```json
 "value_tap": {"kind": "accumulator|register_range|frame_args", "v8_offset": "123",
@@ -80,31 +102,33 @@
 
 `ignition` 对象六字段不变；`sampled_out` 等式扩展落规范 v1.3（同时把 §7 的预留式写成正式条款）。
 
-## 8. 分析层配套（本提案一并交付契约）
+## 9. 分析层配套（本提案一并交付契约）
 
 1. **vPC 序列重建**：tap 流按 (activation_ref, 时序) 串接 → 虚拟指令序列。
 2. **handler 语义提取**：vPC 值 → 对应 V8 子 trace（P4 事件）→ handler 语义指纹；跨多态会话按语义指纹聚类（打包层轮换不改变 handler 代码——三站样本已实证骨架一致）。
 3. **字符串表收获**：dump 的解码表 + 使用点事件（属性名/内建参数）交叉补全。
 4. **值流 DAG**：边界钩值 + tap 值按 `activation_ref` + 短窗口 ref 链接（runtime-trace-plan Phase 2 的 sha 描述符此处不重复引入——值级 tap 是真值，比 hash 更强）。
 
-## 9. 验收设计（fixtures 全部在手）
+## 10. 验收设计（fixtures 全部在手）
 
 | 验收 | 内容 |
 | --- | --- |
 | 合成 fixture | `test-pages/` 新增类 VMP 派发器页（已知虚拟程序）：vPC 流与已知程序逐条一致；值 tap 还原已知计算；dump 捕获已知表 |
 | 瑞数离线语料 | 派发器自动定位在四份挑战脚本全部命中；环境读取清单（GetNamedProperty 流）产出非空且可人工抽查 |
 | 瑞数现场（授权研究环境） | 挑战脚本范围内：vPC 序列非空、dump 得解码表资产、cookie.set sink 事件存在且值与请求头一致（边界证据，不承诺完整算法还原） |
+| 挑战会话闭环（T1/T2） | 两段式站点现场：一阶段 cookie.set 的值在重载请求 Cookie 头中定位成功；两端事件经 identity 段同属一个 nav_chain；vPC 序列与 dump 资产按 (nav_chain, stage) 成组呈现 |
 | 契约与回归 | 计数等式/终态不被 tap/dump 破坏；sampled_out 记账正确；P2–P5 全部门禁（契约 21/21、矩阵、故障、parity、单测）不回退 |
 
-## 10. 决策点（提请裁决）
+## 11. 决策点（提请裁决）
 
 1. **tap 注入点**：Entry+谓词读帧（推荐）vs Exit 变体改造（后续）——是否同意 A 起步、B 后置。
 2. **接口形状**：`startCapture` 的 `valueObservation` 子段（推荐）vs 独立方法——不做第二套 capture 生命周期。
 3. **预算默认值**：每激活 N 与 offset 窗口语义；`sampled_out` 首次启用的记账形态确认。
 4. **dump 对象图边界**：深度 ≤2、宽度上限、大数组的资产阈值（默认 16KB 走资产，以下内联——可调）。
-5. **v3 字段扩展清单**：§7 的 `value_tap`/`dump` 形状与 §7 扩展式升版（v1.2 → v1.3）。
+5. **v3 字段扩展清单**：§8 的 `value_tap`/`dump` 形状与 §8 扩展式升版（v1.2 → v1.3）。
+6. **nav_chain 身份模型**：导航后继以 succession 记录进 `manifest.identity` 段（推荐——事件行不加字段，与 crosswalk 落 manifest 的既定决策一致）vs 事件行内嵌 chain id。
 
-## 11. 非目标
+## 12. 非目标
 
 - 不做全量 post-op 值观测（只在选定窗口）；不做精确 def-use 全程跟踪。
 - 分析层的 handler 语义标注为 hypothesis 级输出，不冒充已验证算法还原（沿用分析结果五级纪律）。
