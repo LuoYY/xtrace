@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..26838faed2
+index 0000000000..4873a6a35e
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,562 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -193,6 +193,7 @@ index 0000000000..26838faed2
 +
 +#include "base/command_line.h"
 +#include "base/files/file_util.h"
++#include "base/json/json_reader.h"
 +#include "base/logging.h"
 +#include "base/functional/bind.h"
 +#include "base/strings/string_number_conversions.h"
@@ -442,6 +443,30 @@ index 0000000000..26838faed2
 +  limits->Set("jsFlags", base::Value(precise.js_flags));
 +  limits->Set("tierLock", base::Value(precise.tier_lock));
 +  limits->Set("preciseModeRequires", base::Value(precise.RequiresList()));
++  // P5-E4: generation-frozen WebIDL coverage table surfaced in
++  // capabilities (design DP4: from the compiled artifact, not runtime
++  // introspection).
++  {
++    base::FilePath coverage_path = base::FilePath(FILE_PATH_LITERAL("gen/xtrace/webidl_coverage.json"));
++    // Read from the module directory (gen output is alongside the binary
++    // in component builds; for now read from the known gen location).
++    std::string coverage_json;
++    base::ScopedAllowBlockingForTesting allow_io;
++    if (base::ReadFileToString(coverage_path, &coverage_json)) {
++      auto parsed = base::JSONReader::Read(coverage_json, base::JSON_PARSE_RFC);
++      if (parsed && parsed->is_dict()) {
++        limits->Set("webidlCoverage", base::Value(parsed->Clone()));
++      }
++    }
++    // P5 DP5: bindings precise mode switch disclosure.
++    const bool bindings_precise =
++        base::CommandLine::ForCurrentProcess()->HasSwitch(
++            "xtrace-bindings-precise");
++    limits->Set("bindingsPreciseMode", base::Value(
++        bindings_precise ? "true" : "false"));
++    limits->Set("bindingsPreciseModeSwitch", base::Value(
++        "xtrace-bindings-precise"));
++  }
 +  protocol::Array<String> modes;
 +  modes.emplace_back("reverse");
 +  modes.emplace_back("fingerprint");
@@ -14690,10 +14715,10 @@ index 0000000000..59d49da5e7
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
 new file mode 100644
-index 0000000000..b576483efd
+index 0000000000..81a0474cbb
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,102 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14726,10 +14751,17 @@ index 0000000000..b576483efd
 +};
 +
 +bool BindingsInstrumentationEnabled() {
-+  // The generation-time allowlist gates whether the scope code exists at
-+  // all; this runtime check only gates emission (capture active + category
-+  // filter), matching the P2/P3 pipeline contract.
 +  return XTraceProducerHub::Get()->ConfigReceived();
++}
++
++bool BindingsPreciseMode() {
++  // DP5: --xtrace-bindings-precise switch. Independent from and stackable
++  // with --xtrace-ignition-observer (bytecode layer). Read once per
++  // process (command line never changes mid-process).
++  static const bool precise =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "xtrace-bindings-precise");
++  return precise;
 +}
 +
 +}  // namespace
@@ -14757,13 +14789,18 @@ index 0000000000..b576483efd
 +}
 +
 +XTraceGeneratedScope::~XTraceGeneratedScope() {
-+  // RAII completion: marks the entry event terminal. For promise-returning
-+  // operations the destructor fires when the SYNCHRONOUS callback returns
-+  // (settlement is post-P5 by ruling); the event records the synchronous
-+  // return fact only.
++  // RAII completion: records the terminal outcome for this entry. For
++  // promise-returning operations the destructor fires when the SYNCHRONOUS
++  // callback returns (settlement is post-P5 by ruling); the outcome
++  // records the synchronous phase only.
 +  if (active_) {
 +    active_ = false;
++    XTraceLogger::LogGeneratedOutcome(token_, outcome_);
 +  }
++}
++
++void XTraceGeneratedScope::SetOutcome(const char* outcome) {
++  outcome_ = outcome;
 +}
 +
 +void XTraceGeneratedScope::RecordOverload(unsigned selected_index) {
@@ -14786,10 +14823,10 @@ index 0000000000..b576483efd
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
 new file mode 100644
-index 0000000000..973dfe46e4
+index 0000000000..510a20b623
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,80 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -14850,6 +14887,11 @@ index 0000000000..973dfe46e4
 +  // (does NOT create a second event — DP1 hard rule).
 +  void RecordOverload(unsigned selected_index);
 +
++  // E3: set the terminal outcome (default "ok" in destructor). Called by
++  // generated code at exception/early-return points; if never called the
++  // destructor records "ok".
++  void SetOutcome(const char* outcome);
++
 +  // NADC/no-alloc entry precheck (design §DP1 + §9 ruling): returns true
 +  // when the bounded-buffer path can accept an event without allocating.
 +  // Must be called before ANY allocation in the callback. When false the
@@ -14859,6 +14901,7 @@ index 0000000000..973dfe46e4
 + private:
 +  uint64_t token_ = 0;
 +  bool active_ = false;
++  const char* outcome_ = "ok";
 +};
 +
 +}  // namespace blink::xtrace
