@@ -1,6 +1,6 @@
 # P5.5 设计提案：值观测二期（vPC 流截获 / 值级 tap / 物化 dump）
 
-- 版本：v1.1（2026-09-23；v1.1 补入 T1/T2——挑战会话身份（nav_chain）与 VM 会话关联，及对应验收锚点与决策点 6；v1.0 架构师提案待裁决）。
+- 版本：v1.2（2026-09-23；v1.2 补入分析层 T3 环境读取还原与 T7 部署形态判定（均可独立先行）及对应验收行；v1.1 补入 T1/T2 挑战会话；v1.0 架构师提案待裁决）。
 - 依据：[P4 交接](chromium-p4-ignition-observer-handoff.md)（observer/scope selector/两阶段弱回调）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P5 设计](chromium-p5-design.md) DP3（反扰动分派表）；真实样本语料 `analysis/pmos-{xj,sc,jibei}-sgcc-20260923/`（瑞数 JSVMP 三站四份挑战脚本，本地 gitignored）。
 - 定位：P4 交付的是**物理层**（V8 字节码执行前事件）；本提案打开**虚拟层**——VM 自己的指令流、虚拟寄存器值、运行期物化的表数据。目标是让瑞数级 JSVMP 的 cookie/签名计算从"黑盒"变成"可重建的计算图"。
 
@@ -108,6 +108,10 @@
 2. **handler 语义提取**：vPC 值 → 对应 V8 子 trace（P4 事件）→ handler 语义指纹；跨多态会话按语义指纹聚类（打包层轮换不改变 handler 代码——三站样本已实证骨架一致）。
 3. **字符串表收获**：dump 的解码表 + 使用点事件（属性名/内建参数）交叉补全。
 4. **值流 DAG**：边界钩值 + tap 值按 `activation_ref` + 短窗口 ref 链接（runtime-trace-plan Phase 2 的 sha 描述符此处不重复引入——值级 tap 是真值，比 hash 更强）。
+5. **T3：环境读取面还原（纯分析层，可独立先行）**。输入：P4 observer 流（`GetNamedProperty`/`CallProperty`/`GetKeyedProperty` 等 opcode + 字节码元数据常量池解析），无需 P5.5 引擎即可运行。产出：按激活分组的**有序属性访问清单**（属性名、首现 offset、次数、所在激活），并做读取面分类（navigator/screen/canvas/storage/timing/function-probe/异常检测点等）；与 bindings/impl 边界事件交叉——回答"瑞数读了哪些环境字段、按什么顺序、读到值没有"三问，粒度细于 API 调用级（未插桩 API 的读取也可见）。这是 frx `webapi_trace`"补环境清单"用途的对位能力。
+6. **T7：部署形态判定器（纯分析层，可独立先行）**。输入：一次 capture 的 browser-network 状态码、挑战脚本 URL 形态（随机路径+版本标记）、cookie 事件（名称/属性）、导航后继、sink 事件。产出：部署形态判定 `{family, mode: 412-interstitial-two-stage | 200-inline, stages, cookie: {name, attrs}, sink}`，每条判定带证据引用（沿用分析结果五级：本项为 derived/observed 级）。用途：下游分析配置自动生成，不手写站点特判——"站点无关"从纪律变成工具。三站样本（两段式 XJ、内嵌 SC/Jibei、两种 cookie 名）是验收集。
+
+T3/T7 均不新增采集语义、不动引擎，可在 P5.5 引擎工作之前先行交付；但其输出是 §9.1–9.2 的输入契约（vPC 重建与 handler 聚类消费读取清单与形态判定）。
 
 ## 10. 验收设计（fixtures 全部在手）
 
@@ -115,6 +119,8 @@
 | --- | --- |
 | 合成 fixture | `test-pages/` 新增类 VMP 派发器页（已知虚拟程序）：vPC 流与已知程序逐条一致；值 tap 还原已知计算；dump 捕获已知表 |
 | 瑞数离线语料 | 派发器自动定位在四份挑战脚本全部命中；环境读取清单（GetNamedProperty 流）产出非空且可人工抽查 |
+| T3 环境读取还原 | 对四份挑战脚本的 observer 流产出有序属性访问清单：非空、可抽查（与源码中不存在的解码 API 名互证）；分类覆盖 navigator/screen/storage/timing 等读取面；未插桩 API 的读取同样在列 |
+| T7 形态判定 | 判定器对三站样本正确输出：XJ=412 两段式（stages=2、cookie=`CyFIZHvBqps2O`）、SC=200 内嵌（cookie=`cookie_persist`）、Jibei=200 内嵌 + 传输层门槛标注；每条判定附证据引用 |
 | 瑞数现场（授权研究环境） | 挑战脚本范围内：vPC 序列非空、dump 得解码表资产、cookie.set sink 事件存在且值与请求头一致（边界证据，不承诺完整算法还原） |
 | 挑战会话闭环（T1/T2） | 两段式站点现场：一阶段 cookie.set 的值在重载请求 Cookie 头中定位成功；两端事件经 identity 段同属一个 nav_chain；vPC 序列与 dump 资产按 (nav_chain, stage) 成组呈现 |
 | 契约与回归 | 计数等式/终态不被 tap/dump 破坏；sampled_out 记账正确；P2–P5 全部门禁（契约 21/21、矩阵、故障、parity、单测）不回退 |
