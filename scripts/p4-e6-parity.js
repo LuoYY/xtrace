@@ -31,9 +31,9 @@ const entry = /^\s*(B->|->)\s*(0x[0-9a-f]+)\s+@\s*(\d+)\s*:/;
 // execution order and compared offset-by-offset and opcode-by-opcode —
 // totals stay as a quick metric only.
 function observerStream(stdout) {
-  return [...stdout.matchAll(/^OBS script=(\d+) version=(\d+) offset=(\d+) opcode=(\S+)$/gm)]
+  return [...stdout.matchAll(/^OBS script=(\d+) version=(\d+) offset=(\d+) opcode=(\S+)(?: url=(\S*))?$/gm)]
       .map(m => ({ script: Number(m[1]), version: Number(m[2]),
-                   offset: Number(m[3]), opcode: m[4] }));
+                   offset: Number(m[3]), opcode: m[4], url: m[5] || null }));
 }
 function upstreamStream(stdout) {
   return [...stdout.matchAll(/^\s*->\s*0x[0-9a-f]+\s+@\s*(\d+)\s*:\s*(?:[0-9a-f]{2}\s+)*(\S+)/gm)]
