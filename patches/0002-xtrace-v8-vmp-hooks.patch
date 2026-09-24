@@ -35,10 +35,10 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-generator.cc",
 diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
 new file mode 100644
-index 00000000..588ed2e1
+index 00000000..dbeaa584
 --- /dev/null
 +++ b/include/xtrace_observer_boundary.h
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,97 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -105,6 +105,29 @@ index 00000000..588ed2e1
 +    v8::Isolate* isolate, IgnitionObserverCallback callback);
 +V8_EXPORT void IgnitionObserverSetMetadataCallback(
 +    v8::Isolate* isolate, IgnitionMetadataCallback callback);
++
++// P5.5 E2 (design contract §4/D2): value-tap infrastructure. Windows are
++// configured as a JSON blob (parsed ONCE, config time) of per-script
++// offset intervals:
++//   {"script_pattern":"<substring>","windows":[{"id":0,"start":10,"end":20},...]}
++// Matching compilation instances compile the intervals into a sorted
++// table at registration/config time; the runtime predicate is a binary
++// search over that table — zero allocation, zero containers. A hit
++// fires IgnitionTapCallback with the PRE-DISPATCH accumulator in the
++// minimal layer-1 encoding (bounded JSON built V8-side; the embedder
++// never re-enters V8 from the callback), value_role starts
++// "unclassified" (facts only — interpretation is the analysis layer's).
++using IgnitionTapCallback = void (*)(v8::Isolate* isolate,
++                                     uint32_t script_id,
++                                     uint32_t bytecode_version,
++                                     uint32_t bytecode_offset,
++                                     uint32_t window_id,
++                                     const char* value_json,
++                                     size_t value_len);
++V8_EXPORT void IgnitionObserverSetTapCallback(v8::Isolate* isolate,
++                                              IgnitionTapCallback callback);
++V8_EXPORT void IgnitionObserverSetTapConfig(v8::Isolate* isolate,
++                                            const char* windows_json);
 +V8_EXPORT void IgnitionObserverSetGate(v8::Isolate* isolate,
 +                                        uint32_t open);
 +
@@ -9085,7 +9108,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..2f6f9f13 100644
+index fc6d62e2..d6390a29 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9096,7 +9119,7 @@ index fc6d62e2..2f6f9f13 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,57 @@
+@@ -40,6 +41,69 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9123,6 +9146,16 @@ index fc6d62e2..2f6f9f13 100644
 +  fwrite(metadata_json, 1, metadata_len, f);
 +  fclose(f);
 +}
++std::atomic<uint64_t> g_tap_events{0};
++void D8TapCallback(v8::Isolate*, uint32_t script_id,
++                   uint32_t bytecode_version, uint32_t bytecode_offset,
++                   uint32_t window_id, const char* value_json,
++                   size_t value_len) {
++  g_tap_events.fetch_add(1, std::memory_order_relaxed);
++  printf("TAP script=%u version=%u offset=%u window=%u value=%.*s\n",
++         script_id, bytecode_version, bytecode_offset, window_id,
++         static_cast<int>(value_len), value_json);
++}
 +void D8ObserverCallback(v8::Isolate*, uint32_t script_id,
 +                        uint32_t bytecode_version, uint32_t bytecode_offset,
 +                        uint32_t opcode, const char* script_url) {
@@ -9140,6 +9173,8 @@ index fc6d62e2..2f6f9f13 100644
 +      v8::internal::xtrace::IgnitionOpcodeName(opcode));
 +}
 +void D8ObserverReportAtExit() {
++  printf("XTRACE-P55 d8 tap events=%llu\n",
++         static_cast<unsigned long long>(g_tap_events.load()));
 +  printf("XTRACE-P4 d8 observer events=%llu\n",
 +         static_cast<unsigned long long>(g_d8_observer_events.load()));
 +  std::lock_guard<std::mutex> lock(g_pairs_mutex);
@@ -9154,7 +9189,7 @@ index fc6d62e2..2f6f9f13 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -7037,6 +7089,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7101,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9167,7 +9202,7 @@ index fc6d62e2..2f6f9f13 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +7959,18 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +7971,23 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9179,6 +9214,11 @@ index fc6d62e2..2f6f9f13 100644
 +    i::xtrace::IgnitionObserverSetMetadataCallback(isolate,
 +                                                   &D8MetadataCallback);
 +    g_metadata_dir = i::v8_flags.xtrace_metadata_dir;
++    i::xtrace::IgnitionObserverSetTapCallback(isolate, &D8TapCallback);
++    if (i::v8_flags.xtrace_tap_windows && *i::v8_flags.xtrace_tap_windows) {
++      i::xtrace::IgnitionObserverSetTapConfig(
++          isolate, i::v8_flags.xtrace_tap_windows);
++    }
 +    i::xtrace::IgnitionObserverSetGate(isolate, 1);
 +    printf("XTRACE-P4 d8 observer gate OPEN\n");
 +  }
@@ -9432,10 +9472,10 @@ index 9a3a6de3..c092e2ba 100644
    if (IsErrorStackData(*lookup.error_stack)) {
      auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index bf210a58..db5d7a5f 100644
+index bf210a58..b62a5a4d 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -252,6 +252,13 @@
+@@ -252,6 +252,14 @@
  //
  #define FLAG FLAG_FULL
  
@@ -9445,11 +9485,12 @@ index bf210a58..db5d7a5f 100644
 +// P5.5 D1: directory receiving one JSON metadata file per compilation
 +// instance (d8-first verification; never the P0 baseline outputs).
 +DEFINE_STRING(xtrace_metadata_dir, "", "write D1 bytecode-metadata assets to this directory")
++DEFINE_STRING(xtrace_tap_windows, "", "P5.5 E2 tap window config JSON: {\"script_pattern\":\"...\",\"windows\":[{\"id\":0,\"start\":N,\"end\":M},...]}")
 +
  // Experimental features: Features that are still considered experimental and
  // which are not ready for fuzz testing should be defined using this macro. The
  // feature will then imply --experimental, which will indicate to the user that
-@@ -1301,6 +1308,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
+@@ -1301,6 +1309,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
  #undef FLAG
  #if V8_ENABLE_SPARKPLUG
  #define FLAG FLAG_FULL
@@ -9458,7 +9499,7 @@ index bf210a58..db5d7a5f 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -1350,6 +1359,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1350,6 +1360,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9467,7 +9508,7 @@ index bf210a58..db5d7a5f 100644
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
-@@ -3899,6 +3910,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
+@@ -3899,6 +3911,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
  #undef FLAG
  #ifdef ENABLE_GDB_JIT_INTERFACE
  #define FLAG FLAG_FULL
@@ -9476,7 +9517,7 @@ index bf210a58..db5d7a5f 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3928,6 +3941,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
+@@ -3928,6 +3942,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
  #undef FLAG
  #ifdef DEBUG
  #define FLAG FLAG_FULL
@@ -9485,7 +9526,7 @@ index bf210a58..db5d7a5f 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3989,6 +4004,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
+@@ -3989,6 +4005,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9494,7 +9535,7 @@ index bf210a58..db5d7a5f 100644
  // log.cc
  DEFINE_STRING(logfile, "v8.log",
                "Specify the name of the log file, use '-' for console, '+' for "
-@@ -4158,6 +4175,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
+@@ -4158,6 +4176,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
  #undef FLAG
  #ifdef ENABLE_DISASSEMBLER
  #define FLAG FLAG_FULL
@@ -9503,7 +9544,7 @@ index bf210a58..db5d7a5f 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -4191,6 +4210,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
+@@ -4191,6 +4211,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9512,7 +9553,7 @@ index bf210a58..db5d7a5f 100644
  //
  // Predictable mode related flags.
  //
-@@ -4441,6 +4462,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
+@@ -4441,6 +4463,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
  
  #ifdef VERIFY_PREDICTABLE
  #define FLAG FLAG_FULL
@@ -9677,10 +9718,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..9437bda3
+index 00000000..7aa8220b
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,882 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9756,6 +9797,170 @@ index 00000000..9437bda3
 +  reinterpret_cast<Isolate*>(v8_isolate)
 +      ->xtrace_ignition_observer()
 +      ->metadata_callback.store(cb, std::memory_order_release);
++}
++
++void IgnitionObserverSetTapCallback(v8::Isolate* v8_isolate,
++                                    IgnitionTapCallback cb) {
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->tap_callback.store(cb, std::memory_order_release);
++}
++
++// Minimal JSON scanner for the window config (parsed ONCE — allocation
++// allowed here by design; the runtime predicate never parses).
++namespace {
++bool ParseTapWindowsJson(const std::string& json, std::string* pattern,
++                         std::vector<IgnitionTapWindow>* windows) {
++  // Expected shape (built by tooling, not user-typed):
++  // {"script_pattern":"x","windows":[{"id":0,"start":1,"end":2},...]}
++  auto fail = []() { return false; };
++  size_t pos = 0;
++  auto skip_ws = [&pos, &json]() {
++    while (pos < json.size() && isspace(static_cast<unsigned char>(json[pos]))) pos++;
++  };
++  auto expect = [&](char c) -> bool {
++    skip_ws();
++    if (pos >= json.size() || json[pos] != c) return false;
++    pos++;
++    return true;
++  };
++  auto parse_string = [&](std::string* out) -> bool {
++    skip_ws();
++    if (pos >= json.size() || json[pos] != '"') return false;
++    pos++;
++    out->clear();
++    while (pos < json.size() && json[pos] != '"') {
++      if (json[pos] == '\\' && pos + 1 < json.size()) pos++;
++      out->push_back(json[pos++]);
++    }
++    if (pos >= json.size()) return false;
++    pos++;
++    return true;
++  };
++  auto parse_uint = [&](uint32_t* out) -> bool {
++    skip_ws();
++    size_t start = pos;
++    while (pos < json.size() && isdigit(static_cast<unsigned char>(json[pos]))) pos++;
++    if (pos == start) return false;
++    *out = static_cast<uint32_t>(strtoul(json.c_str() + start, nullptr, 10));
++    return true;
++  };
++  if (!expect('{')) return fail();
++  skip_ws();
++  if (pos < json.size() && json[pos] == '}') return true;  // empty: taps off
++  while (true) {
++    std::string key;
++    if (!parse_string(&key)) return fail();
++    if (!expect(':')) return fail();
++    if (key == "script_pattern") {
++      if (!parse_string(pattern)) return fail();
++    } else if (key == "windows") {
++      if (!expect('[')) return fail();
++      skip_ws();
++      if (pos < json.size() && json[pos] == ']') {
++        pos++;
++      } else {
++        while (true) {
++          if (!expect('{')) return fail();
++          IgnitionTapWindow w{};
++          skip_ws();
++          if (pos < json.size() && json[pos] == '}') {
++            pos++;
++          } else {
++            while (true) {
++              std::string wk;
++              if (!parse_string(&wk)) return fail();
++              if (!expect(':')) return fail();
++              uint32_t v = 0;
++              if (!parse_uint(&v)) return fail();
++              if (wk == "id") w.id = v;
++              else if (wk == "start") w.start = v;
++              else if (wk == "end") w.end = v;
++              if (!expect(',')) break;
++            }
++          }
++          if (!expect('}')) return fail();
++          windows->push_back(w);
++          if (!expect(',')) break;
++        }
++        if (!expect(']')) return fail();
++      }
++    } else {
++      return fail();
++    }
++    if (!expect(',')) break;
++  }
++  return expect('}');
++}
++}  // namespace
++
++std::string EncodeTapValue(Tagged<Object> value) {
++  // Minimal layer-1 encoding (contract §4): scalars verbatim, strings
++  // bounded, objects kind-tagged ONLY. value_state is part of the
++  // envelope the embedder adds (value_tap field), not this blob.
++  if (IsSmi(value)) {
++    return "{\"t\":\"i\",\"v\":" + std::to_string(Cast<Smi>(value).value()) +
++           "}";
++  }
++  if (IsHeapNumber(value)) {
++    const double d = Cast<HeapNumber>(value)->value();
++    if (std::isfinite(d)) {
++      char buf[48];
++      snprintf(buf, sizeof(buf), "%.17g", d);
++      return std::string("{\"t\":\"n\",\"v\":") + buf + "}";
++    }
++    if (std::isnan(d)) return "{\"t\":\"n\",\"v\":\"nan\"}";
++    return std::string("{\"t\":\"n\",\"v\":\"") + (d > 0 ? "inf" : "-inf") +
++           "\"}";
++  }
++  if (IsOddball(value)) {
++    switch (Cast<Oddball>(value)->kind()) {
++      case Oddball::kUndefined: return "{\"t\":\"undef\"}";
++      case Oddball::kNull: return "{\"t\":\"null\"}";
++      case Oddball::kTrue: return "{\"t\":\"b\",\"v\":true}";
++      case Oddball::kFalse: return "{\"t\":\"b\",\"v\":false}";
++      default: return "{\"t\":\"oddball\"}";
++    }
++  }
++  if (IsString(value)) {
++    const Tagged<String> str = Cast<String>(value);
++    if (str->length() <= 64) {
++      std::string out = "{\"t\":\"s\",\"v\":";
++      const std::string cstr = str->ToCString().get();
++      // JSON-escape (the observer's AppendJsonString semantics).
++      out.push_back('"');
++      for (const char ch : cstr) {
++        const unsigned char c = static_cast<unsigned char>(ch);
++        if (c == '"' || c == '\\') { out.push_back('\\'); out.push_back(ch); }
++        else if (c < 0x20) {
++          char esc[8];
++          snprintf(esc, sizeof(esc), "\\u%04x", c);
++          out.append(esc);
++        } else { out.push_back(ch); }
++      }
++      out.push_back('"');
++      out.push_back('}');
++      return out;
++    }
++    return "{\"t\":\"s\",\"len\":" + std::to_string(str->length()) +
++           ",\"state\":\"truncated\"}";
++  }
++  if (IsBigInt(value)) {
++    return "{\"t\":\"bigint\",\"state\":\"unavailable\"}";
++  }
++  // Objects/arrays/etc: kind tag only — never expanded, never called.
++  if (IsJSReceiver(value)) {
++    if (IsJSArray(value)) return "{\"t\":\"array\",\"state\":\"ref-only\"}";
++    return "{\"t\":\"object\",\"state\":\"ref-only\"}";
++  }
++  return "{\"t\":\"other\",\"state\":\"unavailable\"}";
++}
++
++void IgnitionObserverSetTapConfig(v8::Isolate* v8_isolate,
++                                  const char* windows_json) {
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->SetTapConfig(windows_json ? windows_json : "{}");
 +}
 +
 +// ---- P5.5 D1: one-time compilation-instance metadata asset -------------
@@ -10073,7 +10278,31 @@ index 00000000..9437bda3
 +    std::vector<IgnitionLogicalInstruction> instructions;  // ascending
 +    Registry* owner_registry = nullptr;  // index cleanup in first pass
 +    std::string source_url;  // cached at registration (scope selection)
++    // P5.5 E2: compiled tap windows (sorted by start; empty = no taps).
++    // Written at registration/config time on the isolate thread; read
++    // by the zero-allocation runtime predicate.
++    std::vector<IgnitionTapWindow> tap_windows;
++    std::atomic<uint32_t> tap_seen{0};
++    std::atomic<uint32_t> tap_recorded{0};
 +  };
++
++  // Config state (SetTapConfig; isolate thread).
++  std::string tap_script_pattern;
++  std::vector<IgnitionTapWindow> tap_windows_config;
++
++  void CompileTapWindowsFor(Entry* entry) {
++    entry->tap_windows.clear();
++    if (tap_windows_config.empty()) return;
++    if (!entry->source_url.empty() && !tap_script_pattern.empty() &&
++        entry->source_url.find(tap_script_pattern) == std::string::npos) {
++      return;  // script-pattern discovery filter (url is a filter, not a key)
++    }
++    entry->tap_windows = tap_windows_config;
++    std::sort(entry->tap_windows.begin(), entry->tap_windows.end(),
++              [](const IgnitionTapWindow& a, const IgnitionTapWindow& b) {
++                return a.start < b.start;
++              });
++  }
 +
 +  Registry() = default;
 +  Registry(const Registry&) = delete;
@@ -10145,6 +10374,16 @@ index 00000000..9437bda3
 +    return hit == by_address_.end() ? nullptr : hit->second;
 +  }
 +
++  // E2 predicate support: version -> entry (isolated thread; linear over
++  // registered instances is fine — the search itself is NOT the hot path,
++  // the interval binary search is, and instance counts are small).
++  Entry* FindByVersion(uint32_t version) {
++    for (auto& [slot, entry] : by_slot_) {
++      if (entry->version == version) return entry;
++    }
++    return nullptr;
++  }
++
 +  Entry* EnsureRegistered(Isolate* isolate, Tagged<BytecodeArray> array,
 +                          const char* script_url, bool* fresh) {
 +    auto hit = by_address_.find(array.address());
@@ -10177,12 +10416,43 @@ index 00000000..9437bda3
 +    }
 +    entry->handle_slot = slot;
 +    entry->slot_key = reinterpret_cast<Address>(slot);
++    CompileTapWindowsFor(entry);
 +    by_slot_[entry->slot_key] = entry;
 +    by_address_[array.address()] = entry;
 +    return entry;
 +  }
 +
 +  size_t size() const { return by_slot_.size(); }
++
++  // E2: (re)compile the interval tables of every known entry against
++  // the new config (config application time — allocation allowed).
++  void ApplyTapConfig(const std::string& pattern,
++                      const std::vector<IgnitionTapWindow>& windows) {
++    tap_script_pattern = pattern;
++    tap_windows_config = windows;
++    for (auto& [slot, entry] : by_slot_) {
++      CompileTapWindowsFor(entry);
++    }
++  }
++
++  // The zero-allocation runtime predicate (also the test seam): binary
++  // search over the sorted interval table.
++  bool TapHitForTest(uint32_t version, uint32_t offset,
++                     uint32_t* window_id) const {
++    for (auto& [slot, entry] : by_slot_) {
++      if (entry->version != version) continue;
++      const auto& w = entry->tap_windows;
++      auto it = std::lower_bound(w.begin(), w.end(), offset,
++                                 [](const IgnitionTapWindow& win,
++                                    uint32_t off) { return win.end < off; });
++      if (it != w.end() && it->start <= offset) {
++        *window_id = it->id;
++        return true;
++      }
++      return false;
++    }
++    return false;
++  }
 +
 +  // Teardown while global handles are still alive: destroy the remaining
 +  // LIVE handles (collected markers are skipped — their nodes are already
@@ -10240,6 +10510,41 @@ index 00000000..9437bda3
 +  delete registry_;
 +}
 +
++void IgnitionObserverState::SetTapConfig(const std::string& windows_json) {
++  std::string pattern;
++  std::vector<IgnitionTapWindow> windows;
++  if (!ParseTapWindowsJson(windows_json, &pattern, &windows)) {
++    return;  // malformed config: taps off (fail-visible at the embedder)
++  }
++  registry_->ApplyTapConfig(pattern, windows);
++}
++
++bool IgnitionObserverState::TapHitForTest(uint32_t, uint32_t version,
++                                          uint32_t offset,
++                                          uint32_t* window_id) const {
++  return registry_->TapHitForTest(version, offset, window_id);
++}
++
++bool IgnitionObserverState::TapPredicate(uint32_t version, uint32_t offset,
++                                         uint32_t* window_id) {
++  Registry::Entry* entry = registry_->FindByVersion(version);
++  if (entry == nullptr || entry->tap_windows.empty()) {
++    return false;
++  }
++  entry->tap_seen.fetch_add(1, std::memory_order_relaxed);
++  const auto& w = entry->tap_windows;
++  auto it = std::lower_bound(w.begin(), w.end(), offset,
++                             [](const IgnitionTapWindow& win, uint32_t off) {
++                               return win.end < off;
++                             });
++  if (it == w.end() || it->start > offset) {
++    return false;
++  }
++  *window_id = it->id;
++  entry->tap_recorded.fetch_add(1, std::memory_order_relaxed);
++  return true;
++}
++
 +bool IgnitionObserverState::FindEventMetadata(
 +    Tagged<BytecodeArray> array, uint32_t normalized_offset,
 +    const char* script_url, uint32_t script_id, const char* function_name,
@@ -10291,6 +10596,8 @@ index 00000000..9437bda3
 +void IgnitionObserverSetCallback(v8::Isolate*, IgnitionObserverCallback) {}
 +void IgnitionObserverSetGate(v8::Isolate*, uint32_t) {}
 +void IgnitionObserverSetMetadataCallback(v8::Isolate*, IgnitionMetadataCallback) {}
++void IgnitionObserverSetTapCallback(v8::Isolate*, IgnitionTapCallback) {}
++void IgnitionObserverSetTapConfig(v8::Isolate*, const char*) {}
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
 +
@@ -10299,10 +10606,10 @@ index 00000000..9437bda3
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..a9a1d614
+index 00000000..c834852e
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,136 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -10311,6 +10618,7 @@ index 00000000..a9a1d614
 +#define V8_SRC_INTERPRETER_XTRACE_IGNITION_OBSERVER_H_
 +
 +#include <atomic>
++#include <string>
 +#include <cstddef>
 +#include <cstdint>
 +
@@ -10360,6 +10668,15 @@ index 00000000..a9a1d614
 +                                      // script has no resolvable URL
 +};
 +
++// P5.5 E2: one tap window (inclusive logical-offset interval). Compiled
++// into a per-instance SORTED table; the runtime predicate is a binary
++// search — zero allocation, zero containers, no parsing.
++struct IgnitionTapWindow {
++  uint32_t start;
++  uint32_t end;
++  uint32_t id;
++};
++
 +class V8_EXPORT_PRIVATE IgnitionObserverState {
 + public:
 +  explicit IgnitionObserverState(Isolate* isolate);
@@ -10370,6 +10687,19 @@ index 00000000..a9a1d614
 +  // P5.5 D1: fired exactly once per registered compilation instance with
 +  // the assembled metadata blob (see the boundary header).
 +  std::atomic<IgnitionMetadataCallback> metadata_callback{nullptr};
++  // P5.5 E2: value-tap callback + per-isolate window config (parsed
++  // once; instances compile their sorted interval tables from it).
++  std::atomic<IgnitionTapCallback> tap_callback{nullptr};
++
++  // Config time (allocation allowed); rebuilds every entry's interval
++  // table from the parsed pattern + windows. Empty config = taps off.
++  void SetTapConfig(const std::string& windows_json);
++
++  // E2 hot path: the ZERO-ALLOCATION runtime predicate (binary search
++  // over the instance's compiled interval table; no container touch on
++  // the miss path beyond the search itself).
++  bool TapPredicate(uint32_t bytecode_version, uint32_t offset,
++                    uint32_t* window_id);
 +
 +  // Hot path (isolate thread only): metadata for the array at the given
 +  // NORMALIZED logical offset, registering and pre-decoding the array on
@@ -10390,6 +10720,11 @@ index 00000000..a9a1d614
 +  // Test/verification seams (d8 smoke): registry census.
 +  size_t RegisteredArraysForTest() const;
 +
++  // E2 verification seam: does the entry for (script, version) have a
++  // compiled window table containing the given offset?
++  bool TapHitForTest(uint32_t script_id_unused, uint32_t version,
++                     uint32_t offset, uint32_t* window_id) const;
++
 +  class Registry;
 +  Registry* registry();
 +
@@ -10399,6 +10734,12 @@ index 00000000..a9a1d614
 +};
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
++
++// P5.5 E2/E3: bounded layer-1 value encoding for a tap hit. Runs ONLY
++// on a window hit (not on the predicate path); never re-enters user
++// code (no toString/valueOf), never dereferences objects — objects get
++// a kind tag only. Values are facts; value_role starts unclassified.
++std::string EncodeTapValue(Tagged<Object> value);
 +
 +}  // namespace xtrace
 +}  // namespace internal
@@ -11367,7 +11708,7 @@ index 86fafdb8..484c9eb9 100644
  }
  
 diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
-index 1e3f6ed3..407d63fe 100644
+index 1e3f6ed3..ff4ccf68 100644
 --- a/src/runtime/runtime-trace.cc
 +++ b/src/runtime/runtime-trace.cc
 @@ -2,6 +2,13 @@
@@ -11384,7 +11725,7 @@ index 1e3f6ed3..407d63fe 100644
  #include <iomanip>
  
  #include "src/execution/arguments-inl.h"
-@@ -277,5 +284,65 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+@@ -277,5 +284,85 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
  
  #endif  //  V8_DUMPLING
  
@@ -11443,6 +11784,26 @@ index 1e3f6ed3..407d63fe 100644
 +    cb(reinterpret_cast<v8::Isolate*>(isolate),
 +       static_cast<uint32_t>(script->id()), metadata.bytecode_version,
 +       static_cast<uint32_t>(offset), metadata.opcode, metadata.script_url);
++  }
++
++  // P5.5 E2: value tap — the PRE-DISPATCH accumulator (already in hand)
++  // is emitted when the (instance, offset) hits a compiled window. The
++  // predicate is binary search over the precompiled interval table
++  // (zero allocation); the bounded layer-1 value encoding below only
++  // runs ON a hit. Observation only — never gates execution.
++  auto tap_cb = isolate->xtrace_ignition_observer()->tap_callback.load(
++      std::memory_order_acquire);
++  if (tap_cb) {
++    uint32_t window_id = 0;
++    if (isolate->xtrace_ignition_observer()->TapPredicate(
++            metadata.bytecode_version, static_cast<uint32_t>(offset),
++            &window_id)) {
++      std::string value_json = xtrace::EncodeTapValue(*accumulator);
++      tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
++             static_cast<uint32_t>(script->id()), metadata.bytecode_version,
++             static_cast<uint32_t>(offset), window_id, value_json.data(),
++             value_json.size());
++    }
 +  }
 +  return ReadOnlyRoots(isolate).undefined_value();
 +}
