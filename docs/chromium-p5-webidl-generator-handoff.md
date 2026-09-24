@@ -358,3 +358,47 @@ P5.5 的通道复用、Entry 起步、预算和导航生命周期方向可保留
 - `coverage-out-cwd/result.json` 与其他root-cwd结果：覆盖表随cwd变化。
 - `nadc-reports.json`：既有E2E partial计数为0的事实；`bindings-python311.log`、`regression.log`、`producer-tests.log`：本轮亲跑通过记录。
 - `probes.cjs`、`summary.json`：仅本地安全合成输入、执行清单与复验边界。未运行第三方挑战脚本、未向第三方发送trace或凭据。
+
+---
+
+## 15. 架构师对总审意见的核实与裁定（2026-09-24）
+
+**方法**：每条指控都过了源码现场（生成代码 / bind_gen / scope / handler / validator）与运行证据抽查；不盲从权威，也不护短。结论：**P5-R1～R5 全部属实，P5 重开（范围精确为 WebIDL 插桩层）；P5.5 设计修订绝大部分接受；三处路线钉住。**
+
+### 15.1 五项 P5 指控的独立核验
+
+| 指控 | 架构师独立核验 | 裁定 |
+| --- | --- | --- |
+| R1 NADC 拒绝分支跳过 API 本体 + 非 void 无返回 | `gen/.../v8_performance.cc:710–722` 实测：`TryEnter()` 为 false 时函数直接走到末尾——`double` 返回函数**无返回语句（UB）**，且 `blink_receiver->now()` 本体在 else 分支根本不执行；`optimized-now-capture-off/result.json` 中 `Inspector.targetCrashed` 复现证据在案（采集关闭 + 优化路径）。bind_gen `interface.py:2198–2212` 的注入形态证实原 API 调用只存在于 if 分支 | **成立**，最高优先级产品回归（观测改变了业务行为——本项目第一原则被违反） |
+| R2a TLS 溢出把内层错误写到外层 | `xtrace_generated_scope.cc:36–56` 实测：深度 ≥64 不再 push，但 `MarkOutcome` 仍写 `TopScopeStack()`（第 64 层）——代码注释自称"never a wrong mark"恰好在 68 层场景失效（65–68 层不可标，内层 arg-error 落在无关的第 64 层正常 scope 上） | **成立** |
+| R2b setter 异常被标 ok | `gen/.../modules/v8/v8_url.cc:96–99` 实测：setter 转换 `NativeValueTraits<IDLUSVString>::NativeValue(...)` 失败路径为**裸 `return`、无任何标注**——该路径（attribute setter）与已接线的 `make_v8_to_blink_value` 转换族不是同一处，outcome 默认 "ok" 被记。抛错的 `toString` 值 → JS 异常被页面捕获 → outcome=ok | **成立** |
+| R3 精细开关无消费点 + 覆盖表依赖 cwd | `BindingsPreciseMode()` 在 blink/content 全树**零消费点**（死开关）；`xtrace_handler.cc:269` 用 cwd 相对路径读 `gen/xtrace/webidl_coverage.json`，且代码注释（"module directory"）与实现自相矛盾 | **成立** |
+| R4 成员边界未显式登记 | 首批接口从点名成员扩为 5 接口**全成员**注入（Element 182），未经架构师裁决登记；`supported` 语义被"构造处有 scope"滥用为"行为已验证" | **成立**（过程缺口；处理见 15.3-3） |
+| R5 记账/验证器盲区 | `validate_trace.py:2259–2281` 实测：配对为**纯集合差**——无入口先于终态的顺序断言、`selected_overload` 只查十进制形态不查 `< overload_count`（集合配对丢失该对照所需的关联）、对合法中断 capture 的未配对无终态感知 | **成立** |
+
+### 15.2 P5.5 §13 修订：接受的部分（原提案被证过度承诺处）
+
+以下均为我的文档措辞/承诺超出已证事实，接受修订：
+
+1. **accumulator 流 ≠ vPC**。循环头 Entry 读到的值只是**候选**虚拟操作码（也可能是比较值/上次调用结果）；必须引入 `value_role`（unclassified/candidate_pc/candidate_opcode/…）与"读到非空即识别成功"的明确禁令。合成解释器验收（已知 PC/opcode 不同的程序）是正确要求。
+2. **"tier 免疫"措辞错误**。它与本仓库既定事实边界 #5 直接冲突（优化器可降低/替换/消除调用，builtin hook 只在调用真实发生时触发）——这是我的表述失误，按 §13.2 改为"以能力矩阵与实际 tier 证据为准"。
+3. **T3 的 key 解析依赖不存在的数据**。当前边界头只有 script_id/version/offset/opcode/url，`GetNamedProperty` 的 key 在常量池、需 D1 的编译实例元数据资产才能解析；`GetKeyedProperty` 的 key 多为运行期值，不可普遍恢复。T3 骨架（schema/fixture/分析器）可先行，完整 key 面等元数据——"无需引擎依赖"的表述收缩为此限定。
+4. **预算与"首次完整激活"不相容**。N=2000/窗口 512 覆盖不了 10⁴–10⁵ 迭代——预算是**可重现探针计划**（first-K/nth-hit/明确区段），完整由新独立实验补齐；完整性分两轴（传输结算 complete/incomplete × 观测覆盖 full/partial/unknown）。
+5. **activation_ref 不是任意函数调用身份**。递归/同函数多调/generator/async 下，把同一脚本激活的全部 tap 串为一个 VM 执行是错误的——需调用/恢复片段身份或明确限制（首期只在单函数激活内串接，跨调用链接标 hypothesis）。
+6. **dump 深序列化边界**：own-data slots 等内部安全路径有界拷贝；accessor/Proxy/interceptor/未知 exotic 一律跳过并记原因；**TypedArray 原生地址不写入 trace**（只存类型/offset/长度/资产引用）；预算除阈值外加总量与工作量上限。
+
+### 15.3 钉住的路线（不接受带偏的三处）
+
+1. **值观测方向不动摇**。§13.1 的重排（可定位的运行证据 + 按需探针 + 有界值快照 + 可审查的分析假设）是承诺级别的修正，不是方向之争——与原提案的 T4/T5 本意一致。删除的是"完整虚拟指令流/完整计算图/一次 dump 即还原"的措辞，能力本身保留。
+2. **nav_chain 锚点保留**。一阶段 cookie 值在重载 Cookie 头中可定位，是正确的验收锚点；等级从"闭环因果"修正为 **derived 级强证据**（值相等 + 链身份 + 时序），不再称闭环——锚点留、措辞降。
+3. **R4 处理为"登记 + 二维分级"，不缩范围**。5 接口全成员注入不违反"不做全量 WebIDL"（接口数未扩），问题在 `supported` 语义滥用。现以架构师身份显式登记：**首批 5 接口全成员注入 = 编译事实级覆盖**；运行已验证成员按行为 fixture 矩阵逐个标记（接口存在/生成有码/路径可达/语义已验收四分）——成员集合不回缩到点名清单。
+
+### 15.4 两条不可妥协与一条自省
+
+- **R1 修复形状写死**：**API 无条件执行、观测有条件执行**（`retval = call(); if (TryEnter()) observe; else MarkNadcPartial(); return retval;`）。任何让 capture 决定业务是否执行的形态都没有讨论空间。附带接受 §14.3-R1 对"无分配"的澄清：`IDLExtendedAttributes.md:1258` 的现代 NADC 语义允许分配/异常/JS 回调——无分配预检查是优化而非正确性要求，修复不必被它捆住。
+- **重开范围精确**：P5 重开只覆盖 WebIDL 插桩与覆盖表层（§14.4 的 C0–C4 块）；P2–P4 已冻结底座（管道/契约/observer）不受 R1–R5 影响，不做全栈历史重演。
+- **自省**：本次 P5 确认（29db301）我核了对方给出的正例证据，但没有主动反例 NADC 拒绝路径、setter 转换路径与 TLS 溢出——"绿灯但没解决"的模式在架构师侧复发。记入长期纪律：**验收确认必须包含独立反例面，不是验对方给的正例**。
+
+### 15.5 执行块确认（与 §14.4 一致，按本裁定校准）
+
+C0 反例进受跟踪测试先红 → C1 NADC 全分支必调 API/返回（强制 fast API 四态：关/开/未配置/满队列/stop 后）→ C2 setter/helper 标注与 scope 溢出归属（含 Promise 同步边界、CEReactions、配对矩阵）→ C3 覆盖二维分级 + precise 真谓词 + 清单进构建资源闭环（任意 cwd 一致）→ C4 身份重录与全量回归后恢复冻结。bindings 3.11 环境债已被总架构师在本机重新找到并 57/57 通过——该笔关闭。P55-D0 按 §13 修订设计契约先行，不依赖"P5 已安全"假设。
