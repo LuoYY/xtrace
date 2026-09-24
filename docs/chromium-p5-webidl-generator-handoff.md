@@ -1,6 +1,7 @@
 # P5 交接：Blink WebIDL 生成器插桩（首批接口的 call token 与 scope 观测）
 
-- 文档版本：v1.1（2026-09-23；P5-E1 设计文档经裁决通过——五项全部接受，修订见 [chromium-p5-design.md](chromium-p5-design.md) §9；实施从 P5-E2 开始，按 §7 长程块推进）。
+- 文档版本：v1.2（2026-09-24，总架构师独立复审见 §14）。
+- **当前裁决：P5 验收重新打开（changes required）。** §13 的项目架构师冻结记录作为历史保留；当前最终产物存在关闭采集时 Fast API 崩溃、错误 outcome 与能力披露缺陷，不能作为 P5.5 的已验证安全基础。先执行 §14.4，P5.5 设计修订与合成测试可并行，不重编译或扩大现场采集。
 - 前置状态：**P1–P4 全部冻结**（P4 终审见 [P4 交接](chromium-p4-ignition-observer-handoff.md) §13；§10.5 的"P5 C++ 插桩等待"门槛随 P4 冻结解除）。
 - 分工：执行层 agent 实施；总架构师负责规范与证据 review、纠偏与关卡裁决。执行模式沿用长程单次终审（§7）。
 - 设计依据：[迁移增强草稿](chromium-migration-enhancement-draft.md) §10（Blink WebIDL 生成器增强）、§12 P5 行、§13.1；[P4 交接](chromium-p4-ignition-observer-handoff.md) §10.5（P5 进入门）；[trace-schema-v3.md](trace-schema-v3.md) v1.2。
@@ -263,3 +264,97 @@
 **确认 P5 冻结（accepted-p5）。** 流程记录：执行层按终审指令先行标记了 p5.status，经复验全部成立、确认有效；冻结动作的发出方应为架构师，后续保持先例。两条边界存档：生成器自身 57/57 套件依赖隔离 Python 3.11 环境（P1 期环境已失，本轮未跑，重建后补跑）；E2E 下 `nadc_partial` 可见性依赖 V8 走到 fast API（机制已由单测确定性证明，E2E 证明包围契约）。
 
 下一阶段：[P5.5 值观测二期](chromium-p55-value-observation-design.md)（设计 v1.2 已按 [实施侧意见](chromium-p55-implementation-notes.md) 裁决，见该文档裁决节）。
+
+## 14. 总架构师独立复审（2026-09-24，基线 29db301）
+
+### 14.1 范围与结论
+
+复审 `61d218e..29db301` 的 11 个 P5/P5.5 相关提交，核对生成器、生成 C++、scope/logger、覆盖表、验收驱动与原始需求；对当前产物做低负载反例和回归。**未改产品代码、未启动编译、未执行私有挑战语料、未回连第三方站点。**
+
+结论：**P5 重新打开，不以现有冻结记录代替功能正确性。** 双通道、overload 路由、部分 outcome、生成表一致性和重放均有真实成果；但“缓冲拒绝只影响日志、不影响 API”被生成代码破坏，且已经在关闭采集的实际浏览器上复现崩溃，这是必须先修的产品回归。不得以“Fast API 路径难触发”“P5.5 后续会补”降级。
+
+P5.5 的通道复用、Entry 起步、预算和导航生命周期方向可保留；其语义、输入与安全边界必须先按 [P5.5 总审 §13](chromium-p55-value-observation-design.md#13-总架构师设计复审与增强路线2026-09-24) 修订，不能继承未经证明的“P5 静态类型分派即安全”。
+
+### 14.2 独立复核通过与边界
+
+- 五补丁重放：Chromium **130 文件**、V8 **137 文件**，0 不符、0 清单外漂移、双固定 HEAD 匹配；tree 分别为 `233d3cb2dec041077de5656bde62778e8bb6660b`、`c39b04e0d71dd91ebdde2350c66fb6fda719164e`。按文件不相交分层可恢复，保留。
+- 本轮亲跑：Python **368**、launcher **28**、GUI 逻辑 **211**、producer C++ **9/9** 全绿。
+- 本轮重新找到可用的 `/tmp/xtrace-blink-python311/bin/python`，隔离运行 bindings **57/57** 通过，0 skip/0 fail；§12/§13 的“本机环境已失、待补跑”是此前快照，本轮这笔环境债已关闭。57 项上游单测不覆盖下面生成语义缺陷，不能外推。
+- 当前覆盖表成员数为 Element 182、URL 18、Performance 21、Response 20、NADCAttributeTest 1；4 个表/生成代码一致性用例只证明集合一致，不证明所有路径与两种模式语义正确。
+- 新证据目录：[p5-chief-review-gwem9w3m](../chromium/src/out/XTraceIntegration/validation/p5-chief-review-gwem9w3m/)，包含补丁/组件与快照摘要、命令、CDP 结果、原始 trace、测试日志。没有重新跑全量长程性能/故障矩阵。
+
+### 14.3 验收阻塞与整改路径
+
+#### P5-R1：NADC 拒绝分支跳过 API 本体，非 void 路径缺返回（最高优先级）
+
+定位：`bindings/scripts/bind_gen/interface.py:2198–2212,2826–2840`；实际生成 `gen/.../core/v8/v8_performance.cc:711–722` 与 `v8_nadc_attribute_test.cc:77–87`。
+
+当前生成逻辑是 `if(TryEnter()){ scope; 原API调用; return value; }else{ MarkNadcPartial(); }`：拒绝时 setter 完全不执行，`Performance.now` 的 double 返回函数走到末尾无返回值。拒绝发生于采集关闭、未收到配置、停止、队列满等正常状态，不能把它解释为合法降采样。
+
+**本轮实际复现**：同一 ChromiumX 关闭采集时，正常 `performance.now()` 返回有限值；使用本地测试 intrinsic 使包装函数优化后调用，CDP 收到 `Inspector.targetCrashed`，evaluate 超时；开启采集的同一优化输入成功，trace 中有 1 条 `nadc-callback`。崩溃现场无完整符号栈，不能声称已符号化每一帧；但生成 C++ 的丢调用/缺返回为静态确定缺陷，必须修。
+
+整改：**计日志的开关只能包住观察逻辑，原始 API 调用和返回必须在所有分支恰好执行一次。** 可采用可失效的 scope/guard，但不能让 capture 决定业务是否执行。无分配是项目额外约束，不是 NoAllocDirectCall 的现代上游语义——固定版本 `IDLExtendedAttributes.md:1258` 明确允许分配、异常和 JS 回调；不要继续以历史名称推导 API 限制。
+
+`TryEnter`/`MarkNadcPartial` 当前会调用 `Current()` 和 `Get()`，它们可能初始化 producer/hub、查环境并分配；`BufferHasRoom` 只检查一条余量，也没为 entry+outcome 和 native 中的重入预留。需明确零初始化预检查与计数策略，允许跳过观测，不允许跳过 API。无采集/已 stop 不应无限新增“partial”到无可结算的 hub；活跃 capture 的拒绝应按对应成员/原因统计。
+
+必过：强制实际 Fast API 的采集关闭/开启、未配置、满队列、stop 后四态；验证返回值/副作用与非插桩对照一致，renderer 无崩溃，拒绝分支确实被执行。现 E2E 保存的两个 partial 报告 `nadc_partial` 汇总均为 0，9/9 producer 单测仅测计数器，不能代替生成回调语义验收。
+
+#### P5-R2：setter 异常被标 ok，TLS 深度溢出把内层错误写到外层（高优先级）
+
+定位：`xtrace_generated_scope.cc:40–56,149–153`、`blink_v8_bridge.py:39–47,921–930`、`interface.py:2321–2324`。
+
+- 本轮 `URL.href = {toString(){throw Error(...)}}` 的 JS 异常被页面捕获、href 保持原值，但配对 outcome 为 **ok**；`Element.id` 的同类测试也为 ok。URL setter 的转换调用未携带标注上下文，Element 的 CEReactions-reflect 优化 helper 绕过普通转换标记。
+- 68 层成功 URL 构造，最内层调用一个缺参 API 并自行捕获异常，所有构造正常返回；TLS 64 深度上限后不再 push，`MarkOutcome` 仍写第64层，导致正常的 `URL.constructor` token64 被标 **arg-error**。
+
+整改：将异常标记传到真正执行转换/优化 helper 的路径，不给所有未标注路径默认为“已证明成功”；scope ownership/超深路径必须有明确不可标注状态，绝不能借用外层栈顶。保留业务 JS 重入，不能用全局递归 guard 把用户调用吞掉。为 getter/setter、优化 helper、overload 被选实现、Promise 异常转拒绝分别定义同步 outcome，而不是将 JS rejected Promise 与 native throw 混为一类。
+
+必过：URL href/Element反射 setter 参数转换抛错、reentry 内错已捕获/向外传播、64/65/更深边界、正常深层调用、Promise return/rejection-conversion 与真正 settlement 分别断言；输入页面的真实结果必须进入测试断言。
+
+#### P5-R3：精细 bindings 模式只读开关未控制安装；覆盖能力依赖 cwd（高优先级）
+
+定位：`xtrace_generated_scope.cc:74–82`、`xtrace_handler.cc:269–287`，以及生成 `v8_performance.cc:844–852` 的无条件 CFunction 安装。
+
+`BindingsPreciseMode()` 仅在匿名 namespace 定义，没有消费点；补丁内未见该开关参与 renderer 转发和 Fast API/cached accessor 安装谓词。能力报 true 目前只能证明浏览器启动参数有该名字，不能证明精细模式生效。
+
+覆盖表读取 `gen/xtrace/webidl_coverage.json` 是相对工作目录。本轮同一二进制仓库根 cwd 得不到 `webidlCoverage`，out cwd 可得到；代码注释声称“module directory”与实现不符。生成器捕获 OSError 后忽略，清单碎片也可能沿用旧文件，表不是不可变二进制能力。
+
+整改：按已裁决 DP5 对首批选定路径在模板建立前统一控制**快速入口安装/缓存**并保留正常慢路径语义；开关传递、actual capability、混用矩阵同一来源。将生成清单作为声明的 GN 输出/资源嵌入或固定应用资源路径读取，带版本/摘要，构建缺失或过期要失败，不随 cwd 或手工文件改变能力。
+
+必过：任意 cwd、重定位应用、缺/坏/旧清单、普通与precise两模式、observer独立四组合；用实际进入的 fast/slow/cached路径证明，而非读取开关。
+
+#### P5-R4：覆盖集合一致不能替代成员范围与行为覆盖（验收门）
+
+最初冻结清单是若干具体成员，当前按五个 interface 全部注入，Element 扩到182成员。无论这是有意扩大范围还是生成策略产物，项目架构师必须显式登记成员边界与对应能力，不以修覆盖表扩大 P5 定义。没有实现/验收的 native异常、cache早退、Promise rejection析构顺序、CEReactions重入，不应因“构造处有scope”就标 supported。
+
+建议将表拆为“编译注入事实”和“运行覆盖能力”两个维度：member/entry kind、已覆盖路径、限制、是否经精细模式验证。保留生成集一致性测试，另增加行为fixture矩阵；接口存在、生成有代码、路径可达、语义已验收四者不能混用。
+
+#### P5-R5：记账与验证器还有配对/截断盲区（与P5.5共用基础）
+
+`LogGeneratedEntry` 与 `LogGeneratedOutcome` 各自取得配置/过滤，scope 不记录入口是否成功接纳；更新配置、stop、队列溢出或采集中途进入 scope 可能留下单边 token。当前 TryEnter 只查一条容量，scope 深度上限也没有缺口计数。需对配对事件规定 admission、终止/丢失和过滤变化语义；记录不足写 incomplete/coverage gap，不能为通过validator补造 outcome。
+
+`validate_v3_webidl` 使用集合查两端 token：类型转字符串后对账、未严格核对到达顺序及 `selected_overload < overload_count`，也不能证明 outcome 分类与页面真实结果一致。增强数值类型、相同producer/token唯一、入口先于终态、路由边界和合法未完成capture的负例；不得把v1/v2导入兼容当新采集v3可缺channel的理由。
+
+### 14.4 工程师／项目架构师的下一执行块
+
+| 顺序 | 负责人角色 | 关键路径与验收 |
+| --- | --- | --- |
+| P5-C0 | 工程师 | 把本轮fast-off、setter-error、scope-overflow、cwd反例迁入受跟踪测试，先红；复用共享CDP驱动，保留脚本与stderr/targetCrashed/退出码，不等待重建才写测试 |
+| P5-C1 | 工程师 | 修NADC所有分支必调API/返回，先d8/绑定单目标或可控FastAPI测试，再限流Integration增量；真正强制fast路径与关闭/stop/满队列对照 |
+| P5-C2 | 工程师 | 修setter/helper标注与scope溢出归属；补Promise同步边界、CEReactions重入及配置/停止配对矩阵 |
+| P5-C3 | 项目架构师定契约，工程师实现 | 明确成员/路径覆盖和precise实际谓词；生成清单进入构建资源闭环，任意cwd能力一致；不要用标partial掩盖业务回归 |
+| P5-C4 | 双方联合 | 重新记录最终源/五补丁/生成代码/组件/驱动/coverage摘要；重放、368/28/211+新增、bindings57+新增、producer/targeted浏览器矩阵；总架构师复验后再恢复accepted-p5 |
+| P55-D0（可并行） | 项目架构师 | 按P5.5 §13修订原始需求到证据模型、输入清单、预算/身份/序列化/导航契约；用自有合成fixture验证，不依赖P5已安全这一假设 |
+
+继续遵守单构建协调者和资源方案，不用本轮review作为恢复大规模编译的新增授权。项目架构师负责决策与证据层级，工程师负责最小修复和可复现测试，总架构师负责反例复验；不再只给“全绿计数”而省略路径是否真正经过。
+
+### 14.5 本轮证据
+
+[p5-chief-review-gwem9w3m](../chromium/src/out/XTraceIntegration/validation/p5-chief-review-gwem9w3m/) 内：
+
+- `identity.json`、`replay.json`：当前29db301、130/137重放和组件/args/快照/coverage摘要；不声称已提供过历史P5二进制摘要。
+- `optimized-now-capture-off/result.json`：CDP targetCrashed；`normal-now-capture-off/result.json` 和 `optimized-now-capture-on/result.json`：同二进制对照；开启采集优化路径确有nadc-callback事件。
+- `href-conversion/result.json`、`setter-conversion/result.json`：JS异常与outcome=ok冲突。
+- `scope-overflow/result.json`：成功深层构造被误标arg-error。
+- `coverage-out-cwd/result.json` 与其他root-cwd结果：覆盖表随cwd变化。
+- `nadc-reports.json`：既有E2E partial计数为0的事实；`bindings-python311.log`、`regression.log`、`producer-tests.log`：本轮亲跑通过记录。
+- `probes.cjs`、`summary.json`：仅本地安全合成输入、执行清单与复验边界。未运行第三方挑战脚本、未向第三方发送trace或凭据。
