@@ -15208,10 +15208,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..5f4e93ae0a
+index 0000000000..7078fbd2e0
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,327 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15228,6 +15228,8 @@ index 0000000000..5f4e93ae0a
 +#include "base/environment.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/no_destructor.h"
++#include "base/strings/string_piece.h"
++#include "base/strings/stringprintf.h"
 +#include "base/synchronization/lock.h"
 +#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 +#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
@@ -15331,6 +15333,8 @@ index 0000000000..5f4e93ae0a
 +    // racing event then no-ops), then the gate, then leave the registry.
 +    v8::internal::xtrace::IgnitionObserverSetCallback(
 +        isolate_.get(), nullptr);
++    v8::internal::xtrace::IgnitionObserverSetMetadataCallback(
++        isolate_.get(), nullptr);
 +    v8::internal::xtrace::IgnitionObserverSetGate(
 +        isolate_.get(), 0);
 +    base::AutoLock lock(*scopes_lock());
@@ -15381,6 +15385,9 @@ index 0000000000..5f4e93ae0a
 +void OnIgnitionEvent(v8::Isolate* isolate, uint32_t script_id,
 +                     uint32_t bytecode_version, uint32_t bytecode_offset,
 +                     uint32_t opcode, const char* script_url);
++void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
++                        uint32_t bytecode_version,
++                        const char* metadata_json, size_t metadata_len);
 +
 +IgnitionScope* InstallScope(v8::Isolate* isolate) {
 +  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
@@ -15400,7 +15407,43 @@ index 0000000000..5f4e93ae0a
 +  }
 +  v8::internal::xtrace::IgnitionObserverSetCallback(
 +      isolate, &OnIgnitionEvent);
++  // P5.5 D1: one-time compilation-instance metadata assets ride the same
++  // lifecycle as the event callback (unregistered in WillBeDestroyed).
++  v8::internal::xtrace::IgnitionObserverSetMetadataCallback(
++      isolate, &OnIgnitionMetadata);
 +  return scope;
++}
++
++void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
++                        uint32_t bytecode_version,
++                        const char* metadata_json, size_t metadata_len) {
++  // Contract §3: exactly-once per compilation instance; scope state gets
++  // a second line beyond the generated-code gate like every event path.
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->Stopped() || scope->stack.empty() ||
++      !scope->stack.back().selected) {
++    return;
++  }
++  if (!metadata_json || metadata_len == 0) {
++    return;
++  }
++  // The asset content is the assembled blob verbatim (UTF-8-safe: the
++  // blob escapes control chars; non-ASCII source bytes are hex in the
++  // sha1, and string constants are JSON-escaped V8-side); the event row
++  // carries a compact summary so the manifest stays light. The asset
++  // "url" is a stable namespaced label — the blob carries source
++  // identity (sha1 + length), and the label never matches the
++  // internal-script filter.
++  const std::string summary = base::StringPrintf(
++      "{\"script_id\":%u,\"bytecode_version\":%u,\"bytes\":%zu}",
++      script_id, bytecode_version, metadata_len);
++  const std::string asset_url = base::StringPrintf(
++      "v8-bytecode-metadata://%u/%u", script_id, bytecode_version);
++  XTraceLogger::LogAssetEvent(
++      "reverse", "asset", "V8.bytecodeMetadata", String::FromUTF8(summary),
++      "v8-bytecode-metadata", String::FromUTF8(asset_url),
++      String::FromUTF8(
++          base::StringPiece(metadata_json, metadata_len)));
 +}
 +
 +void OnIgnitionEvent(v8::Isolate* isolate, uint32_t script_id,

@@ -35,10 +35,10 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-generator.cc",
 diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
 new file mode 100644
-index 00000000..d83361b4
+index 00000000..588ed2e1
 --- /dev/null
 +++ b/include/xtrace_observer_boundary.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,74 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -76,6 +76,23 @@ index 00000000..d83361b4
 +                                          uint32_t opcode,
 +                                          const char* script_url);
 +
++// P5.5 D1 (design contract §3): one-time compilation-instance metadata
++// asset. Delivered exactly once per registered compilation instance, as a
++// primitive (char*, size_t) blob assembled V8-side: instance key fields
++// (script_id, bytecode_version = the per-isolate instance serial),
++// source digest (sha1 + length), parameter/register counts, the FULL
++// pre-decoded logical offset/opcode table, per-instruction filtered
++// operand/register-operand counts, safe bounded constant-pool entries
++// and the decoded source-position mapping. Large/non-scalar constants
++// are kind-tagged, never expanded; the blob contains no native
++// addresses or code pointers. Subsequent events reference the instance
++// by (script_id, bytecode_version) only.
++using IgnitionMetadataCallback = void (*)(v8::Isolate* isolate,
++                                          uint32_t script_id,
++                                          uint32_t bytecode_version,
++                                          const char* metadata_json,
++                                          size_t metadata_len);
++
 +// Always compiled; the RETURN VALUE carries the compile macro's truth.
 +V8_EXPORT bool IgnitionObserverIsCompiled();
 +
@@ -86,6 +103,8 @@ index 00000000..d83361b4
 +// the gate first (destroy-order contract).
 +V8_EXPORT void IgnitionObserverSetCallback(
 +    v8::Isolate* isolate, IgnitionObserverCallback callback);
++V8_EXPORT void IgnitionObserverSetMetadataCallback(
++    v8::Isolate* isolate, IgnitionMetadataCallback callback);
 +V8_EXPORT void IgnitionObserverSetGate(v8::Isolate* isolate,
 +                                        uint32_t open);
 +
@@ -9066,7 +9085,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..355bc764 100644
+index fc6d62e2..2f6f9f13 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9077,7 +9096,7 @@ index fc6d62e2..355bc764 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,41 @@
+@@ -40,6 +41,57 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9088,6 +9107,22 @@ index fc6d62e2..355bc764 100644
 +std::mutex g_pairs_mutex;
 +std::set<std::pair<uint32_t, uint32_t>> g_version_pairs;
 +std::set<std::string> g_d8_observer_opcodes;
++// P5.5 D1: one file per compilation instance under
++// --xtrace-metadata-dir (NEVER overwrites the P0 baseline outputs).
++std::string g_metadata_dir;
++void D8MetadataCallback(v8::Isolate*, uint32_t script_id,
++                        uint32_t bytecode_version, const char* metadata_json,
++                        size_t metadata_len) {
++  printf("META script=%u version=%u len=%zu\n", script_id, bytecode_version,
++         metadata_len);
++  if (g_metadata_dir.empty()) return;
++  std::string path = g_metadata_dir + "/" + std::to_string(script_id) + "_" +
++                     std::to_string(bytecode_version) + ".json";
++  FILE* f = fopen(path.c_str(), "wb");
++  if (!f) return;
++  fwrite(metadata_json, 1, metadata_len, f);
++  fclose(f);
++}
 +void D8ObserverCallback(v8::Isolate*, uint32_t script_id,
 +                        uint32_t bytecode_version, uint32_t bytecode_offset,
 +                        uint32_t opcode, const char* script_url) {
@@ -9119,7 +9154,7 @@ index fc6d62e2..355bc764 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -7037,6 +7073,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7089,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9132,7 +9167,7 @@ index fc6d62e2..355bc764 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +7943,15 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +7959,18 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9141,6 +9176,9 @@ index fc6d62e2..355bc764 100644
 +  // callback and open THIS isolate's gate (the state is per-isolate now).
 +  if (i::v8_flags.xtrace_observer_smoke) {
 +    i::xtrace::IgnitionObserverSetCallback(isolate, &D8ObserverCallback);
++    i::xtrace::IgnitionObserverSetMetadataCallback(isolate,
++                                                   &D8MetadataCallback);
++    g_metadata_dir = i::v8_flags.xtrace_metadata_dir;
 +    i::xtrace::IgnitionObserverSetGate(isolate, 1);
 +    printf("XTRACE-P4 d8 observer gate OPEN\n");
 +  }
@@ -9394,21 +9432,24 @@ index 9a3a6de3..c092e2ba 100644
    if (IsErrorStackData(*lookup.error_stack)) {
      auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index bf210a58..f457bc76 100644
+index bf210a58..db5d7a5f 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -252,6 +252,10 @@
+@@ -252,6 +252,13 @@
  //
  #define FLAG FLAG_FULL
  
 +// XTRACE_TEST_SCAFFOLDING (P4-E2 d8 loop): open the ignition observer
 +// gate in d8 with a counting callback (browser path uses its own switch).
 +DEFINE_BOOL(xtrace_observer_smoke, false, "open the XTrace ignition observer gate")
++// P5.5 D1: directory receiving one JSON metadata file per compilation
++// instance (d8-first verification; never the P0 baseline outputs).
++DEFINE_STRING(xtrace_metadata_dir, "", "write D1 bytecode-metadata assets to this directory")
 +
  // Experimental features: Features that are still considered experimental and
  // which are not ready for fuzz testing should be defined using this macro. The
  // feature will then imply --experimental, which will indicate to the user that
-@@ -1301,6 +1305,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
+@@ -1301,6 +1308,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
  #undef FLAG
  #if V8_ENABLE_SPARKPLUG
  #define FLAG FLAG_FULL
@@ -9417,7 +9458,7 @@ index bf210a58..f457bc76 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -1350,6 +1356,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1350,6 +1359,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9426,7 +9467,7 @@ index bf210a58..f457bc76 100644
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
-@@ -3899,6 +3907,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
+@@ -3899,6 +3910,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
  #undef FLAG
  #ifdef ENABLE_GDB_JIT_INTERFACE
  #define FLAG FLAG_FULL
@@ -9435,7 +9476,7 @@ index bf210a58..f457bc76 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3928,6 +3938,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
+@@ -3928,6 +3941,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
  #undef FLAG
  #ifdef DEBUG
  #define FLAG FLAG_FULL
@@ -9444,7 +9485,7 @@ index bf210a58..f457bc76 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3989,6 +4001,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
+@@ -3989,6 +4004,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9453,7 +9494,7 @@ index bf210a58..f457bc76 100644
  // log.cc
  DEFINE_STRING(logfile, "v8.log",
                "Specify the name of the log file, use '-' for console, '+' for "
-@@ -4158,6 +4172,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
+@@ -4158,6 +4175,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
  #undef FLAG
  #ifdef ENABLE_DISASSEMBLER
  #define FLAG FLAG_FULL
@@ -9462,7 +9503,7 @@ index bf210a58..f457bc76 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -4191,6 +4207,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
+@@ -4191,6 +4210,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9471,7 +9512,7 @@ index bf210a58..f457bc76 100644
  //
  // Predictable mode related flags.
  //
-@@ -4441,6 +4459,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
+@@ -4441,6 +4462,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
  
  #ifdef VERIFY_PREDICTABLE
  #define FLAG FLAG_FULL
@@ -9636,10 +9677,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..255a017b
+index 00000000..9437bda3
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,616 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9651,14 +9692,25 @@ index 00000000..255a017b
 +#include <unordered_map>
 +#include <vector>
 +
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++
 +#include "src/execution/isolate.h"
 +#include "src/handles/global-handles.h"
 +#include "src/handles/global-handles-inl.h"
 +#include "src/heap/heap.h"
 +#include "src/interpreter/bytecode-array-iterator.h"
 +#include "src/interpreter/bytecodes.h"
++#include "src/numbers/conversions.h"
 +#include "src/objects/bytecode-array-inl.h"
 +#include "src/objects/bytecode-array.h"
++#include "src/objects/objects.h"
++#include "src/codegen/source-position-table.h"
++#include "src/codegen/source-position-table.h"
++#include "src/objects/string.h"
 +
 +namespace v8 {
 +namespace internal {
@@ -9698,6 +9750,312 @@ index 00000000..255a017b
 +      ->xtrace_ignition_observer()
 +      ->gate.store(open, std::memory_order_release);
 +}
++
++void IgnitionObserverSetMetadataCallback(
++    v8::Isolate* v8_isolate, IgnitionMetadataCallback cb) {
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->metadata_callback.store(cb, std::memory_order_release);
++}
++
++// ---- P5.5 D1: one-time compilation-instance metadata asset -------------
++
++namespace {
++
++// Minimal self-contained SHA-1 (FIPS 180-1). Content digest for the
++// source reference only — not a security boundary; avoids depending on
++// embedder crypto from inside V8.
++struct Sha1Digest {
++  uint32_t h[5];
++};
++
++void Sha1Transform(uint32_t state[5], const uint8_t block[64]) {
++  uint32_t w[80];
++  for (int i = 0; i < 16; i++) {
++    w[i] = (static_cast<uint32_t>(block[i * 4]) << 24) |
++           (static_cast<uint32_t>(block[i * 4 + 1]) << 16) |
++           (static_cast<uint32_t>(block[i * 4 + 2]) << 8) |
++           static_cast<uint32_t>(block[i * 4 + 3]);
++  }
++  for (int i = 16; i < 80; i++) {
++    const uint32_t a = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
++    w[i] = (a << 1) | (a >> 31);
++  }
++  uint32_t a = state[0], b = state[1], c = state[2], d = state[3],
++           e = state[4];
++  for (int i = 0; i < 80; i++) {
++    uint32_t f, k;
++    if (i < 20) {
++      f = (b & c) | ((~b) & d);
++      k = 0x5A827999;
++    } else if (i < 40) {
++      f = b ^ c ^ d;
++      k = 0x6ED9EBA1;
++    } else if (i < 60) {
++      f = (b & c) | (b & d) | (c & d);
++      k = 0x8F1BBCDC;
++    } else {
++      f = b ^ c ^ d;
++      k = 0xCA62C1D6;
++    }
++    const uint32_t temp = ((a << 5) | (a >> 27)) + f + e + k + w[i];
++    e = d;
++    d = c;
++    c = b;
++    b = (b << 30) | (b >> 2);
++    a = temp;
++  }
++  state[0] += a;
++  state[1] += b;
++  state[2] += c;
++  state[3] += d;
++  state[4] += e;
++}
++
++void Sha1Hex(const uint8_t* data, size_t len, char out[41]) {
++  uint32_t state[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476,
++                       0xC3D2E1F0};
++  uint64_t bit_len = static_cast<uint64_t>(len) * 8;
++  size_t offset = 0;
++  uint8_t block[64];
++  while (len - offset >= 64) {
++    Sha1Transform(state, data + offset);
++    offset += 64;
++  }
++  const size_t rem = len - offset;
++  memset(block, 0, sizeof(block));
++  memcpy(block, data + offset, rem);
++  block[rem] = 0x80;
++  if (rem >= 56) {
++    Sha1Transform(state, block);
++    memset(block, 0, sizeof(block));
++  }
++  for (int i = 0; i < 8; i++) {
++    block[56 + i] = static_cast<uint8_t>(bit_len >> (56 - i * 8));
++  }
++  Sha1Transform(state, block);
++  static const char kHex[] = "0123456789abcdef";
++  for (int i = 0; i < 5; i++) {
++    for (int j = 0; j < 4; j++) {
++      const uint8_t byte = static_cast<uint8_t>(state[i] >> (24 - j * 8));
++      out[i * 8 + j * 2] = kHex[byte >> 4];
++      out[i * 8 + j * 2 + 1] = kHex[byte & 0xF];
++    }
++  }
++  out[40] = '\0';
++}
++
++void AppendJsonString(std::string* out, const char* s) {
++  out->push_back('"');
++  for (const char* p = s; *p; ++p) {
++    const unsigned char c = static_cast<unsigned char>(*p);
++    if (c == '"' || c == '\\') {
++      out->push_back('\\');
++      out->push_back(static_cast<char>(c));
++    } else if (c < 0x20) {
++      char buf[8];
++      snprintf(buf, sizeof(buf), "\\u%04x", c);
++      out->append(buf);
++    } else {
++      out->push_back(static_cast<char>(c));
++    }
++  }
++  out->push_back('"');
++}
++
++// Assembles the D1 asset (contract §3). One-time per instance; value
++// serialization here is allowed to allocate (runtime context, before any
++// observation event for the instance is emitted).
++std::string BuildInstanceMetadataJson(Isolate* isolate,
++                                      Handle<BytecodeArray> array,
++                                      uint32_t script_id,
++                                      uint32_t version,
++                                      Handle<Script> script,
++                                      const char* function_name) {
++  std::string out;
++  out.reserve(4096);
++  out.append("{\"kind\":\"v8.bytecode-metadata\",\"schema\":1");
++  out.append(",\"script_id\":").append(std::to_string(script_id));
++  out.append(",\"bytecode_version\":").append(std::to_string(version));
++  if (function_name && *function_name) {
++    out.append(",\"function_name\":");
++    AppendJsonString(&out, function_name);
++  }
++
++  // Source digest: sha1 over the FLATTENED source's stored character
++  // data (one-byte chars as-is; two-byte chars as native-endian bytes)
++  // plus the declared length. No native pointers.
++  char sha1[41] = {0};
++  uint64_t source_length = 0;
++  if (IsString(script->source())) {
++    DirectHandle<String> source(Cast<String>(script->source()), isolate);
++    source_length = static_cast<uint64_t>((*source)->length());
++    const DirectHandle<String> flat = String::Flatten(isolate, source);
++    std::vector<uint8_t> bytes;
++    {
++      DisallowGarbageCollection no_gc;
++      const String::FlatContent content = flat->GetFlatContent(no_gc);
++      if (content.IsOneByte()) {
++        const base::Vector<const uint8_t> view = content.ToOneByteVector();
++        bytes.assign(view.begin(), view.end());
++      } else {
++        const base::Vector<const base::uc16> view = content.ToUC16Vector();
++        bytes.reserve(view.size() * 2);
++        for (const base::uc16 c : view) {
++          bytes.push_back(static_cast<uint8_t>(c & 0xFF));
++          bytes.push_back(static_cast<uint8_t>(c >> 8));
++        }
++      }
++    }
++    Sha1Hex(bytes.data(), bytes.size(), sha1);
++  }
++  out.append(",\"source\":{\"sha1\":");
++  AppendJsonString(&out, sha1);
++  out.append(",\"length\":").append(std::to_string(source_length)).append("}");
++
++  out.append(",\"parameter_count\":")
++      .append(std::to_string(array->parameter_count()));
++  out.append(",\"frame_size\":")
++      .append(std::to_string(array->frame_size()));
++
++  // Full pre-decoded table + filtered operand/register-operand counts.
++  out.append(",\"instructions\":{\"count\":");
++  interpreter::BytecodeArrayIterator iterator(array);
++  std::string offsets, opcodes, operands, register_operands;
++  size_t count = 0;
++  char num[32];
++  for (; !iterator.done(); iterator.Advance()) {
++    const interpreter::Bytecode bytecode = iterator.current_bytecode();
++    if (count) {
++      offsets.push_back(',');
++      opcodes.push_back(',');
++      operands.push_back(',');
++      register_operands.push_back(',');
++    }
++    snprintf(num, sizeof(num), "%u",
++             static_cast<unsigned>(iterator.current_offset()));
++    offsets.append(num);
++    snprintf(num, sizeof(num), "%u", static_cast<unsigned>(bytecode));
++    opcodes.append(num);
++    const int operand_count =
++        interpreter::Bytecodes::NumberOfOperands(bytecode);
++    int register_count = 0;
++    for (int i = 0; i < operand_count; i++) {
++      const interpreter::OperandType type =
++          interpreter::Bytecodes::GetOperandType(bytecode, i);
++      if (interpreter::Bytecodes::IsRegisterOperandType(type)) {
++        register_count++;
++      }
++    }
++    snprintf(num, sizeof(num), "%d", operand_count);
++    operands.append(num);
++    snprintf(num, sizeof(num), "%d", register_count);
++    register_operands.append(num);
++    count++;
++  }
++  out.append(std::to_string(count));
++  out.append(",\"offsets\":[").append(offsets).append("]");
++  out.append(",\"opcodes\":[").append(opcodes).append("]");
++  out.append(",\"operands\":[").append(operands).append("]");
++  out.append(",\"register_operands\":[")
++      .append(register_operands)
++      .append("]}");
++
++  // Constant pool: bounded safe entries. Scalars recorded; strings up to
++  // 128 chars; everything else kind-tagged only (never expanded).
++  out.append(",\"constants\":[");
++  {
++    int pool_length = 0;
++    if (array->has_constant_pool()) {
++      // TrustedFixedArray::length() is the SafeHeapObjectSize alias in
++      // this tree; unwrap the raw unsigned value.
++      pool_length = static_cast<int>(*array->constant_pool()->length());
++    }
++    bool first = true;
++    char dbl[48];
++    for (int i = 0; i < pool_length; i++) {
++      const Tagged<Object> entry = array->constant_pool()->get(i);
++      if (!first) out.push_back(',');
++      first = false;
++      if (IsSmi(entry)) {
++        out.append("{\"i\":")
++            .append(std::to_string(Cast<Smi>(entry).value()))
++            .append("}");
++      } else if (IsString(entry)) {
++        const Tagged<String> str = Cast<String>(entry);
++        if (str->length() <= 128) {
++          out.append("{\"s\":");
++          AppendJsonString(&out, str->ToCString().get());
++          out.append("}");
++        } else {
++          out.append("{\"s_len\":")
++              .append(std::to_string(str->length()))
++              .append("}");
++        }
++      } else if (IsHeapNumber(entry)) {
++        const double value = Cast<HeapNumber>(entry)->value();
++        if (std::isfinite(value)) {
++          snprintf(dbl, sizeof(dbl), "%.17g", value);
++          out.append("{\"n\":").append(dbl).append("}");
++        } else {
++          out.append("{\"n_special\":1}");
++        }
++      } else if (IsOddball(entry)) {
++        // Oddball kind constants (oddball.h): 0/1 false/true, 3 null,
++        // 4 undefined; other oddballs (hole etc.) tag as generic.
++        switch (Cast<Oddball>(entry)->kind()) {
++          case Oddball::kUndefined:
++            out.append("{\"o\":\"undefined\"}");
++            break;
++          case Oddball::kNull:
++            out.append("{\"o\":\"null\"}");
++            break;
++          case Oddball::kTrue:
++            out.append("{\"o\":\"true\"}");
++            break;
++          case Oddball::kFalse:
++            out.append("{\"o\":\"false\"}");
++            break;
++          default:
++            out.append("{\"x\":1}");
++            break;
++        }
++      } else if (IsBigInt(entry)) {
++        out.append("{\"bi\":1}");
++      } else {
++        out.append("{\"x\":1}");
++      }
++    }
++  }
++  out.append("]");
++
++  // Source-position mapping (decoded): [code_offset, script_offset,
++  // inlining_id]. Handlified iterator (allocation allowed while alive).
++  out.append(",\"source_positions\":[");
++  {
++    bool first = true;
++    char triple[96];
++    // Source positions may be LAZY in this tree — arrays without a
++    // table contribute an empty mapping (recorded as such).
++    if (array->has_source_position_table(kAcquireLoad)) {
++      Handle<TrustedByteArray> position_table(
++          array->source_position_table(kAcquireLoad), isolate);
++      for (SourcePositionTableIterator it(position_table); !it.done();
++           it.Advance()) {
++        if (!first) out.push_back(',');
++        first = false;
++        snprintf(triple, sizeof(triple), "[%d,%d,%d]", it.code_offset(),
++                 it.source_position().ScriptOffset(),
++                 it.source_position().InliningId());
++        out.append(triple);
++      }
++    }
++  }
++  out.append("]}");
++  return out;
++}
++
++}  // namespace
 +
 +// ---- Per-isolate state and compilation-instance registry ---------------
 +
@@ -9788,11 +10146,13 @@ index 00000000..255a017b
 +  }
 +
 +  Entry* EnsureRegistered(Isolate* isolate, Tagged<BytecodeArray> array,
-+                          const char* script_url) {
++                          const char* script_url, bool* fresh) {
 +    auto hit = by_address_.find(array.address());
 +    if (hit != by_address_.end()) {
++      *fresh = false;
 +      return hit->second;
 +    }
++    *fresh = true;
 +    // Weak global handle: relocations update the slot in place, collection
 +    // clears it and fires HandleCollected — the raw object address is
 +    // never the identity (review B5).
@@ -9882,12 +10242,25 @@ index 00000000..255a017b
 +
 +bool IgnitionObserverState::FindEventMetadata(
 +    Tagged<BytecodeArray> array, uint32_t normalized_offset,
-+    const char* script_url, IgnitionEventMetadata* out) {
++    const char* script_url, uint32_t script_id, const char* function_name,
++    DirectHandle<Script> script, IgnitionEventMetadata* out) {
 +  Registry::Entry* entry = registry_->FindByAddress(array.address());
 +  if (!entry) {
 +    // No allocation happens between the address read and the map insert
 +    // (single isolate thread), so no GC can invalidate the key mid-way.
-+    entry = registry_->EnsureRegistered(isolate_, array, script_url);
++    bool fresh = false;
++    entry = registry_->EnsureRegistered(isolate_, array, script_url, &fresh);
++    if (fresh) {
++      // P5.5 D1: exactly-once metadata asset for this compilation
++      // instance (events reference it by script_id + bytecode_version).
++      if (auto mcb = metadata_callback.load(std::memory_order_acquire)) {
++        const std::string blob = BuildInstanceMetadataJson(
++            isolate_, Handle<BytecodeArray>(array, isolate_), script_id,
++            entry->version, Handle<Script>(*script, isolate_), function_name);
++        mcb(reinterpret_cast<v8::Isolate*>(isolate_), script_id,
++            entry->version, blob.data(), blob.size());
++      }
++    }
 +  }
 +  const auto& instructions = entry->instructions;
 +  auto it = std::lower_bound(
@@ -9917,6 +10290,7 @@ index 00000000..255a017b
 +
 +void IgnitionObserverSetCallback(v8::Isolate*, IgnitionObserverCallback) {}
 +void IgnitionObserverSetGate(v8::Isolate*, uint32_t) {}
++void IgnitionObserverSetMetadataCallback(v8::Isolate*, IgnitionMetadataCallback) {}
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
 +
@@ -9925,10 +10299,10 @@ index 00000000..255a017b
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..0f12cd83
+index 00000000..a9a1d614
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,102 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9950,6 +10324,9 @@ index 00000000..0f12cd83
 +
 +class Isolate;
 +class BytecodeArray;
++class Script;
++template <typename T>
++class DirectHandle;
 +
 +namespace xtrace {
 +
@@ -9990,16 +10367,24 @@ index 00000000..0f12cd83
 +
 +  std::atomic<uint32_t> gate{0};  // 0 = closed, 1 = observing (this isolate)
 +  std::atomic<IgnitionObserverCallback> callback{nullptr};
++  // P5.5 D1: fired exactly once per registered compilation instance with
++  // the assembled metadata blob (see the boundary header).
++  std::atomic<IgnitionMetadataCallback> metadata_callback{nullptr};
 +
 +  // Hot path (isolate thread only): metadata for the array at the given
 +  // NORMALIZED logical offset, registering and pre-decoding the array on
 +  // first sight. Returns false when `normalized_offset` is an
 +  // opcode-position duplicate dispatch of a prefixed instruction (the
 +  // logical event already fired at the prefix position) — callers drop
-+  // the event.
++  // the event. `script_id` and `function_name` feed the ONE-TIME D1
++  // metadata asset emitted at registration (ignored for already
++  // registered instances).
 +  bool FindEventMetadata(Tagged<BytecodeArray> array,
 +                         uint32_t normalized_offset,
 +                         const char* script_url,
++                         uint32_t script_id,
++                         const char* function_name,
++                         DirectHandle<Script> script,
 +                         IgnitionEventMetadata* out);
 +
 +  // Test/verification seams (d8 smoke): registry census.
@@ -10982,7 +11367,7 @@ index 86fafdb8..484c9eb9 100644
  }
  
 diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
-index 1e3f6ed3..d3a0e0e5 100644
+index 1e3f6ed3..407d63fe 100644
 --- a/src/runtime/runtime-trace.cc
 +++ b/src/runtime/runtime-trace.cc
 @@ -2,6 +2,13 @@
@@ -10999,7 +11384,7 @@ index 1e3f6ed3..d3a0e0e5 100644
  #include <iomanip>
  
  #include "src/execution/arguments-inl.h"
-@@ -277,5 +284,55 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+@@ -277,5 +284,65 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
  
  #endif  //  V8_DUMPLING
  
@@ -11035,10 +11420,20 @@ index 1e3f6ed3..d3a0e0e5 100644
 +  if (IsString(source_url)) {
 +    script_url = Cast<String>(source_url)->ToCString().get();
 +  }
++  // P5.5 D1: the executing function's name rides the one-time metadata
++  // asset (empty for anonymous functions — the instance KEY never
++  // depends on names).
++  std::string function_name;
++  if (function->shared()->Name()->length() > 0) {
++    function_name = function->shared()->Name()->ToCString().get();
++  }
 +  xtrace::IgnitionEventMetadata metadata{};
 +  if (!isolate->xtrace_ignition_observer()->FindEventMetadata(
 +          *bytecode_array, static_cast<uint32_t>(offset),
-+          script_url.empty() ? nullptr : script_url.c_str(), &metadata)) {
++          script_url.empty() ? nullptr : script_url.c_str(),
++          static_cast<uint32_t>(script->id()),
++          function_name.empty() ? nullptr : function_name.c_str(), script,
++          &metadata)) {
 +    // Opcode-position duplicate dispatch of a prefixed instruction.
 +    return ReadOnlyRoots(isolate).undefined_value();
 +  }
