@@ -9718,10 +9718,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..7aa8220b
+index 00000000..ead7a92a
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,882 @@
+@@ -0,0 +1,883 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9896,36 +9896,37 @@ index 00000000..7aa8220b
 +
 +std::string EncodeTapValue(Tagged<Object> value) {
 +  // Minimal layer-1 encoding (contract §4): scalars verbatim, strings
-+  // bounded, objects kind-tagged ONLY. value_state is part of the
-+  // envelope the embedder adds (value_tap field), not this blob.
++  // bounded, objects kind-tagged ONLY. Every entry carries an explicit
++  // value_state: captured | truncated | unavailable | ref-only — a
++  // missing value is never encoded as "" or 0.
 +  if (IsSmi(value)) {
-+    return "{\"t\":\"i\",\"v\":" + std::to_string(Cast<Smi>(value).value()) +
-+           "}";
++    return "{\"t\":\"i\",\"state\":\"captured\",\"v\":" +
++           std::to_string(Cast<Smi>(value).value()) + "}";
 +  }
 +  if (IsHeapNumber(value)) {
 +    const double d = Cast<HeapNumber>(value)->value();
 +    if (std::isfinite(d)) {
 +      char buf[48];
 +      snprintf(buf, sizeof(buf), "%.17g", d);
-+      return std::string("{\"t\":\"n\",\"v\":") + buf + "}";
++      return std::string("{\"t\":\"n\",\"state\":\"captured\",\"v\":") + buf + "}";
 +    }
-+    if (std::isnan(d)) return "{\"t\":\"n\",\"v\":\"nan\"}";
-+    return std::string("{\"t\":\"n\",\"v\":\"") + (d > 0 ? "inf" : "-inf") +
-+           "\"}";
++    if (std::isnan(d)) return "{\"t\":\"n\",\"state\":\"captured\",\"v\":\"nan\"}";
++    return std::string("{\"t\":\"n\",\"state\":\"captured\",\"v\":\"") +
++           (d > 0 ? "inf" : "-inf") + "\"}";
 +  }
 +  if (IsOddball(value)) {
 +    switch (Cast<Oddball>(value)->kind()) {
-+      case Oddball::kUndefined: return "{\"t\":\"undef\"}";
-+      case Oddball::kNull: return "{\"t\":\"null\"}";
-+      case Oddball::kTrue: return "{\"t\":\"b\",\"v\":true}";
-+      case Oddball::kFalse: return "{\"t\":\"b\",\"v\":false}";
-+      default: return "{\"t\":\"oddball\"}";
++      case Oddball::kUndefined: return "{\"t\":\"undef\",\"state\":\"captured\"}";
++      case Oddball::kNull: return "{\"t\":\"null\",\"state\":\"captured\"}";
++      case Oddball::kTrue: return "{\"t\":\"b\",\"state\":\"captured\",\"v\":true}";
++      case Oddball::kFalse: return "{\"t\":\"b\",\"state\":\"captured\",\"v\":false}";
++      default: return "{\"t\":\"oddball\",\"state\":\"unavailable\",\"reason\":\"non-boolean-oddball\"}";
 +    }
 +  }
 +  if (IsString(value)) {
 +    const Tagged<String> str = Cast<String>(value);
 +    if (str->length() <= 64) {
-+      std::string out = "{\"t\":\"s\",\"v\":";
++      std::string out = "{\"t\":\"s\",\"state\":\"captured\",\"v\":";
 +      const std::string cstr = str->ToCString().get();
 +      // JSON-escape (the observer's AppendJsonString semantics).
 +      out.push_back('"');
@@ -9942,18 +9943,18 @@ index 00000000..7aa8220b
 +      out.push_back('}');
 +      return out;
 +    }
-+    return "{\"t\":\"s\",\"len\":" + std::to_string(str->length()) +
-+           ",\"state\":\"truncated\"}";
++    return "{\"t\":\"s\",\"state\":\"truncated\",\"len\":" +
++           std::to_string(str->length()) + "}";
 +  }
 +  if (IsBigInt(value)) {
-+    return "{\"t\":\"bigint\",\"state\":\"unavailable\"}";
++    return "{\"t\":\"bigint\",\"state\":\"unavailable\",\"reason\":\"bigint-decoding-post-E3\"}";
 +  }
 +  // Objects/arrays/etc: kind tag only — never expanded, never called.
 +  if (IsJSReceiver(value)) {
 +    if (IsJSArray(value)) return "{\"t\":\"array\",\"state\":\"ref-only\"}";
 +    return "{\"t\":\"object\",\"state\":\"ref-only\"}";
 +  }
-+  return "{\"t\":\"other\",\"state\":\"unavailable\"}";
++  return "{\"t\":\"other\",\"state\":\"unavailable\",\"reason\":\"non-scalar-slot\"}";
 +}
 +
 +void IgnitionObserverSetTapConfig(v8::Isolate* v8_isolate,
