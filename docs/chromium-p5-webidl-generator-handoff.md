@@ -498,3 +498,12 @@ C0 反例进受跟踪测试先红 → C1 NADC 全分支必调 API/返回（强�
 ### 17.3 恢复冻结
 
 progress JSON `p5.status` 恢复为 `accepted-p5`（架构师动作，见 `p5_refreeze`）。P55-D0（P5.5 设计契约修订，按 §13）可与 C4 后续并行；P5.5 引擎长程块的入口条件全部满足。
+
+---
+
+## 18. §17.2 流程整改的工程师闭环（2026-09-24）
+
+- **完整门禁已自动化**：新增 `scripts/run_test_target_gates.sh`——**先经协调器重建全部测试目标（content_unittests + blink_platform_unittests），再运行两套 xtrace 套件**（controller `XTraceCaptureControllerTest.*` + producer `XTraceProducerTest.*`）；任一目标重建失败或套件未报 SUCCESS 即门禁 FAIL；产出机器可读报告（`validation/test-target-gates-*.json`，含二进制 mtime）。纪律编码进脚本：**不提供"跳过重建直接跑"的路径**——陈旧二进制的红绿在本门禁下不可达。
+- **controller 回门禁表**：§16.6 的遗漏按 §17.2 整改——完整测试目标门禁 = producer + controller（以及后续新增的任何 xtrace 测试目标，脚本按目标枚举扩展）。
+- **本轮验证**：两目标全新重建后 controller **9/9** + producer **9/9** SUCCESS（`test-target-gates-20260924-141413.json`）。
+- 门禁使用约定：任何触碰 chromium/v8 源的变更提交前，除既有门禁（反例门/回归/契约/矩阵/补丁验证）外必须跑本脚本；构建后未重建测试目标的套件结果一律无效。
