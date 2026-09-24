@@ -26,7 +26,7 @@ index 52478f4086..faa91a5895 100644
      bundle_resources_dir = "$bundle_contents_dir/Resources"
      bundle_executable_dir = "$bundle_contents_dir/MacOS"
 diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
-index 973a46b2a3..76017f4939 100644
+index 973a46b2a3..519cc0f2ee 100644
 --- a/chrome/BUILD.gn
 +++ b/chrome/BUILD.gn
 @@ -519,6 +519,12 @@ if (is_win) {
@@ -42,7 +42,15 @@ index 973a46b2a3..76017f4939 100644
      info_plist_target = ":chrome_app_plist"
      extra_substitutions = [
        "CHROMIUM_BUNDLE_ID=$chrome_mac_bundle_id",
-@@ -573,7 +579,9 @@ if (is_win) {
+@@ -534,6 +540,7 @@ if (is_win) {
+       ":chrome_app_strings_bundle_data",
+       ":chrome_resources",
+       ":chrome_versioned_bundle_data",
++      "//third_party/blink/renderer/bindings:xtrace_webidl_coverage_bundle_data",
+       "//base/allocator:early_zone_registration_apple",
+       "//build:branding_buildflags",
+       "//chrome/common:buildflags",
+@@ -573,7 +580,9 @@ if (is_win) {
    if (verify_dynamic_libraries) {
      action("verify_libraries_chrome_app") {
        script = "//chrome/tools/build/mac/verify_dynamic_libraries.py"

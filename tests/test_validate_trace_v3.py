@@ -326,5 +326,115 @@ class V3ValidatorContractTest(unittest.TestCase):
             self.validate(path)
 
 
+
+
+class V3WebidlPairingContractTest(unittest.TestCase):
+    """P5-R5 (chief review): webidl pairing must check ORDER, the routing
+    bound, strict token types, and terminal-state awareness — not set
+    equality."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+
+    def _write(self, builder, state="complete"):
+        return builder.write(self.dir, manifest_state=state)
+
+    def _pair(self, builder, token="1", kind="operation", overloads="0",
+              outcome="ok", selected=None, order="entry-first",
+              token_type=str):
+        entry = builder.add(producer_id="renderer-r1", api="URL.constructor")
+        entry["channel"] = "bindings"
+        entry["webidl_entry"] = {
+            "channel": "bindings", "entry_kind": kind, "interface": "URL",
+            "member": "constructor", "overload_count": overloads,
+            "call_token": token_type(token),
+        }
+        outcome_event = builder.add(
+            producer_id="renderer-r1", api="WebIDL.outcome", phase="return")
+        outcome_event["channel"] = "bindings"
+        payload = {
+            "channel": "bindings",
+            "call_token": token_type(token),
+            "outcome": outcome,
+        }
+        if selected is not None:
+            payload["selected_overload"] = selected
+        outcome_event["webidl_outcome"] = payload
+        if order == "outcome-first":
+            i_e = builder.events.index(entry)
+            i_o = builder.events.index(outcome_event)
+            builder.events[i_e], builder.events[i_o] = (
+                builder.events[i_o], builder.events[i_e])
+        return entry, outcome_event
+
+    def test_ordered_pair_with_routing_bound_passes(self):
+        b = V3TraceBuilder()
+        self._pair(b, token="7", kind="overload-dispatcher", overloads="2",
+                   outcome="ok", selected="1")
+        self.validate(self._write(b))  # must not raise
+
+    def test_outcome_before_entry_rejected(self):
+        b = V3TraceBuilder()
+        self._pair(b, order="outcome-first")
+        with self.assertRaises(validator.TraceValidationError):
+            self.validate(self._write(b))
+
+    def test_selected_overload_beyond_overload_count_rejected(self):
+        b = V3TraceBuilder()
+        self._pair(b, kind="overload-dispatcher", overloads="2", selected="2")
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self.validate(self._write(b))
+        self.assertIn("exceeds", str(ctx.exception))
+
+    def test_numeric_call_token_rejected(self):
+        b = V3TraceBuilder()
+        self._pair(b, token_type=int)
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self.validate(self._write(b))
+        self.assertIn("decimal string", str(ctx.exception))
+
+    def test_unpaired_entry_in_complete_capture_rejected(self):
+        b = V3TraceBuilder()
+        entry = b.add(producer_id="renderer-r1", api="URL.constructor")
+        entry["channel"] = "bindings"
+        entry["webidl_entry"] = {
+            "channel": "bindings", "entry_kind": "operation",
+            "interface": "URL", "member": "canParse",
+            "overload_count": "0", "call_token": "3",
+        }
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self.validate(self._write(b, state="complete"))
+        self.assertIn("COMPLETE capture", str(ctx.exception))
+
+    def test_unpaired_entry_in_incomplete_capture_is_a_gap_not_error(self):
+        b = V3TraceBuilder()
+        entry = b.add(producer_id="renderer-r1", api="URL.constructor")
+        entry["channel"] = "bindings"
+        entry["webidl_entry"] = {
+            "channel": "bindings", "entry_kind": "operation",
+            "interface": "URL", "member": "canParse",
+            "overload_count": "0", "call_token": "3",
+        }
+        # Must not raise; the gap is reported on stderr.
+        self.validate(self._write(b, state="incomplete"))
+
+    def test_orphan_outcome_always_rejected(self):
+        b = V3TraceBuilder()
+        outcome_event = b.add(
+            producer_id="renderer-r1", api="WebIDL.outcome", phase="return")
+        outcome_event["channel"] = "bindings"
+        outcome_event["webidl_outcome"] = {
+            "channel": "bindings", "call_token": "9", "outcome": "ok",
+        }
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self.validate(self._write(b, state="incomplete"))
+        self.assertIn("without a paired entry", str(ctx.exception))
+
+    def validate(self, path):
+        validator.validate_trace(path, expected=[], schema_version=3)
+
+
 if __name__ == "__main__":
     unittest.main()

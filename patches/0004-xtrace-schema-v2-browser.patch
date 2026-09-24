@@ -1,5 +1,5 @@
 diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
-index fee9425c5c..f4c4d0ec87 100644
+index fee9425c5c..7019085805 100644
 --- a/chrome/browser/chrome_content_browser_client.cc
 +++ b/chrome/browser/chrome_content_browser_client.cc
 @@ -16,21 +16,27 @@
@@ -110,7 +110,7 @@ index fee9425c5c..f4c4d0ec87 100644
    sampling_profiler_.reset();
  }
  
-@@ -3123,6 +3145,18 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+@@ -3123,6 +3145,22 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
          embedder_support::kOriginTrialPublicKey,
          switches::kReaderModeHeuristics,
          translate::switches::kTranslateSecurityOrigin,
@@ -118,6 +118,10 @@ index fee9425c5c..f4c4d0ec87 100644
 +        "xtrace-capture-assets",
 +        "xtrace-categories",
 +        "xtrace-causality",
++        // P5-R3: the bindings-precise switch gates first-batch fast-entry
++        // INSTALLATION in the renderer — without forwarding the predicate
++        // reads false and the fast paths install anyway.
++        "xtrace-bindings-precise",
 +        "xtrace-ignition-observer",
 +        // XTRACE_TEST_SCAFFOLDING (long-term, ruled keep): forwarded so the
 +        // fault-injection buffer-capacity override reaches renderers.
@@ -129,7 +133,7 @@ index fee9425c5c..f4c4d0ec87 100644
      };
  
      command_line->CopySwitchesFrom(browser_command_line, kSwitchNames);
-@@ -6001,6 +6035,776 @@ GetClientDataHeader(content::FrameTreeNodeId frame_tree_node_id) {
+@@ -6001,6 +6039,776 @@ GetClientDataHeader(content::FrameTreeNodeId frame_tree_node_id) {
  }
  #endif
  
@@ -906,7 +910,7 @@ index fee9425c5c..f4c4d0ec87 100644
  std::unique_ptr<blink::URLLoaderThrottle> CreateGoogleURLLoaderThrottle(
  #if BUILDFLAG(IS_ANDROID)
      const std::string& client_data_header,
-@@ -6059,6 +6863,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
+@@ -6059,6 +6867,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottles(
    Profile* profile = Profile::FromBrowserContext(browser_context);
    DCHECK(profile);
  
@@ -917,7 +921,7 @@ index fee9425c5c..f4c4d0ec87 100644
    ChromeNavigationUIData* chrome_navigation_ui_data =
        static_cast<ChromeNavigationUIData*>(navigation_ui_data);
  
-@@ -6151,6 +6959,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottlesForKeepAlive(
+@@ -6151,6 +6963,10 @@ ChromeContentBrowserClient::CreateURLLoaderThrottlesForKeepAlive(
    Profile* profile = Profile::FromBrowserContext(browser_context);
    DCHECK(profile);
  
@@ -928,7 +932,7 @@ index fee9425c5c..f4c4d0ec87 100644
  #if BUILDFLAG(IS_ANDROID)
    auto [client_data_header, unused_is_custom_tab] =
        GetClientDataHeader(frame_tree_node_id);
-@@ -6755,6 +7567,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+@@ -6755,6 +7571,9 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
  #endif  // BUILDFLAG (ENABLE_EXTENSIONS_CORE)
  #endif  // BUILDFLAG(ENABLE_GUEST_VIEW)
  

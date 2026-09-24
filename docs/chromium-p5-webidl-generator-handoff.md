@@ -402,3 +402,71 @@ P5.5 的通道复用、Entry 起步、预算和导航生命周期方向可保留
 ### 15.5 执行块确认（与 §14.4 一致，按本裁定校准）
 
 C0 反例进受跟踪测试先红 → C1 NADC 全分支必调 API/返回（强制 fast API 四态：关/开/未配置/满队列/stop 后）→ C2 setter/helper 标注与 scope 溢出归属（含 Promise 同步边界、CEReactions、配对矩阵）→ C3 覆盖二维分级 + precise 真谓词 + 清单进构建资源闭环（任意 cwd 一致）→ C4 身份重录与全量回归后恢复冻结。bindings 3.11 环境债已被总架构师在本机重新找到并 57/57 通过——该笔关闭。P55-D0 按 §13 修订设计契约先行，不依赖"P5 已安全"假设。
+
+---
+
+## 16. 重开整改执行记录（2026-09-24，C0–C3 完成，提交总架构师复验）
+
+**范围：§14.3 P5-R1～R5 全部整改 + §14.4 C0–C3 执行块完成。** C4（身份重录与全量回归）随本提交交付，待总架构师复验后恢复 accepted-p5（冻结动作归架构师，执行层不再先行标记）。
+
+### 16.1 C0：反例进受跟踪测试（先红后绿）
+
+`scripts/p5-reopen-counterexamples.cjs`（共享 CDP 驱动 + 保留 stderr/targetCrashed/退出码，方法学与总审 probes 一致：`--allow-natives-syntax --no-maglev` + `%OptimizeFunctionOnNextCall` 强制 fast 路径）。**首红已录**（`validation/p5-reopen-mB6PiZ`：fast-off targetCrashed、href/Element setter outcome=ok、68 层 token64 被污染为 arg-error、repo-cwd 无覆盖表）；修复后 **12/12 GREEN**（`validation/p5-reopen-hv7sSN`）：
+
+| 用例 | 断言 |
+| --- | --- |
+| R1.fast-off-executes-api-and-returns | 采集关 + 优化 fast：API 执行、返回有限单调值、无 targetCrashed |
+| R1.fast-on-control-no-crash | 采集开对照：无崩溃 |
+| R1.fast-after-stop-executes-api | stopCapture 后优化调用：API 仍执行（stopping 态 TryEnter 拒绝但不拦业务） |
+| R1.fast-full-queue-api-and-accounting | 容量 1 + 50 次优化 fast：全部有限单调、无崩溃、**manifest nadc_partial>0**（拒绝分支确实执行且计账） |
+| R2b.href/element-id-setter | 转换抛错 → outcome=arg-error（页面侧 caught 与 trace 分类双断言） |
+| R2a.deep-nesting | 67 层嵌套成功构造 + 内层已捕获缺参：外层 URL.constructor outcome 全 ok（无污染） |
+| R3.precise-suppresses-fast-entries | precise 开：开关为 true、now() 全走慢路（零 nadc-callback、entry_kind=operation）、API 完好 |
+| R3.coverage-cwd ×3 | repo-cwd 与 out-cwd 均有 webidlCoverage 且载荷一致 |
+
+"未配置"态说明：与采集关闭同属 ConfigReceived=false（同一代码路径），未单列用例——mid-flight 未配置窗口无法确定性构造，如实记录。
+
+### 16.2 C1：NADC 形态修复（裁定写死形状）
+
+生成代码改为**API 无条件、观测有条件**：`retval = API(); if (TryEnter()) { scope(entry+outcome); } else { MarkNadcPartial(); } return retval;`（setter 同形）。两处注入点（`make_no_alloc_direct_call_callback_def` / `make_attribute_set_nadc_callback_def`）均落地；异常检查先于观测（拒绝观测窗不造事件）。
+
+计账策略（R1 附带要求）：`MarkNadcPartial` 仅在**活跃 capture** 内计数（无采集/已 stop 不再增长不可结算计数）；拒绝路径经 `CurrentIfExists()`（构造器注册的 thread-local 指针）绝不初始化 producer；`BufferHasRoom` 为 entry+outcome 预留 2 条余量。
+
+### 16.3 C2：标注归属与配对语义
+
+- **R2a**：TLS 栈深度计数可超 64；**溢出区显式不可标注**（`TopScopeStack` 返回 nullptr，绝不借用外层栈顶）；溢出丢标与无归属 MarkOutcome 均计 `scope_overflow` 缺口（producer watermark → manifest，未确认 null 纪律）。
+- **R2b**：attribute-setter 转换补传 `cg_context`（此前裸 return）；共享 reflect-setter helper（`generated_code_helper.cc` 的 `PerformAttributeSetCEReactionsReflect` 模板）在缺参与转换失败两路径加 `MarkOutcome("arg-error")`（无活跃 scope 时零开销 no-op）。
+- **R5 admission**：`LogGeneratedEntry` 返回是否被 producer 接纳（EmitEvent→AcceptEvent 结果经 thread-local 回传）；**未接纳的入口不产生 outcome**（无孤儿终态）；promise 返回入口在 outcome 上标 `sync_exception_becomes:"rejection"`（同步异常→拒绝与普通 throw 不混类）。
+
+### 16.4 C3：precise 真谓词与覆盖资源闭环
+
+- **真安装门控**：`XTraceGeneratedScope::BindingsPreciseMode()` 导出为消费点；生成代码为 NADC 表同时生成 **Slow 变体表**（无 fast CFunction 的完整同成员表），运行时 `if (!Precise()) { install(fast); } else { install(slow); }` —— **成员面永不变化，只有入口路径变化**（修正过程中发现并修掉了"门控即跳过安装导致 API 消失"的中间态缺陷）。`xtrace-bindings-precise` 补入 renderer 转发白名单（此前 renderer 收不到开关、谓词恒假——死开关的根因之一）。
+- **清单资源闭环**：覆盖表成为 `generate_bindings_interface` 的**声明输出**，经 bundle_data 装入 `ChromiumX.app/Contents/Resources/xtrace/webidl_coverage.json`；handler 从可执行文件相对路径读取（**与 cwd 无关**），披露 `webidlCoverageStatus`（缺文件=missing 可见失败）与表内 `version`/`generated_at`；构建缺清单即失败（声明输出）。
+- **二维分级（R4）**：表 v3 双轴——compile-injection（生成器真派生）与 runtime-verification（受跟踪 fixture `platform/xtrace/webidl_runtime_coverage.json`，按接口存在/生成有码/路径可达/语义已验收四分；未验证成员显式 untested，不因"构造处有 scope"冒充行为已验证）。首批 5 接口全成员注入=编译事实级覆盖（按 §15.3-3 登记，范围不回缩）。
+
+### 16.5 R5：validator 强化
+
+配对从集合差升级为：**顺序**（outcome 必须晚于配对 entry）、**路由上界**（`selected_overload < 配对入口 overload_count`）、**类型**（call_token 十进制串单一形态，事件发射同步改引号）、**终态感知**（complete capture 未配对=错误；合法中断 capture 报 coverage gap 不造 outcome）。7 个新单测进回归（tests/test_validate_trace_v3.py `V3WebidlPairingContractTest`）。
+
+### 16.6 修复后全量门禁（同一最终二进制）
+
+| 门禁 | 结果 |
+| --- | --- |
+| 反例门 | **12/12 GREEN**（四态矩阵含 partial>0 E2E 可见） |
+| 回归 python | 375 OK + launcher 28 OK（含 7 个新配对契约 + 4 个覆盖一致性） |
+| bindings 57/57 | **通过**（总审恢复的 /tmp/xtrace-blink-python311 环境，0 skip/0 fail） |
+| 契约 | 21/21 |
+| 矩阵 off / observer | 12/12 / 12/12 |
+| 故障注入 / observer smoke | pass / pass（validator 含新 webidl 契约） |
+| producer 单测 | 9/9 |
+| 证据驱动 | outcome-evidence PASS（路由 1/0/1）、nadc-partial-evidence PASS |
+| 补丁栈 | verify verdict=pass（0 不符、0 漂移）；新增文件入栈：bindings/BUILD.gn、chrome/BUILD.gn（0005）、generated_code_helper.cc、webidl_runtime_coverage.json |
+
+### 16.7 边界如实
+
+- "未配置"四态之一与采集关闭同路径（§16.1 说明）；mid-flight 窗口不可确定性构造。
+- outcome 仍只记录同步相位（Promise 结算后置不变）；`sync_exception_becomes` 标注的是同步异常→拒绝的转换语义。
+- runtime 轴当前由 fixture 驱动（证据驱动结果人工/后续自动化回填），非运行时自动采集。
+- 首启后首个 case 曾因 macOS 签名验证慢而超时（重跑即过，非产品缺陷）。
+
+**申请：§14.3 五项整改经 §16 证据可进入总架构师复验；复验通过后由架构师恢复 accepted-p5（P55-D0 按 P5.5 §13 并行推进）。**

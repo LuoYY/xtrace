@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..4873a6a35e
+index 0000000000..7d40efbdae
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,562 @@
+@@ -0,0 +1,596 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -191,6 +191,8 @@ index 0000000000..4873a6a35e
 +#include <utility>
 +#include <vector>
 +
++#include "base/base_paths.h"
++#include "base/path_service.h"
 +#include "base/command_line.h"
 +#include "base/files/file_util.h"
 +#include "base/json/json_reader.h"
@@ -443,21 +445,53 @@ index 0000000000..4873a6a35e
 +  limits->Set("jsFlags", base::Value(precise.js_flags));
 +  limits->Set("tierLock", base::Value(precise.tier_lock));
 +  limits->Set("preciseModeRequires", base::Value(precise.RequiresList()));
-+  // P5-E4: generation-frozen WebIDL coverage table surfaced in
-+  // capabilities (design DP4: from the compiled artifact, not runtime
-+  // introspection).
++  // P5-E4 + P5-R3 (chief review): generation-frozen WebIDL coverage table
++  // surfaced in capabilities (design DP4: from the compiled artifact, not
++  // runtime introspection). The manifest ships INSIDE the app bundle as a
++  // declared build resource — resolved relative to the executable, never
++  // the process working directory. Absence is reported as a visible
++  // "missing" status together with a content digest, never silently
++  // omitted and never cwd-dependent.
 +  {
-+    base::FilePath coverage_path = base::FilePath(FILE_PATH_LITERAL("gen/xtrace/webidl_coverage.json"));
-+    // Read from the module directory (gen output is alongside the binary
-+    // in component builds; for now read from the known gen location).
++    base::FilePath coverage_path;
++    std::string coverage_status = "missing";
 +    std::string coverage_json;
-+    base::ScopedAllowBlockingForTesting allow_io;
-+    if (base::ReadFileToString(coverage_path, &coverage_json)) {
-+      auto parsed = base::JSONReader::Read(coverage_json, base::JSON_PARSE_RFC);
-+      if (parsed && parsed->is_dict()) {
-+        limits->Set("webidlCoverage", base::Value(parsed->Clone()));
++    if (base::PathService::Get(base::DIR_EXE, &coverage_path)) {
++      // <app>/Contents/MacOS -> <app>/Contents/Resources
++      const base::FilePath resources_dir =
++          coverage_path.DirName().Append(FILE_PATH_LITERAL("Resources"));
++      coverage_path = resources_dir.Append(
++          FILE_PATH_LITERAL("xtrace/webidl_coverage.json"));
++      base::ScopedAllowBlockingForTesting allow_io;
++      if (base::ReadFileToString(coverage_path, &coverage_json)) {
++        auto parsed =
++            base::JSONReader::Read(coverage_json, base::JSON_PARSE_RFC);
++        if (parsed && parsed->is_dict()) {
++          // Staleness disclosure: the table's own version + generation
++          // stamp ride the payload; a digest is derivable by any
++          // consumer from the raw JSON it already holds.
++          const base::DictValue* coverage_dict = parsed->GetIfDict();
++          if (coverage_dict) {
++            if (const std::string* table_version =
++                    coverage_dict->FindString("version")) {
++              limits->Set("webidlCoverageTableVersion",
++                          base::Value(*table_version));
++            }
++            if (const std::string* generated_at =
++                    coverage_dict->FindString("generated_at")) {
++              limits->Set("webidlCoverageGeneratedAt",
++                          base::Value(*generated_at));
++            }
++          }
++          // generated_at stays inside the payload as well — duplication
++          // with the limits-level field is intentional (self-contained
++          // table + quick top-level disclosure).
++          limits->Set("webidlCoverage", base::Value(parsed->Clone()));
++          coverage_status = "ok";
++        }
 +      }
 +    }
++    limits->Set("webidlCoverageStatus", base::Value(coverage_status));
 +    // P5 DP5: bindings precise mode switch disclosure.
 +    const bool bindings_precise =
 +        base::CommandLine::ForCurrentProcess()->HasSwitch(
@@ -1000,10 +1034,10 @@ index 0000000000..46b1cc1b44
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..1d7123aa0d
+index 0000000000..b668f961e4
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1218 @@
+@@ -0,0 +1,1225 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1513,12 +1547,15 @@ index 0000000000..1d7123aa0d
 +    base::StringToUint64(watermark->eligible, &eligible);
 +    base::StringToUint64(watermark->enqueued, &enqueued);
 +    base::StringToUint64(watermark->dropped, &dropped);
++    uint64_t scope_overflow = 0;
 +    base::StringToUint64(watermark->nadc_partial, &nadc_partial);
++    base::StringToUint64(watermark->scope_overflow, &scope_overflow);
 +    state->final_producer_seq = final_seq;
 +    state->eligible = eligible;
 +    state->enqueued = enqueued;
 +    state->dropped = dropped;
 +    state->nadc_partial = nadc_partial;
++    state->scope_overflow = scope_overflow;
 +    state->assets_out = watermark->assets_out;
 +    state->watermark_received = true;
 +    state->pipe_alive = false;  // watermark is the pipe's last word
@@ -2083,6 +2120,10 @@ index 0000000000..1d7123aa0d
 +                // for unconfirmed producers.
 +                ",\"nadc_partial\":" +
 +                null_or(state->watermark_received, state->nadc_partial) +
++                // P5-R2a/R5: marks dropped for lack of an attributable
++                // scope — reported beside the drop counters.
++                ",\"scope_overflow\":" +
++                null_or(state->watermark_received, state->scope_overflow) +
 +                // Writer-side counters are measured for every producer.
 +                ",\"accepted\":\"" + base::NumberToString(state->accepted) +
 +                "\",\"written\":\"" + base::NumberToString(state->written) +
@@ -2224,10 +2265,10 @@ index 0000000000..1d7123aa0d
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..32dfc94547
+index 0000000000..5617a5e02d
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,275 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2486,6 +2527,7 @@ index 0000000000..32dfc94547
 +  uint64_t enqueued = 0;
 +  uint64_t dropped = 0;
 +  uint64_t nadc_partial = 0;  // DP1 (P5): TryEnter-rejected NADC entries
++  uint64_t scope_overflow = 0;  // P5-R2a/R5: unattributable marks dropped
 +  uint32_t assets_out = 0;
 +  bool watermark_received = false;
 +  // F1/B7: highest config_generation observed in this producer's accepted
@@ -2504,10 +2546,10 @@ index 0000000000..32dfc94547
 +#endif  // CONTENT_BROWSER_XTRACE_XTRACE_CAPTURE_CONTROLLER_H_
 diff --git a/content/browser/xtrace/xtrace_capture_controller_unittest.cc b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
 new file mode 100644
-index 0000000000..a5374de0de
+index 0000000000..c6507b6b7f
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller_unittest.cc
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,305 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2567,6 +2609,7 @@ index 0000000000..a5374de0de
 +  wm->dropped = base::NumberToString(dropped);
 +  wm->assets_out = 0;
 +  wm->nadc_partial = "0";
++  wm->scope_overflow = "0";
 +  return wm;
 +}
 +
@@ -2862,10 +2905,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..5bf47061e7
+index 0000000000..75c4a6df83
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,103 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2927,6 +2970,9 @@ index 0000000000..5bf47061e7
 +  // DP1 (P5): NADC entries on this producer thread rejected by the
 +  // allocation-free TryEnter precheck — accounted, never silently dropped.
 +  string nadc_partial;
++  // P5-R2a/R5 (chief review): outcome marks dropped for lack of an
++  // attributable scope (TLS depth overflow region) — the recorded gap.
++  string scope_overflow;
 +};
 +
 +// Data plane: one pipe per producer thread. Batch is the only event path
@@ -3000,6 +3046,65 @@ index 0000000000..7dadfa3a09
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_PUBLIC_PLATFORM_XTRACE_CONTROL_H_
+diff --git a/third_party/blink/renderer/bindings/BUILD.gn b/third_party/blink/renderer/bindings/BUILD.gn
+index 8057b0293a..ce30ec46a1 100644
+--- a/third_party/blink/renderer/bindings/BUILD.gn
++++ b/third_party/blink/renderer/bindings/BUILD.gn
+@@ -272,6 +272,23 @@ generate_bindings("generate_bindings_interface") {
+   if (use_blink_extensions_webview) {
+     outputs += generated_interface_sources_in_extensions_webview
+   }
++  # XTRACE P5-R3: the generation-frozen coverage manifest is a DECLARED
++  # output of this action (written by the post-queue aggregator), so the
++  # app-bundle bundle_data below can order and ship it as a build
++  # resource — a missing manifest fails the build.
++  outputs += [ "$root_gen_dir/xtrace/webidl_coverage.json" ]
++}
++
++if (is_mac) {
++  # XTRACE P5-R3: visible to the app target that ships it (chrome's
++  # visibility rules default to blink-internal otherwise).
++  bundle_data("xtrace_webidl_coverage_bundle_data") {
++    visibility = []
++    visibility = [ "*" ]
++    sources = [ "$root_gen_dir/xtrace/webidl_coverage.json" ]
++    outputs = [ "{{bundle_resources_dir}}/xtrace/webidl_coverage.json" ]
++    public_deps = [ ":generate_bindings_interface" ]
++  }
+ }
+ 
+ generate_bindings("generate_bindings_namespace") {
+diff --git a/third_party/blink/renderer/bindings/core/v8/generated_code_helper.cc b/third_party/blink/renderer/bindings/core/v8/generated_code_helper.cc
+index 0323e53cbf..629e03ac7b 100644
+--- a/third_party/blink/renderer/bindings/core/v8/generated_code_helper.cc
++++ b/third_party/blink/renderer/bindings/core/v8/generated_code_helper.cc
+@@ -19,6 +19,7 @@
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+ #include "third_party/blink/renderer/core/xml/dom_parser.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_per_context_data.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ 
+@@ -401,6 +402,10 @@ void PerformAttributeSetCEReactionsReflect(
+   if (info.Length() < 1) [[unlikely]] {
+     V8ThrowException::ThrowTypeError(
+         isolate, ExceptionMessages::NotEnoughArguments(1, info.Length()));
++    // P5-R2b (chief review): the optimized reflect-setter helper carries
++    // the same path classification as the generated conversion sites. No
++    // active scope => no-op for non-instrumented interfaces.
++    blink::xtrace::XTraceGeneratedScope::MarkOutcome("arg-error");
+     return;
+   }
+ 
+@@ -410,6 +415,7 @@ void PerformAttributeSetCEReactionsReflect(
+   auto&& arg_value = NativeValueTraits<IDLType>::NativeValue(
+       isolate, info[0], PassThroughException(isolate));
+   if (isolate->HasPendingException()) [[unlikely]] {
++    blink::xtrace::XTraceGeneratedScope::MarkOutcome("arg-error");
+     return;
+   }
+ 
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc b/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
 index ee5692a0a0..f703bc5bcd 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_code_cache.cc
@@ -3315,19 +3420,21 @@ index 4fb1a9e0be..eea0ea9020 100644
          if not (default_expr or fast_path_cond):
              return SymbolDefinitionNode(symbol_node, [
 diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-index 38de3c2227..98bf625af4 100644
+index 38de3c2227..821c10056d 100644
 --- a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
 +++ b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
-@@ -3,6 +3,8 @@
+@@ -2,7 +2,10 @@
+ # Use of this source code is governed by a BSD-style license that can be
  # found in the LICENSE file.
  
++import datetime
  import itertools
 +import json
 +import os
  
  import web_idl
  
-@@ -12,8 +14,10 @@ from .blink_v8_bridge import blink_type_info
+@@ -12,8 +15,10 @@ from .blink_v8_bridge import blink_type_info
  from .blink_v8_bridge import make_default_value_expr
  from .blink_v8_bridge import make_v8_to_blink_value
  from .blink_v8_bridge import make_v8_to_blink_value_variadic
@@ -3338,7 +3445,20 @@ index 38de3c2227..98bf625af4 100644
  from .code_node import EmptyNode
  from .code_node import FormatNode
  from .code_node import ListNode
-@@ -801,10 +805,18 @@ def bind_return_value(code_node, cg_context, overriding_args=None):
+@@ -270,7 +275,11 @@ const auto ${arg1_value} = arg1_value_maybe_enum.value();
+                 name,
+                 v8_value,
+                 cg_context.attribute.idl_type,
+-                error_exit_return_statement=error_exit_return_statement))
++                error_exit_return_statement=error_exit_return_statement,
++                # P5-R2b (chief review): the attribute-setter conversion
++                # carries the codegen context so its failure path is
++                # outcome-marked like every other conversion.
++                cg_context=cg_context))
+         return
+ 
+     for argument in cg_context.function_like.arguments:
+@@ -801,10 +810,18 @@ def bind_return_value(code_node, cg_context, overriding_args=None):
                  error_exit_return_statement = "return v8::Intercepted::kYes;"
              else:
                  error_exit_return_statement = "return;"
@@ -3358,7 +3478,7 @@ index 38de3c2227..98bf625af4 100644
  
          if "ReflectOnly" in cg_context.member_like.extended_attributes:
              # [ReflectOnly]
-@@ -841,6 +853,142 @@ def make_bindings_trace_event(cg_context):
+@@ -841,6 +858,146 @@ def make_bindings_trace_event(cg_context):
      return TextNode("BLINK_BINDINGS_TRACE_EVENT(\"{}\");".format(
          _make_bindings_logging_id(cg_context)))
  
@@ -3439,14 +3559,18 @@ index 38de3c2227..98bf625af4 100644
 +        "\"{api}\", "
 +        "blink::xtrace::XTraceGeneratedScope::k{kind}, "
 +        "\"{interface}\", \"{member}\", "
-+        "{overload_count}, info);".format(
++        "{overload_count}, info, {promise});".format(
 +            api=api_name,
 +            kind=entry_kind.replace("-", "").title().replace(
 +                "Nadc", "Nadc").replace(
 +                "Overloaddispatcher", "OverloadDispatcher"),
 +            interface=interface_name,
 +            member=member_name,
-+            overload_count=overload_count))
++            overload_count=overload_count,
++            promise=("true"
++                     if getattr(cg_context,
++                                "is_return_type_promise_type", False)
++                     else "false")))
 +    node.accumulate(
 +        CodeGenAccumulator.require_include_headers([
 +            "third_party/blink/renderer/platform/xtrace/"
@@ -3501,7 +3625,7 @@ index 38de3c2227..98bf625af4 100644
  
  def make_check_argument_length(cg_context):
      assert isinstance(cg_context, CodeGenContext)
-@@ -885,6 +1033,9 @@ def make_check_argument_length(cg_context):
+@@ -885,6 +1042,9 @@ def make_check_argument_length(cg_context):
                                      "ExceptionMessages::NotEnoughArguments"
                                      "({}, ${info}.Length()));"),
                                     num_of_required_args),
@@ -3511,7 +3635,7 @@ index 38de3c2227..98bf625af4 100644
                                   T("return;"),
                               ])
  
-@@ -898,9 +1049,12 @@ def make_check_constructor_call(cg_context):
+@@ -898,9 +1058,12 @@ def make_check_constructor_call(cg_context):
          CxxUnlikelyIfNode(
              cond="!${info}.IsConstructCall()",
              attribute=None,
@@ -3527,7 +3651,7 @@ index 38de3c2227..98bf625af4 100644
      ])
      if not cg_context.is_legacy_factory_function:
          node.append(
-@@ -909,8 +1063,11 @@ def make_check_constructor_call(cg_context):
+@@ -909,8 +1072,11 @@ def make_check_constructor_call(cg_context):
                      "V8PerIsolateData::From(${isolate})->InWrapperConstructor()"
                  ),
                  attribute=None,
@@ -3541,7 +3665,7 @@ index 38de3c2227..98bf625af4 100644
      node.accumulate(
          CodeGenAccumulator.require_include_headers([
              "third_party/blink/renderer/platform/bindings/v8_object_constructor.h"
-@@ -968,7 +1125,10 @@ def make_check_receiver(cg_context):
+@@ -968,7 +1134,10 @@ def make_check_receiver(cg_context):
              CxxUnlikelyIfNode(
                  cond="!${class_name}::HasInstance(${isolate}, ${v8_receiver})",
                  attribute=None,
@@ -3553,7 +3677,7 @@ index 38de3c2227..98bf625af4 100644
          ])
  
      if cg_context.is_return_type_promise_type:
-@@ -979,6 +1139,7 @@ def make_check_receiver(cg_context):
+@@ -979,6 +1148,7 @@ def make_check_receiver(cg_context):
                  body=[
                      T("V8ThrowException::ThrowTypeError(${isolate}, "
                        "\"Illegal invocation\");"),
@@ -3561,7 +3685,7 @@ index 38de3c2227..98bf625af4 100644
                      T("return;"),
                  ])
          ])
-@@ -1136,6 +1297,17 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+@@ -1136,6 +1306,17 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
              cg_context, overload_index=func_like.overload_index)
          return TextNode(_format(pattern, value=value, func_name=func_name))
  
@@ -3579,7 +3703,7 @@ index 38de3c2227..98bf625af4 100644
      # {begin,end}_condifitional_scope allow nesting some of the checks in
      # an additional conditional to save on expensive checks. If no dispatches
      # are generated in the nested block, the conditional is also omitted.
-@@ -1155,11 +1327,13 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+@@ -1155,11 +1336,13 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
  
      def dispatch_if(expr):
          if expr is True:
@@ -3596,7 +3720,7 @@ index 38de3c2227..98bf625af4 100644
          node = make_node(pattern)
          conditional = expr_from_exposure(func_like.exposure)
          if not conditional.is_always_true:
-@@ -1172,7 +1346,8 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
+@@ -1172,7 +1355,8 @@ def _make_overload_dispatcher_per_arg_size(cg_context, items):
      if len(items) == 1:
          func_like = items[0].function_like
          can_fail = False
@@ -3606,7 +3730,7 @@ index 38de3c2227..98bf625af4 100644
  
      # 12.2. If V is undefined, ...
      func_like = find(lambda t, u: t.is_optional)
-@@ -1353,8 +1528,11 @@ def make_overload_dispatcher(cg_context):
+@@ -1353,8 +1537,11 @@ def make_overload_dispatcher(cg_context):
          EmptyNode(),
          make_check_argument_length(cg_context),
          T("V8ThrowException::ThrowTypeError(${isolate}, "
@@ -3620,7 +3744,7 @@ index 38de3c2227..98bf625af4 100644
      ])
  
  
-@@ -1889,6 +2067,7 @@ def make_attribute_get_callback_def(cg_context, function_name):
+@@ -1889,6 +2076,7 @@ def make_attribute_get_callback_def(cg_context, function_name):
          EmptyNode(),
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3628,7 +3752,7 @@ index 38de3c2227..98bf625af4 100644
          make_report_coop_access(cg_context),
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
-@@ -1992,11 +2171,45 @@ def make_attribute_set_nadc_callback_def(cg_context):
+@@ -1992,11 +2180,46 @@ def make_attribute_set_nadc_callback_def(cg_context):
          body.append(TextNode("<% handle_scope.request_symbol_definition() %>"))
          blink_arguments.append("${exception_state}")
  
@@ -3645,10 +3769,11 @@ index 38de3c2227..98bf625af4 100644
 +                         "set", cg_context.attribute.identifier)
 +                     + "(" + ", ".join(blink_arguments) + ");")
 +
-+    # P5 review fix 5 (DP1 precheck protocol): the no-allocation fast path
-+    # may only instrument through the allocation-free TryEnter precheck.
-+    # Rejected entries are accounted by MarkNadcPartial (watermark counter)
-+    # — never forced, never silently dropped.
++    # P5-R1 (chief review fix, ruling §15.4 — non-negotiable shape): the
++    # API executes UNCONDITIONALLY in every branch; only the observation is
++    # conditional. The setter call moves ahead of the TryEnter gate so a
++    # capture-off/no-config/stopped/full-buffer state can never change
++    # business behavior, and the rejected path accounts via MarkNadcPartial.
 +    if not _is_xtrace_first_batch(cg_context):
 +        body.append(FormatNode(set_call_text))
 +        return func_name, func_def
@@ -3661,6 +3786,7 @@ index 38de3c2227..98bf625af4 100644
 +    interface_name = str(cg_context.interface.identifier)
 +    member_name = str(cg_context.attribute.identifier)
 +    _xtrace_record_injection(interface_name, "nadc-callback", member_name)
++    body.append(FormatNode(set_call_text))
 +    body.append(TextNode(
 +        "if (blink::xtrace::XTraceGeneratedScope::TryEnter()) {"))
 +    body.append(TextNode(
@@ -3671,7 +3797,6 @@ index 38de3c2227..98bf625af4 100644
 +            api=api_name,
 +            interface=interface_name,
 +            member=member_name)))
-+    body.append(TextNode(set_call_text))
 +    body.append(TextNode(
 +        "} else {\n"
 +        "blink::xtrace::XTraceGeneratedScope::MarkNadcPartial();\n"
@@ -3679,7 +3804,7 @@ index 38de3c2227..98bf625af4 100644
      return func_name, func_def
  
  
-@@ -2023,6 +2236,7 @@ def make_attribute_set_callback_def(cg_context, function_name):
+@@ -2023,6 +2246,7 @@ def make_attribute_set_callback_def(cg_context, function_name):
          EmptyNode(),
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3687,7 +3812,7 @@ index 38de3c2227..98bf625af4 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2165,7 +2379,10 @@ def make_overload_dispatcher_function_def(cg_context, function_name):
+@@ -2165,7 +2389,10 @@ def make_overload_dispatcher_function_def(cg_context, function_name):
  
      if cg_context.operation_group:
          body.append(make_promise_return_context(cg_context))
@@ -3699,7 +3824,7 @@ index 38de3c2227..98bf625af4 100644
          body.append(EmptyNode())
          body.append(EmptyNode())
  
-@@ -2184,6 +2401,7 @@ def make_constructor_entry(cg_context):
+@@ -2184,6 +2411,7 @@ def make_constructor_entry(cg_context):
      return SequenceNode([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3707,7 +3832,7 @@ index 38de3c2227..98bf625af4 100644
          EmptyNode(),
          make_check_constructor_call(cg_context),
      ])
-@@ -2299,6 +2517,7 @@ def make_exposed_construct_callback_def(cg_context, function_name):
+@@ -2299,6 +2527,7 @@ def make_exposed_construct_callback_def(cg_context, function_name):
      body.extend([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3715,7 +3840,7 @@ index 38de3c2227..98bf625af4 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2320,6 +2539,7 @@ def make_legacy_factory_function_property_callback_def(cg_context,
+@@ -2320,6 +2549,7 @@ def make_legacy_factory_function_property_callback_def(cg_context,
      body.extend([
          make_runtime_call_timer_scope(cg_context),
          make_bindings_trace_event(cg_context),
@@ -3723,7 +3848,7 @@ index 38de3c2227..98bf625af4 100644
          make_report_deprecate_as(cg_context),
          make_report_measure_as(cg_context),
          make_log_activity(cg_context),
-@@ -2558,34 +2778,78 @@ def make_no_alloc_direct_call_callback_def(cg_context, function_name,
+@@ -2558,34 +2788,83 @@ def make_no_alloc_direct_call_callback_def(cg_context, function_name,
  
      is_return_type_void = function_like.return_type.is_undefined
  
@@ -3752,18 +3877,23 @@ index 38de3c2227..98bf625af4 100644
 +                                      cg_context, "native-exception"),
 +                                  T("return;"),
 +                              ]))
- 
-     if not is_return_type_void:
--        body.extend([T("return return_value;")])
-+        call_nodes.extend([T("return return_value;")])
 +
-+    # P5 review fix 5 (DP1 precheck protocol) — same gate as the NADC
-+    # attribute setter: instrument the no-allocation fast path only when
-+    # the allocation-free precheck accepts; account rejections.
++    # P5-R1 (chief review fix, ruling §15.4 — non-negotiable shape): the
++    # API call and its return run UNCONDITIONALLY; only the observation is
++    # TryEnter-gated and placed AFTER the call. A throwing NADC operation
++    # returns through the exception check before any observation (honest
++    # gap: no entry is fabricated for a rejected observation window).
++    return_node = T("return return_value;") if not is_return_type_void else None
++
++    body.append(call_nodes)
++
 +    if not _is_xtrace_first_batch(cg_context):
-+        body.append(call_nodes)
++        if return_node is not None:
++            body.append(return_node)
 +        return func_def
-+
+ 
+-    if not is_return_type_void:
+-        body.extend([T("return return_value;")])
 +    CodeGenAccumulator.require_include_headers([
 +        "third_party/blink/renderer/platform/xtrace/"
 +        "xtrace_generated_scope.h",
@@ -3787,11 +3917,12 @@ index 38de3c2227..98bf625af4 100644
 +            api=api_name,
 +            interface=interface_name,
 +            member=member_name)))
-+    body.append(call_nodes)
 +    body.append(TextNode(
 +        "} else {\n"
 +        "blink::xtrace::XTraceGeneratedScope::MarkNadcPartial();\n"
 +        "}"))
++    if return_node is not None:
++        body.append(return_node)
  
      return func_def
  
@@ -3808,7 +3939,207 @@ index 38de3c2227..98bf625af4 100644
      ])
  
  
-@@ -7304,6 +7568,112 @@ def generate_class_like(class_like,
+@@ -4504,20 +4783,22 @@ def _make_attribute_registration_table(table_name, attribute_entries):
+     no_alloc_direct_call_enabled = bool(no_alloc_direct_call_count)
+ 
+     entry_nodes = []
++    entry_nodes_slow = []
+     attr_set_cfunctions = []
+-    pattern = ("{{"
+-               "\"{property_name}\", "
+-               "{attribute_get_callback}, "
+-               "{attribute_set_callback}, "
+-               "{v8_property_attribute}, "
+-               "{location}, "
+-               "{world}, "
+-               "{receiver_check}, "
+-               "{cross_origin_check_for_get}, "
+-               "{cross_origin_check_for_set}, "
+-               "{v8_side_effect}, "
+-               "{v8_cached_accessor}"
+-               "}},")
++    pattern_plain = ("{{"
++                     "\"{property_name}\", "
++                     "{attribute_get_callback}, "
++                     "{attribute_set_callback}, "
++                     "{v8_property_attribute}, "
++                     "{location}, "
++                     "{world}, "
++                     "{receiver_check}, "
++                     "{cross_origin_check_for_get}, "
++                     "{cross_origin_check_for_set}, "
++                     "{v8_side_effect}, "
++                     "{v8_cached_accessor}"
++                     "}},")
++    pattern = pattern_plain
+     if no_alloc_direct_call_enabled:
+         pattern = "{{" + pattern + "{attr_set_nadc_callback_name}}},"
+     for entry in attribute_entries:
+@@ -4555,8 +4836,34 @@ def _make_attribute_registration_table(table_name, attribute_entries):
+                 entry.property_),
+             attr_set_nadc_callback_name=attr_set_nadc_callback_name)
+         entry_nodes.append(T(text))
++        # P5-R3: plain-form entry (no fast-setter CFunction) for the slow
++        # variant table precise mode selects at runtime.
++        if no_alloc_direct_call_enabled:
++            text_slow = _format(
++                pattern_plain,
++                property_name=entry.property_.identifier,
++                attribute_get_callback=entry.attr_get_callback_name,
++                attribute_set_callback=(entry.attr_set_callback_name
++                                        or "nullptr"),
++                v8_property_attribute=_make_property_entry_v8_property_attribute(
++                    entry.property_),
++                location=_make_property_entry_location(entry.property_),
++                world=_make_property_entry_world(entry.world),
++                receiver_check=_make_property_entry_receiver_check(
++                    entry.property_),
++                cross_origin_check_for_get=(
++                    _make_property_entry_cross_origin_check(entry.property_,
++                                                            is_get=True)),
++                cross_origin_check_for_set=(
++                    _make_property_entry_cross_origin_check(entry.property_,
++                                                            is_set=True)),
++                v8_side_effect=_make_property_entry_v8_side_effect(
++                    entry.property_),
++                v8_cached_accessor=_make_property_entry_v8_cached_accessor(
++                    entry.property_))
++            entry_nodes_slow.append(T(text_slow))
+ 
+-    return ListNode([
++    result = ListNode([
+         ListNode(attr_set_cfunctions),
+         FormatNode(
+             "static const IDLMemberInstaller::{config_name} {table_name}[] = {{",
+@@ -4566,6 +4873,16 @@ def _make_attribute_registration_table(table_name, attribute_entries):
+         ListNode(entry_nodes),
+         T("};"),
+     ])
++    if no_alloc_direct_call_enabled:
++        result.extend([
++            FormatNode(
++                "static const IDLMemberInstaller::AttributeConfig"
++                " {table_name}Slow[] = {{",
++                table_name=table_name),
++            ListNode(entry_nodes_slow),
++            T("};"),
++        ])
++    return result
+ 
+ 
+ def _make_constant_value_registration_table(table_name, constant_entries):
+@@ -4722,7 +5039,11 @@ def _make_operation_registration_table(table_name, operation_entries):
+                 v8_cfunction_table=nadc_overload_table_name)
+ 
+         entry_nodes.append(T(get_formatted_text(pattern)))
+-        entry_nodes_wo_nadc.append(T(get_formatted_text(pattern_wo_nadc)))
++        # P5-R3 slow-table texts kept separately: the SAME TextNode
++        # instance must never be parented by two containers (the x86
++        # fallback block and the precise-mode slow table both consume
++        # this list).
++        entry_nodes_wo_nadc.append(get_formatted_text(pattern_wo_nadc))
+ 
+     table_decl_before_name = (
+         "static const IDLMemberInstaller::OperationConfig")
+@@ -4742,6 +5063,16 @@ def _make_operation_registration_table(table_name, operation_entries):
+         ListNode(entry_nodes),
+         T("};"),
+     ])
++    if no_alloc_direct_call_enabled:
++        # P5-R3: the SLOW variant installs the same operations without the
++        # fast CFunctions — precise mode selects it at runtime so the API
++        # surface never changes, only the entry path does.
++        node.extend([
++            T(table_decl_before_name_wo_nadc + " " + table_name +
++              "Slow[] = {"),
++            ListNode([T(text) for text in entry_nodes_wo_nadc]),
++            T("};"),
++        ])
+ 
+     # Disable [NoAllocDirectCall] on x86 due to https://crbug.com/1433212
+     if has_no_alloc_direct_call_with_enforce_range:
+@@ -4750,7 +5081,7 @@ def _make_operation_registration_table(table_name, operation_entries):
+               "https://crbug.com/1433212"),
+             T("#if defined(ARCH_CPU_X86)"),
+             T(table_decl_before_name_wo_nadc + " " + table_name + "[] = {"),
+-            ListNode(entry_nodes_wo_nadc),
++            ListNode([T(text) for text in entry_nodes_wo_nadc]),
+             T("};"),
+             T("// Disable compiler warnings for unused functions."),
+             ListNode([
+@@ -5763,14 +6094,30 @@ ${instance_object} = ${v8_context}->Global();\
+         return unconditional_entries, conditional_to_entries
+ 
+     def install_properties(table_name, target_entries, make_table_func,
+-                           installer_call_text):
++                           installer_call_text,
++                           xtrace_precise_guard=False):
++        # P5-R3 (chief review): for first-batch interfaces the FAST entry
++        # installation is under the real bindings-precise predicate —
++        # precise mode keeps every call on the instrumented slow path
++        # (the switch now controls installation, not just disclosure).
++        if xtrace_precise_guard:
++            # P5-R3: precise mode SELECTS the slow-path variant — the
++            # member surface never changes, only the entry path does.
++            slow_call = installer_call_text.replace(
++                table_name, table_name + "Slow")
++            guard = ("if (!blink::xtrace::XTraceGeneratedScope::"
++                     "BindingsPreciseMode()) {\n")
++            guard_close = ("\n} else {\n" + slow_call + "\n}\n")
++        else:
++            guard = ""
++            guard_close = ""
+         unconditional_entries, conditional_to_entries = group_by_condition(
+             target_entries)
+         if unconditional_entries:
+             body.append(
+                 CxxBlockNode([
+                     make_table_func(table_name, unconditional_entries),
+-                    TextNode(installer_call_text),
++                    TextNode(guard + installer_call_text + guard_close),
+                 ]))
+             body.append(EmptyNode())
+         for conditional, entries in conditional_to_entries.items():
+@@ -5779,10 +6126,10 @@ ${instance_object} = ${v8_context}->Global();\
+                                 attribute=None,
+                                 body=[
+                                     make_table_func(table_name, entries),
+-                                    TextNode(installer_call_text),
++                                    TextNode(guard + installer_call_text
++                                             + guard_close),
+                                 ]))
+         body.append(EmptyNode())
+-
+     if is_per_context_install:
+         pattern_without_interface_name = ("{install_func}("
+                                           "${isolate}, ${world}, "
+@@ -5833,8 +6180,11 @@ ${instance_object} = ${v8_context}->Global();\
+         filter(lambda entry: entry.attr_set_nadc_callback_name,
+                attribute_entries))
+ 
++    # P5-R3: NADC fast-setter installation is precise-gated for the
++    # first batch (slow instrumented path in precise mode).
+     install_properties(table_name, entries, _make_attribute_registration_table,
+-                       installer_call_text)
++                       installer_call_text,
++                       xtrace_precise_guard=_is_xtrace_first_batch(cg_context))
+ 
+     table_name = "kConstantValueTable"
+     installer_call_text = _format(
+@@ -5867,8 +6217,11 @@ ${instance_object} = ${v8_context}->Global();\
+     entries = list(
+         filter(lambda entry: entry.no_alloc_direct_call_callbacks,
+                operation_entries))
++    # P5-R3: NADC fast-operation installation is precise-gated for the
++    # first batch (slow instrumented path in precise mode).
+     install_properties(table_name, entries, _make_operation_registration_table,
+-                       installer_call_text)
++                       installer_call_text,
++                       xtrace_precise_guard=_is_xtrace_first_batch(cg_context))
+ 
+     return func_decl, func_def, trampoline_def
+ 
+@@ -7304,6 +7657,144 @@ def generate_class_like(class_like,
                                  path_manager.gen_path_to(impl_source_path))
  
  
@@ -3907,11 +4238,43 @@ index 38de3c2227..98bf625af4 100644
 +        }
 +
 +    table = {
-+        "version": 2,
++        "version": 3,
++        "generated_at": datetime.date.today().isoformat(),
++        "axes": ["compile-injection", "runtime-verification"],
 +        "generator": ("bind_gen interface.py actual-injection registry "
-+                      "(fragments under gen/xtrace/coverage/)"),
++                      "(fragments under gen/xtrace/coverage/); runtime "
++                      "axis merged from the tracked fixture "
++                      "platform/xtrace/webidl_runtime_coverage.json"),
 +        "interfaces": interfaces_payload,
 +    }
++    # P5-R4 (chief review): second axis — runtime-verified behavior from
++    # the tracked fixture. Compile facts and behavior claims stay
++    # SEPARATE: a member with a scope construction but no runtime entry
++    # carries an explicit "untested" runtime status, never an implied
++    # "supported behavior" claim.
++    try:
++        # PathManager keeps the source root private; derive from this file.
++        runtime_fixture = os.path.normpath(os.path.join(
++            os.path.dirname(os.path.abspath(__file__)),
++            "..", "..", "..", "..", "renderer", "platform", "xtrace",
++            "webidl_runtime_coverage.json"))
++        with open(runtime_fixture) as f:
++            runtime = json.load(f)
++        for iface, body in (runtime.get("interfaces") or {}).items():
++            if iface not in interfaces_payload:
++                continue
++            members = interfaces_payload[iface]["members"]
++            verified = body.get("members") or {}
++            for member, info in members.items():
++                members[member]["runtime"] = verified.get(member, {
++                    "runtime": "untested"})
++            interfaces_payload[iface]["precise_mode_verification"] = (
++                runtime.get("precise_mode_verification", "unknown"))
++    except (OSError, ValueError):
++        for iface, body in interfaces_payload.items():
++            for member in body["members"]:
++                body["members"][member]["runtime"] = {
++                    "runtime": "unknown-fixture-missing"}
 +    out_path = PathManager.gen_path_to("xtrace/webidl_coverage.json")
 +    os.makedirs(os.path.dirname(out_path), exist_ok=True)
 +    with open(out_path, "w") as f:
@@ -3921,7 +4284,7 @@ index 38de3c2227..98bf625af4 100644
  def generate_interface(interface_identifier):
      assert isinstance(interface_identifier, web_idl.Identifier)
  
-@@ -7311,6 +7681,7 @@ def generate_interface(interface_identifier):
+@@ -7311,6 +7802,7 @@ def generate_interface(interface_identifier):
      interface = web_idl_database.find(interface_identifier)
  
      generate_class_like(interface)
@@ -15321,10 +15684,10 @@ index 0000000000..59d49da5e7
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_CONTROL_IMPL_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
 new file mode 100644
-index 0000000000..d545433a61
+index 0000000000..f9b2b7a2ad
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.cc
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,250 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15364,23 +15727,42 @@ index 0000000000..d545433a61
 +thread_local XTraceGeneratedScope* t_scope_stack[kMaxScopeDepth] = {};
 +thread_local int t_scope_depth = 0;
 +
-+void PushScopeStack(XTraceGeneratedScope* scope) {
-+  // Depth beyond the bound degrades to no marking for the overflowing
-+  // scope (honest omission, never a wrong mark: MarkOutcome keeps
-+  // targeting the innermost pushed scope).
-+  if (t_scope_depth < kMaxScopeDepth) {
-+    t_scope_stack[t_scope_depth++] = scope;
++// P5-R2a (chief review): beyond the depth bound the inner scopes are
++// UNMARKABLE — marks are dropped and counted, never written onto the
++// outer stack top (the old behavior bled inner arg-errors onto an
++// unrelated outer scope's outcome).
++void CountScopeOverflowGap() {
++  XTraceThreadProducer* producer =
++      XTraceThreadProducer::CurrentIfExists();
++  if (producer != nullptr) {
++    producer->RecordScopeOverflow();
++    return;
 +  }
++  XTraceProducerHub::Get()->RecordScopeOverflowNoProducer();
++}
++
++void PushScopeStack(XTraceGeneratedScope* scope) {
++  if (t_scope_depth < kMaxScopeDepth) {
++    t_scope_stack[t_scope_depth] = scope;
++  } else {
++    CountScopeOverflowGap();
++  }
++  ++t_scope_depth;
 +}
 +
 +void PopScopeStack(XTraceGeneratedScope* scope) {
-+  if (t_scope_depth > 0 && t_scope_stack[t_scope_depth - 1] == scope) {
++  if (t_scope_depth > 0) {
 +    --t_scope_depth;
 +  }
 +}
 +
 +XTraceGeneratedScope* TopScopeStack() {
-+  return t_scope_depth > 0 ? t_scope_stack[t_scope_depth - 1] : nullptr;
++  // Overflow region (depth beyond the stored array) is explicitly
++  // unmarkable: nullptr, never the outermost stored frame.
++  if (t_scope_depth == 0 || t_scope_depth > kMaxScopeDepth) {
++    return nullptr;
++  }
++  return t_scope_stack[t_scope_depth - 1];
 +}
 +
 +std::atomic<uint64_t>& CallTokenSequence() {
@@ -15398,7 +15780,7 @@ index 0000000000..d545433a61
 +  return XTraceProducerHub::Get()->ConfigReceived();
 +}
 +
-+bool BindingsPreciseMode() {
++bool BindingsPreciseModeSwitch() {
 +  // DP5: --xtrace-bindings-precise switch. Independent from and stackable
 +  // with --xtrace-ignition-observer (bytecode layer). Read once per
 +  // process (command line never changes mid-process).
@@ -15416,17 +15798,22 @@ index 0000000000..d545433a61
 +    const char* interface_name,
 +    const char* member_name,
 +    unsigned overload_count,
-+    const v8::FunctionCallbackInfo<v8::Value>& info) {
++    const v8::FunctionCallbackInfo<v8::Value>& info,
++    bool promise_returning) {
 +  if (!BindingsInstrumentationEnabled()) {
 +    return;
 +  }
 +  token_ = ++CallTokenSequence();
 +  active_ = true;
++  promise_returning_ = promise_returning;
 +
 +  // Entry fact emission through the standard v3 pipeline (P5-E3 wiring).
 +  // channel is always explicit "bindings" (DP2 ruling) — the logger
 +  // handles the envelope, batching, and the category/generation gates.
-+  XTraceLogger::LogGeneratedEntry(
++  // P5-R5 admission semantics: the scope records whether the entry was
++  // actually admitted; an unadmitted entry never produces an outcome
++  // (no orphan terminal events, no fabricated pairs).
++  entry_admitted_ = XTraceLogger::LogGeneratedEntry(
 +      api, kEntryKindNames[static_cast<unsigned>(kind)], interface_name,
 +      member_name, overload_count, token_);
 +  (void)info;  // receiver/args capture is E4 value-capture work
@@ -15439,16 +15826,19 @@ index 0000000000..d545433a61
 +    EntryKind kind,
 +    const char* interface_name,
 +    const char* member_name,
-+    unsigned overload_count) {
-+  // NADC/Fast API variant (no FunctionCallbackInfo). Only constructed
-+  // behind a passed TryEnter() precheck — see make_attribute_set_nadc_*
-+  // and make_no_alloc_direct_call_* in bind_gen.
++    unsigned overload_count,
++    bool promise_returning) {
++  // NADC/Fast API variant (no FunctionCallbackInfo). Constructed AFTER
++  // the unconditional API call behind a passed TryEnter() precheck
++  // (P5-R1 ruling shape) — see make_attribute_set_nadc_* and
++  // make_no_alloc_direct_call_* in bind_gen.
 +  if (!BindingsInstrumentationEnabled()) {
 +    return;
 +  }
 +  token_ = ++CallTokenSequence();
 +  active_ = true;
-+  XTraceLogger::LogGeneratedEntry(
++  promise_returning_ = promise_returning;
++  entry_admitted_ = XTraceLogger::LogGeneratedEntry(
 +      api, kEntryKindNames[static_cast<unsigned>(kind)], interface_name,
 +      member_name, overload_count, token_);
 +  PushScopeStack(this);
@@ -15464,7 +15854,11 @@ index 0000000000..d545433a61
 +  if (active_) {
 +    active_ = false;
 +    PopScopeStack(this);
-+    XTraceLogger::LogGeneratedOutcome(token_, outcome_, selected_overload_);
++    if (entry_admitted_) {
++      XTraceLogger::LogGeneratedOutcome(token_, outcome_,
++                                        selected_overload_,
++                                        promise_returning_);
++    }
 +  }
 +}
 +
@@ -15477,7 +15871,11 @@ index 0000000000..d545433a61
 +  XTraceGeneratedScope* scope = TopScopeStack();
 +  if (scope != nullptr && scope->active_) {
 +    scope->outcome_ = outcome ? outcome : "unknown";
++    return;
 +  }
++  // No attributable scope (none active, or the overflow region):
++  // count the gap — never write onto an unrelated outer scope.
++  CountScopeOverflowGap();
 +}
 +
 +void XTraceGeneratedScope::RecordOverload(unsigned selected_index) {
@@ -15490,12 +15888,25 @@ index 0000000000..d545433a61
 +  selected_overload_ = static_cast<int>(selected_index);
 +}
 +
++namespace {
++
++// P5-R1/R5 accounting policy: rejections are only counted while a
++// capture is actually active — a capture-off or stopped process must not
++// grow an unsettlable counter (chief review R1).
++bool CaptureAccountingActive() {
++  XTraceProducerHub* hub = XTraceProducerHub::Get();
++  return hub->ConfigReceived() && !hub->stopping();
++}
++
++}  // namespace
++
 +// static
 +bool XTraceGeneratedScope::TryEnter() {
-+  // Allocation-free precheck (DP1): config gate, live producer, and the
-+  // bounded buffer's remaining room. Must stay allocation-free — it runs
-+  // ahead of any allocation on the [NoAllocDirectCall] fast path.
-+  if (!BindingsInstrumentationEnabled()) {
++  // P5-R1 precheck: no side effects in the reject path. Capture-off and
++  // stopped states answer false WITHOUT touching the producer. With an
++  // active capture, a producer is (lazily) legitimate; BufferHasRoom
++  // reserves headroom for the entry+outcome pair plus reentrancy.
++  if (!CaptureAccountingActive()) {
 +    return false;
 +  }
 +  XTraceThreadProducer* producer = XTraceThreadProducer::Current();
@@ -15506,11 +15917,19 @@ index 0000000000..d545433a61
 +}
 +
 +// static
++bool XTraceGeneratedScope::BindingsPreciseMode() {
++  return BindingsPreciseModeSwitch();
++}
++
++// static
 +void XTraceGeneratedScope::MarkNadcPartial() {
-+  // DP1 ruling condition: a rejected NADC entry is accounted, never
-+  // silently dropped. Atomic increments only — this runs on the
-+  // no-allocation fast path.
-+  XTraceThreadProducer* producer = XTraceThreadProducer::Current();
++  // P5-R1 accounting: only an ACTIVE capture counts rejections, and the
++  // reject path never initializes a producer (CurrentIfExists).
++  if (!CaptureAccountingActive()) {
++    return;
++  }
++  XTraceThreadProducer* producer =
++      XTraceThreadProducer::CurrentIfExists();
 +  if (producer != nullptr) {
 +    producer->RecordNadcPartial();
 +    return;
@@ -15521,10 +15940,10 @@ index 0000000000..d545433a61
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
 new file mode 100644
-index 0000000000..4a1da7bd49
+index 0000000000..5ddb033146
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_generated_scope.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,122 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15569,22 +15988,27 @@ index 0000000000..4a1da7bd49
 +  // `api` is the fully-qualified name (e.g. "URL.constructor",
 +  // "Element.scroll"); `overload_count` is the number of overloads for
 +  // dispatchers/constructors, 0 for single-signature entries.
++  // `promise_returning` marks promise-returning entries so the paired
++  // outcome distinguishes "sync exception converts to a rejection" from a
++  // plain throw (chief review R2: never mix the two classes).
 +  XTraceGeneratedScope(const char* api,
 +                       EntryKind kind,
 +                       const char* interface_name,
 +                       const char* member_name,
 +                       unsigned overload_count,
-+                       const v8::FunctionCallbackInfo<v8::Value>& info);
++                       const v8::FunctionCallbackInfo<v8::Value>& info,
++                       bool promise_returning = false);
 +
 +  // Fast API / NADC variant: [NoAllocDirectCall] callbacks have no
-+  // FunctionCallbackInfo. Identical semantics otherwise; only reachable
-+  // behind a passed TryEnter() precheck (the caller must stay
-+  // allocation-free when the precheck fails).
++  // FunctionCallbackInfo. Identical semantics otherwise; only constructed
++  // AFTER the unconditional API call behind a passed TryEnter() precheck
++  // (P5-R1 ruling shape: API first, observation conditional).
 +  XTraceGeneratedScope(const char* api,
 +                       EntryKind kind,
 +                       const char* interface_name,
 +                       const char* member_name,
-+                       unsigned overload_count);
++                       unsigned overload_count,
++                       bool promise_returning = false);
 +
 +  ~XTraceGeneratedScope();
 +
@@ -15616,6 +16040,13 @@ index 0000000000..4a1da7bd49
 +  // entry is marked partial in the coverage bookkeeping — never forced.
 +  static bool TryEnter();
 +
++  // P5-R3 (chief review): the REAL bindings-precise predicate — consumed
++  // by generated code to gate first-batch fast-entry installation
++  // (precise mode keeps every call on the instrumented slow path) and by
++  // the capabilities surface to report the effective state, not just the
++  // switch name.
++  static bool BindingsPreciseMode();
++
 +  // DP1 ruling condition: when TryEnter() rejects an NADC entry (buffer
 +  // cannot accommodate), the fact is accounted — never silently dropped.
 +  // Allocation-free atomic increment on the owning thread producer's
@@ -15626,6 +16057,8 @@ index 0000000000..4a1da7bd49
 + private:
 +  uint64_t token_ = 0;
 +  bool active_ = false;
++  bool entry_admitted_ = false;  // entry accepted by the producer
++  bool promise_returning_ = false;
 +  const char* outcome_ = "ok";
 +  int selected_overload_ = -1;  // set by RecordOverload; -1 = not routed
 +};
@@ -15635,10 +16068,10 @@ index 0000000000..4a1da7bd49
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..999f235574
+index 0000000000..6e41608d61
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,486 @@
+@@ -0,0 +1,509 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15880,6 +16313,21 @@ index 0000000000..999f235574
 +  return &producer;
 +}
 +
++namespace {
++
++// Registered by XTraceThreadProducer's constructor so the P5-R1 reject
++// path (CurrentIfExists) can observe an existing producer without
++// constructing one.
++thread_local XTraceThreadProducer* t_existing_producer = nullptr;
++
++}  // namespace
++
++XTraceThreadProducer* XTraceThreadProducer::CurrentIfExists() {
++  // P5-R1: the reject path observes without initializing. Reads the
++  // constructor-registered thread-local pointer (see t_existing below).
++  return t_existing_producer;
++}
++
 +// static
 +void XTraceThreadProducer::EnsureControlEndpointRegistered() {
 +  XTraceThreadProducer* producer = Current();
@@ -15913,6 +16361,7 @@ index 0000000000..999f235574
 +  entry->producer = this;
 +  entry->runner = base::SequencedTaskRunner::GetCurrentDefault();
 +  registry_id_ = XTraceProducerHub::Get()->Register(std::move(entry));
++  t_existing_producer = this;  // P5-R1: CurrentIfExists observation
 +}
 +
 +XTraceThreadProducer::~XTraceThreadProducer() {
@@ -15920,6 +16369,9 @@ index 0000000000..999f235574
 +  // watermark is submitted on this thread's pipe while it still lives.
 +  if (!settled_) {
 +    Settle();
++  }
++  if (t_existing_producer == this) {
++    t_existing_producer = nullptr;
 +  }
 +  XTraceProducerHub::Get()->Unregister(registry_id_);
 +}
@@ -16108,29 +16560,33 @@ index 0000000000..999f235574
 +  // rejected entry is accounted, never silently dropped.
 +  watermark->nadc_partial = base::NumberToString(
 +      nadc_partial_.load(std::memory_order_relaxed));
++  watermark->scope_overflow = base::NumberToString(
++      scope_overflow_.load(std::memory_order_relaxed));
 +  host()->SubmitWatermark(std::move(watermark));
 +}
 +
 +bool XTraceThreadProducer::BufferHasRoom() const {
-+  // Allocation-free precheck (DP1): the capture window must be open and
-+  // the bounded buffer below capacity. The sticky drop-newest state
-+  // counts as no-room (AcceptEvent rejects everything from the first
-+  // overflow on — the precheck must agree with it). Sequence-confined
-+  // read, matching AcceptEvent's access discipline.
++  // P5-R1 precheck: the capture window must be open and the bounded
++  // buffer below capacity. The sticky drop-newest state counts as
++  // no-room (AcceptEvent rejects everything from the first overflow on —
++  // the precheck must agree with it). Chief review R1: reserve headroom
++  // for the entry+outcome pair so an accepted precheck cannot strand a
++  // half-pair. Sequence-confined read, matching AcceptEvent's access
++  // discipline.
 +  if (settled_ || overflowed_ || XTraceProducerHub::Get()->stopping()) {
 +    return false;
 +  }
-+  return buffer_.size() <
++  return buffer_.size() + 2 <=
 +         XTraceProducerHub::Get()->config().buffer_capacity;
 +}
 +
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..0ec96d6524
+index 0000000000..ad9abdee08
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,269 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16262,11 +16718,19 @@ index 0000000000..0ec96d6524
 +    return nadc_partial_no_producer_.load(std::memory_order_relaxed);
 +  }
 +
++  // P5-R2a/R5: outcome marks dropped because no scope was attributable
++  // (TLS depth overflow region) — the recorded gap, never silent.
++  void RecordScopeOverflowNoProducer() { ++scope_overflow_no_producer_; }
++  uint64_t scope_overflow_no_producer() const {
++    return scope_overflow_no_producer_.load(std::memory_order_relaxed);
++  }
++
 + private:
 +  XTraceProducerHub();
 +
 +  std::atomic<bool> stopping_{false};
 +  std::atomic<uint64_t> nadc_partial_no_producer_{0};
++  std::atomic<uint64_t> scope_overflow_no_producer_{0};
 +  // P3-E4/F1 config propagation: one immutable snapshot; writers swap the
 +  // pointer under config_lock_, readers copy the shared_ptr once per event.
 +  mutable base::Lock config_lock_;
@@ -16287,6 +16751,10 @@ index 0000000000..0ec96d6524
 + public:
 +  // Lazily created on the current thread; null while capture is disabled.
 +  static XTraceThreadProducer* Current();
++
++  // P5-R1: observe an existing producer WITHOUT creating one — the NADC
++  // reject path must not initialize anything as a side effect.
++  static XTraceThreadProducer* CurrentIfExists();
 +
 +  // F1/B7: register this process's control endpoint at renderer startup
 +  // (main thread, before any page script). A renderer spawned AFTER an
@@ -16338,6 +16806,12 @@ index 0000000000..0ec96d6524
 +    return nadc_partial_.load(std::memory_order_relaxed);
 +  }
 +
++  // P5-R2a/R5: marks dropped for lack of an attributable scope.
++  void RecordScopeOverflow() { ++scope_overflow_; }
++  uint64_t scope_overflow() const {
++    return scope_overflow_.load(std::memory_order_relaxed);
++  }
++
 +  bool settled() const { return settled_; }
 +
 +  blink::mojom::XTraceHost* host();
@@ -16371,6 +16845,7 @@ index 0000000000..0ec96d6524
 +  uint64_t enqueued_ = 0;
 +  uint64_t dropped_ = 0;
 +  std::atomic<uint64_t> nadc_partial_{0};
++  std::atomic<uint64_t> scope_overflow_{0};
 +  uint32_t assets_out_ = 0;
 +  bool settled_ = false;
 +  bool overflowed_ = false;

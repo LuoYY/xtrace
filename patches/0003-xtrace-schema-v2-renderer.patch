@@ -307,10 +307,10 @@ index ecb68ce4e2..e28e8b1b32 100644
  void V8ScriptRunner::ReportException(v8::Isolate* isolate,
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 new file mode 100644
-index 0000000000..f0d71152c1
+index 0000000000..fbe69094c3
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1043 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -351,6 +351,12 @@ index 0000000000..f0d71152c1
 +namespace {
 +
 +constexpr char kBindingsChannelName[] = "bindings";
++
++// P5-R5 admission report: whether the most recent EmitEvent on this thread
++// was counted by the producer. Thread-local because producer admission is
++// per-thread; read back by LogGeneratedEntry so the scope can suppress
++// outcomes for unadmitted entries.
++thread_local bool t_last_event_admitted = false;
 +constexpr char kEnableEnv[] = "XTRACE_ENABLE";
 +constexpr char kFileEnv[] = "XTRACE_FILE";
 +constexpr char kCategoriesEnv[] = "XTRACE_CATEGORIES";
@@ -880,6 +886,7 @@ index 0000000000..f0d71152c1
 +
 +  std::optional<uint64_t> seq =
 +      producer->AcceptEvent(std::move(line), config_generation);
++  t_last_event_admitted = seq.has_value();
 +  if (seq && has_asset_ref && !AssetAlreadySent(asset_ref.asset_id)) {
 +    SendScriptAssetRow(producer, asset_kind, *asset_url, *asset_source,
 +                       asset_ref, *seq);
@@ -1095,21 +1102,21 @@ index 0000000000..f0d71152c1
 +            snapshot->generation);
 +}
 +
-+void XTraceLogger::LogGeneratedEntry(const char* api,
-+                                    const char* entry_kind,
-+                                    const char* interface_name,
-+                                    const char* member_name,
-+                                    unsigned overload_count,
-+                                    uint64_t call_token) {
++bool XTraceLogger::LogGeneratedEntry(const char* api,
++                                     const char* entry_kind,
++                                     const char* interface_name,
++                                     const char* member_name,
++                                     unsigned overload_count,
++                                     uint64_t call_token) {
 +  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      // Same first-config barrier as every other entry (N3-part2).
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-+    return;
++    return false;  // P5-R5: not admitted (capture window closed)
 +  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, "reverse")) {
-+    return;
++    return false;  // P5-R5: not admitted (filtered)
 +  }
 +  // Entry facts as a webidl_entry sub-object (channel explicit inside for
 +  // self-containment — DP2 ruling: no default semantics). The envelope's
@@ -1125,19 +1132,26 @@ index 0000000000..f0d71152c1
 +  extra.append(QuoteJsonString(member_name ? member_name : ""));
 +  extra.append(",\"overload_count\":");
 +  extra.append(base::NumberToString(overload_count));
-+  extra.append(",\"call_token\":");
++  // P5-R5: call_token is a decimal STRING (schema numeric convention;
++  // the validator enforces the single form).
++  extra.append(",\"call_token\":\"");
 +  extra.append(base::NumberToString(call_token));
++  extra.append("\"");
 +  extra.append("}");
 +  EmitEvent(config, "reverse", "call", api ? api : "WebIDL.entry",
 +            String("[]"),
 +            /*capture_stack=*/false, std::string_view(), std::string_view(),
 +            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation,
 +            /*channel=*/kBindingsChannelName);
++  // P5-R5 admission: the paired outcome is emitted only when the entry
++  // was counted by the producer (see EmitEvent's admission report).
++  return t_last_event_admitted;
 +}
 +
 +void XTraceLogger::LogGeneratedOutcome(uint64_t call_token,
 +                                        const char* outcome,
-+                                        int selected_overload) {
++                                        int selected_overload,
++                                        bool promise_returning) {
 +  const XTraceConfig& config = GetCachedConfig();
 +  if (!config.enabled ||
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
@@ -1150,9 +1164,9 @@ index 0000000000..f0d71152c1
 +  std::string extra;
 +  extra.append("\"webidl_outcome\":{");
 +  extra.append("\"channel\":\"bindings\",");
-+  extra.append("\"call_token\":");
++  extra.append("\"call_token\":\"");
 +  extra.append(base::NumberToString(call_token));
-+  extra.append(",\"outcome\":");
++  extra.append("\",\"outcome\":");
 +  extra.append(QuoteJsonString(outcome ? outcome : "unknown"));
 +  if (selected_overload >= 0) {
 +    // Dispatcher routing fact (DP1: no second entry event) — the selected
@@ -1160,6 +1174,12 @@ index 0000000000..f0d71152c1
 +    extra.append(",\"selected_overload\":\"");
 +    extra.append(base::NumberToString(selected_overload));
 +    extra.append("\"");
++  }
++  if (promise_returning) {
++    // P5-R2 (chief review): a promise-returning entry's synchronous
++    // exception converts to a rejection — labeled explicitly, never
++    // conflated with a plain throw's terminal semantics.
++    extra.append(",\"sync_exception_becomes\":\"rejection\"");
 +  }
 +  extra.append("}");
 +  EmitEvent(config, "reverse", "return", "WebIDL.outcome", String("[]"),
@@ -1336,10 +1356,10 @@ index 0000000000..f0d71152c1
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 new file mode 100644
-index 0000000000..112fea7d03
+index 0000000000..e812fbd46a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,140 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1398,7 +1418,10 @@ index 0000000000..112fea7d03
 +  // never defaulted — DP2 ruling). The scope provides the entry facts;
 +  // the logger handles envelope + batching through the standard v3
 +  // pipeline.
-+  static void LogGeneratedEntry(const char* api,
++  // Returns whether the entry was ADMITTED by the producer (counted and
++  // buffered): the scope suppresses the paired outcome for unadmitted
++  // entries (P5-R5 — no orphan terminal events).
++  static bool LogGeneratedEntry(const char* api,
 +                                const char* entry_kind,
 +                                const char* interface_name,
 +                                const char* member_name,
@@ -1412,7 +1435,8 @@ index 0000000000..112fea7d03
 +  // dispatcher-routed call; -1 when the entry had no routing fact.
 +  static void LogGeneratedOutcome(uint64_t call_token,
 +                                  const char* outcome,
-+                                  int selected_overload = -1);
++                                  int selected_overload = -1,
++                                  bool promise_returning = false);
 +  static void LogEventNoStack(const char* category,
 +                              const char* phase,
 +                              const char* api,

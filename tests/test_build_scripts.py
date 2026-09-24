@@ -2875,10 +2875,11 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn('"xtrace-causality"', logger)
         # The renderer switch-forwarding list must carry the causality switch;
         # adjacency pins it to kSwitchNames (not the browser-side constant).
-        self.assertIn(
-            '"xtrace-causality",\n        "xtrace-ignition-observer",',
-            browser,
-        )
+        # P5-R3: the forwarding list also carries xtrace-bindings-precise
+        # between these two entries; assert membership, not adjacency.
+        self.assertIn('"xtrace-causality",', browser)
+        self.assertIn('"xtrace-ignition-observer",', browser)
+        self.assertIn('"xtrace-bindings-precise",', browser)
         self.assertIn('"xtrace-test-buffer-capacity",\n        "xtrace-enable",', browser)
         self.assertIn('{\\"schema_version\\":3', logger)
         self.assertIn("thread_local std::vector<XTraceActivation>", logger)

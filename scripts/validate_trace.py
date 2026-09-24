@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import hashlib
 import json
 import re
@@ -2175,11 +2176,14 @@ V3_WEBIDL_OUTCOMES = (
 )
 
 
-def validate_v3_webidl(events: list[dict]) -> None:
+def validate_v3_webidl(events: list[dict],
+                       terminal_state: str | None = None) -> None:
     # call_token is a per-process monotonic sequence (renderer-side
-    # atomic): uniqueness and pairing are scoped to the producer.
-    entry_tokens: dict[str, set[str]] = {}
-    outcome_tokens: dict[str, set[str]] = {}
+    # atomic): uniqueness, pairing, ORDER, and the routing bound are all
+    # scoped to the producer (P5-R5: set-difference alone is not a
+    # pairing check).
+    entry_tokens: dict[str, dict[str, dict]] = {}
+    outcome_tokens: dict[str, dict[str, dict]] = {}
     for index, event in enumerate(events):
         entry = event.get("webidl_entry")
         outcome = event.get("webidl_outcome")
@@ -2216,14 +2220,21 @@ def validate_v3_webidl(events: list[dict]) -> None:
                 raise TraceValidationError(
                     f"Event {index}: unknown webidl_entry.entry_kind"
                     f" {entry['entry_kind']!r}")
-            token = str(entry["call_token"])
+            token = entry["call_token"]
+            if not isinstance(token, str) or not token.isdigit():
+                raise TraceValidationError(
+                    f"Event {index}: webidl_entry.call_token must be a"
+                    " decimal string (P5-R5 single form)")
             producer = str(event.get("producer_id", ""))
-            seen = entry_tokens.setdefault(producer, set())
+            seen = entry_tokens.setdefault(producer, {})
             if token in seen:
                 raise TraceValidationError(
                     f"Event {index}: duplicate webidl entry token"
                     f" {token} on producer {producer}")
-            seen.add(token)
+            seen[token] = {
+                "index": index,
+                "overload_count": int(entry["overload_count"]),
+            }
         if outcome is not None:
             if not isinstance(outcome, dict):
                 raise TraceValidationError(
@@ -2247,30 +2258,75 @@ def validate_v3_webidl(events: list[dict]) -> None:
                         f"Event {index}: selected_overload must be a"
                         " non-negative decimal string"
                     )
-            token = str(outcome["call_token"])
+            token = outcome["call_token"]
+            if not isinstance(token, str) or not token.isdigit():
+                raise TraceValidationError(
+                    f"Event {index}: webidl_outcome.call_token must be a"
+                    " decimal string (P5-R5 single form)")
             producer = str(event.get("producer_id", ""))
-            seen = outcome_tokens.setdefault(producer, set())
+            seen = outcome_tokens.setdefault(producer, {})
             if token in seen:
                 raise TraceValidationError(
                     f"Event {index}: duplicate webidl outcome token"
                     f" {token} on producer {producer}")
-            seen.add(token)
-    # DP1 pairing: one entry, one terminal outcome, joined by
-    # (producer, call_token).
+            seen[token] = {"index": index}
+    # DP1 pairing with ORDER and the routing bound (P5-R5): the entry
+    # precedes its terminal outcome in file order, and a dispatcher
+    # routing fact is bounded by the paired entry's overload_count.
+    for producer, tokens in outcome_tokens.items():
+        for token, outcome_info in tokens.items():
+            entry_info = entry_tokens.get(producer, {}).get(token)
+            if entry_info is None:
+                raise TraceValidationError(
+                    "webidl outcome without a paired entry"
+                    f" (producer:token {producer}:{token})"
+                )
+            if outcome_info["index"] < entry_info["index"]:
+                raise TraceValidationError(
+                    "webidl outcome precedes its entry in file order"
+                    f" (producer:token {producer}:{token})"
+                )
+    # selected_overload bound against the paired entry.
+    for index, event in enumerate(events):
+        outcome = event.get("webidl_outcome")
+        if not outcome:
+            continue
+        selected = outcome.get("selected_overload")
+        if selected is None:
+            continue
+        producer = str(event.get("producer_id", ""))
+        token = outcome["call_token"]
+        entry_info = entry_tokens.get(producer, {}).get(token)
+        if entry_info is not None and int(selected) >= max(
+                1, entry_info["overload_count"]):
+            raise TraceValidationError(
+                f"Event {index}: selected_overload {selected} exceeds the"
+                f" paired entry overload_count"
+                f" {entry_info['overload_count']}"
+            )
     unpaired = [
         f"{producer}:{token}"
         for producer, tokens in entry_tokens.items()
-        for token in tokens - outcome_tokens.get(producer, set())
+        for token in tokens.keys() - outcome_tokens.get(producer, {}).keys()
     ]
     if unpaired:
-        raise TraceValidationError(
-            "webidl entries without paired outcomes"
-            f" (producer:token {sorted(unpaired)[:5]}...)"
+        if terminal_state == "complete":
+            raise TraceValidationError(
+                "webidl entries without paired outcomes in a COMPLETE"
+                f" capture (producer:token {sorted(unpaired)[:5]}...)"
+            )
+        # Legally interrupted capture: report the coverage gap, do not
+        # fabricate outcomes to satisfy the pairing (P5-R5).
+        print(
+            "webidl coverage gap: entries without outcomes in"
+            f" terminal={terminal_state} capture:"
+            f" {sorted(unpaired)[:5]}{'...' if len(unpaired) > 5 else ''}",
+            file=sys.stderr,
         )
     orphans = [
         f"{producer}:{token}"
         for producer, tokens in outcome_tokens.items()
-        for token in tokens - entry_tokens.get(producer, set())
+        for token in tokens.keys() - entry_tokens.get(producer, {}).keys()
     ]
     if orphans:
         raise TraceValidationError(
@@ -3914,7 +3970,12 @@ def validate_trace(
             validate_v3_capture_identity(events, manifest)
             validate_v3_manifest(manifest, per_producer)
             validate_v3_ignition_causality(events)
-            validate_v3_webidl(events)
+            # P5-R5: terminal-state awareness — unpaired entries are a
+            # hard error only in a COMPLETE capture; legally interrupted
+            # captures report them as coverage gaps.
+            validate_v3_webidl(
+                events,
+                terminal_state=(manifest.get("terminal") or {}).get("state"))
             validate_v3_identity(manifest)
             validate_v3_assets(path)
         else:
