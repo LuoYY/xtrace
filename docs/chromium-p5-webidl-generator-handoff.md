@@ -470,3 +470,31 @@ C0 反例进受跟踪测试先红 → C1 NADC 全分支必调 API/返回（强�
 - 首启后首个 case 曾因 macOS 签名验证慢而超时（重跑即过，非产品缺陷）。
 
 **申请：§14.3 五项整改经 §16 证据可进入总架构师复验；复验通过后由架构师恢复 accepted-p5（P55-D0 按 P5.5 §13 并行推进）。**
+
+---
+
+## 17. 架构师对重开整改的复验（2026-09-24）：P5 恢复冻结
+
+**结论：§14.3 R1–R5 全部整改经独立复验成立，P5 恢复冻结（accepted-p5）。** 本轮复验按 §15.4 自省纪律包含独立反例面。
+
+### 17.1 独立复验记录（全部亲跑/亲验）
+
+| 项 | 方式与结果 |
+| --- | --- |
+| 反例门 | 亲跑 `p5-reopen-counterexamples.cjs` **12/12 GREEN**（新证据 `p5-reopen-xnvUY5`）：fast-off/fast-on/after-stop/full-queue（`nadc_partial>0` 实测可见）/href+element-id setter arg-error/67 层嵌套无污染/precise 慢路径/coverage 双 cwd 一致 |
+| R1 形态 | `gen/v8_performance.cc` 实测：API 无条件执行（`return_value = now()` 先于观测）、观测条件化、返回恒定——裁定写死的形状 |
+| R2b 标注 | `gen/modules/v8/v8_url.cc` 实测：setter 转换失败路径 `MarkOutcome("arg-error")` 已接线 |
+| R2a 溢出 | `xtrace_generated_scope.cc:69–75` 实测：深度计数可超 64，`TopScopeStack()` 溢出区显式返回 nullptr（不借外层栈顶）；`scope_overflow` 缺口计数在水印/manifest |
+| 回归 | `run_tests.sh` 亲跑 **375/28/211** 全绿（+7 配对契约、+4 覆盖一致性） |
+| bindings | 亲跑隔离 Python 3.11.16 环境 **57/57**（0 skip/0 fail）——环境债关闭 |
+| 契约/单测 | 契约 21/21 亲跑；producer 9/9、**controller 9/9** 亲跑（见 17.2） |
+| 补丁栈 | `verify_patches.py` verdict=pass（本人临时调试补丁已还原，源码与补丁逐字节一致） |
+
+### 17.2 本轮抓到的流程缺陷（不阻塞冻结，必须整改门禁）
+
+- **门禁漏跑 controller 单测**：§16.6 门禁表只列 producer——我用旧测试二进制跑到一次假失败（`accepted=2/failed=0`、7 用例未跑）。临时插桩+重建后证明是**测试二进制陈旧**（源码已改、二进制未重链），不是产品缺陷；干净二进制全绿。**整改：门禁必须在每次构建后同步重建并运行全部测试目标（content_unittests/blink_platform_unittests），controller 重新列回门禁表；二进制与源码不同步时，任何绿灯/红灯都不作数。**
+- 假失败排查过程留档：插桩值 `eligible=4 enqueued=3 accepted=3 written=1 failed=2`（调整后正确）vs 旧二进制 `2/1/0`——同源不同二进制的对照证据，留作"先确认产物身份再谈失败"的范例。
+
+### 17.3 恢复冻结
+
+progress JSON `p5.status` 恢复为 `accepted-p5`（架构师动作，见 `p5_refreeze`）。P55-D0（P5.5 设计契约修订，按 §13）可与 C4 后续并行；P5.5 引擎长程块的入口条件全部满足。
