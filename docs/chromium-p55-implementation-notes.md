@@ -37,7 +37,7 @@
 
 - 实施事实：P3 已交付 manifest.identity 的 frame_tree_node_id → document_token 映射；导航后继是同段增量（browser 侧 NavigationHandle 观测），事件行不加字段与 crosswalk 决策一致。
 - **硬验收锚点已具备两侧前提**：renderer cookie 钩与 browser-network producer 均带值（P5 证据里 BrowserNetwork.request 头部截断四元组与 cookie 事件并存）；"一阶段 cookie 值在重载请求 Cookie 头中定位 + 两端同 nav_chain"可直接由现有事件流断言，不需要新采集语义。
-- 范围边界同意：BFCache/redirect 全景/跨 frame 归属留 P3 身份修订（三站样本均同 frame ��段式，本子集够用）。
+- 范围边界同意：BFCache/redirect 全景/跨 frame 归属留 P3 身份修订（三站样本均同 frame 两段式，本子集够用）。
 
 ## 2. T3/T7 先行交付评估（可独立先行，确认）
 
@@ -50,3 +50,29 @@
 
 - 引擎侧改动集中在 0002（V8 observer 扩展）与 0001/0003（producer/预算/watermark 推广），补丁栈本批已转为按文件不相交所有权、机械可再生——P5.5 迭代时重生成成本低。
 - 主要技术风险：Entry 点读帧的谓词成本（对策见 DP1）；值捕获的 GC 安全（沿用 N1 教训：即时序列化、不持堆指针——设计 §2.5 已列）。
+
+---
+
+## 4. 架构师裁决（2026-09-24，设计 v1.2 落地版）
+
+六决策点**全部按推荐方案裁决通过**，实施侧补充意见经评估**全部采纳**；裁决后 P5.5-E1（设计文档按本节修订为 v1.3）→ 引擎长程块开启。
+
+### 逐项裁决
+
+1. **tap 注入点：A 起步（Entry+谓词读帧）、B（Exit 变体）后置。** 采纳"编译期把 offset 窗口预编译为 per-function 有序区间表、运行期二分查找、零分配零容器"的谓词实现要求——这是轻量 gate 的具体化，列入实现约束。
+2. **接口形状：`startCapture.valueObservation` 子段**（不造第二套生命周期）。`getCapabilities` 同步披露 `valueObservation.windows`（script/function/offset 粒度）与 `budget.maxTapsPerActivation`。
+3. **预算默认值：每激活 N=2000 tap、每 offset 窗口 512**（语料实测派发循环 10⁴–10⁵ 迭代的依据成立）；dump 深度 2 / 宽度 256 / 资产阈值 16KB。**`sampled_out` 采用 `nadc_partial` 已落地的 watermark 计账模式推广**（producer 侧原子计数 + watermark 结算 + manifest 披露 + 未确认 null 纪律），等式扩展 `eligible = enqueued + dropped + sampled_out` 随规范升 v1.3 时 validator 同步。
+4. **dump 边界：同意默认并参数化**；`anchor` 增加 `window_id` 回引（配置自描述）。
+5. **字段清单：同意 §8 形状；两处补强均采纳**——`value_tap.values` 与 P5 交接 §10.2 的"值捕获后续"共用 DP3 分派形态（P5.5 首次真正落地、不造第二形态）；**v1.2 → v1.3 升版时把 P5 终审修订（顶层 channel、`selected_overload`、`nadc_partial`）合并为正式条款**，消除双修订层。
+6. **nav_chain：succession 进 `manifest.identity` 段**（事件行不加字段）。硬验收锚点两侧前提已具备（renderer cookie 钩与 browser-network producer 均带值），按此实施。
+
+### T3/T7 先行交付：批准
+
+- 批准先跑**语料采集步**：本地 serve 已捕获语料脚本 + P4 observer（scope selector 按 URL 模式圈定挑战脚本）capture。约束：固定本地端口、隔离 profile、只服务本地已捕获资产——**不得回连原站**（合规纪律）。
+- T3/T7 分析器与 DP1–6 引擎实现并行；T7 在 DP6 落地前以响应码序列 + URL 形态近似时**标注 derived 级**（正确，沿用五级纪律）。
+- T3 输出同时作为 §9.1 vPC 重建的输入契约验证。
+
+### 资源与风险提示（记入实施约束）
+
+- Entry 谓词成本按 DP1 的预编译区间表处理；值捕获 GC 安全沿用 N1 教训（即时序列化、不持堆指针、新弱引用一律两阶段回调）。
+- 引擎改动落点：0002（V8 observer 扩展）、0001/0003（producer/预算/watermark 推广）；补丁栈已按文件不相交所有权机械可再生，迭代成本可控。

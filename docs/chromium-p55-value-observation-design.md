@@ -1,6 +1,6 @@
 # P5.5 设计提案：值观测二期（vPC 流截获 / 值级 tap / 物化 dump）
 
-- 版本：v1.2（2026-09-23；v1.2 补入分析层 T3 环境读取还原与 T7 部署形态判定（均可独立先行）及对应验收行；v1.1 补入 T1/T2 挑战会话；v1.0 架构师提案待裁决）。
+- 版本：v1.3（2026-09-24；v1.3 六决策点经裁决定稿（§11），T3/T7 先行获批，设计进入实施；v1.2 补入分析层 T3/T7；v1.1 补入 T1/T2 挑战会话；v1.0 架构师提案）。
 - 依据：[P4 交接](chromium-p4-ignition-observer-handoff.md)（observer/scope selector/两阶段弱回调）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P5 设计](chromium-p5-design.md) DP3（反扰动分派表）；真实样本语料 `analysis/pmos-{xj,sc,jibei}-sgcc-20260923/`（瑞数 JSVMP 三站四份挑战脚本，本地 gitignored）。
 - 定位：P4 交付的是**物理层**（V8 字节码执行前事件）；本提案打开**虚拟层**——VM 自己的指令流、虚拟寄存器值、运行期物化的表数据。目标是让瑞数级 JSVMP 的 cookie/签名计算从"黑盒"变成"可重建的计算图"。
 
@@ -125,14 +125,16 @@ T3/T7 均不新增采集语义、不动引擎，可在 P5.5 引擎工作之前�
 | 挑战会话闭环（T1/T2） | 两段式站点现场：一阶段 cookie.set 的值在重载请求 Cookie 头中定位成功；两端事件经 identity 段同属一个 nav_chain；vPC 序列与 dump 资产按 (nav_chain, stage) 成组呈现 |
 | 契约与回归 | 计数等式/终态不被 tap/dump 破坏；sampled_out 记账正确；P2–P5 全部门禁（契约 21/21、矩阵、故障、parity、单测）不回退 |
 
-## 11. 决策点（提请裁决）
+## 11. 决策点（**已裁决 2026-09-24**）
 
-1. **tap 注入点**：Entry+谓词读帧（推荐）vs Exit 变体改造（后续）——是否同意 A 起步、B 后置。
-2. **接口形状**：`startCapture` 的 `valueObservation` 子段（推荐）vs 独立方法——不做第二套 capture 生命周期。
-3. **预算默认值**：每激活 N 与 offset 窗口语义；`sampled_out` 首次启用的记账形态确认。
-4. **dump 对象图边界**：深度 ≤2、宽度上限、大数组的资产阈值（默认 16KB 走资产，以下内联——可调）。
-5. **v3 字段扩展清单**：§8 的 `value_tap`/`dump` 形状与 §8 扩展式升版（v1.2 → v1.3）。
-6. **nav_chain 身份模型**：导航后继以 succession 记录进 `manifest.identity` 段（推荐——事件行不加字段，与 crosswalk 落 manifest 的既定决策一致）vs 事件行内嵌 chain id。
+1. **tap 注入点**：Entry+谓词读帧起步、Exit 变体后置（**已裁决**）；offset 窗口编译期预编译为 per-function 有序区间表、运行期二分查找、零分配。
+2. **接口形状**：`startCapture.valueObservation` 子段（**已裁决**）；`getCapabilities` 披露 `valueObservation.windows` 与 `budget.maxTapsPerActivation`。
+3. **预算默认值**：每激活 **N=2000 tap**、每 offset 窗口 **512**（**已裁决**）；`sampled_out` 推广 `nadc_partial` 的 watermark 计账模式，等式扩展随 v1.3 生效。
+4. **dump 对象图边界**：深度 ≤2、宽度 256、资产阈值 16KB（**已裁决**）；`anchor` 增 `window_id` 回引。
+5. **v3 字段扩展清单**：§8 形状（**已裁决**）；v1.2 → v1.3 升版时合并 P5 终审修订（顶层 channel、`selected_overload`、`nadc_partial`）为正式条款。
+6. **nav_chain 身份模型**：succession 进 `manifest.identity` 段（**已裁决**）；事件行不加字段；硬验收锚点按 §6 实施。
+
+裁决全文与 T3/T7 先行批准见 [实施侧意见](chromium-p55-implementation-notes.md) §4。
 
 ## 12. 非目标
 

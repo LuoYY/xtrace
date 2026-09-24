@@ -243,3 +243,23 @@
 | 补丁栈 | `verify_patches.py` verdict=pass（0 不符、0 漂移、HEAD 钉扎不变） |
 
 **补丁栈结构变更说明**：栈内同文件跨补丁分 hunk 的历史叠层改为**按文件不相交所有权**（共享文件归栈内最后包含它的补丁）重生成——逐补丁为钉扎 HEAD 到工作树的最终态 diff，回放语义等价、可机械再生；`bind_gen/blink_v8_bridge.py`、`bind_gen/__init__.py`、`generate_bindings.py` 入栈（0001）。
+
+---
+
+## 13. 架构师复验确认（2026-09-24）：P5 冻结成立
+
+§11.2/§11.3 的五项终审要求经 §12 修复后，全部由架构师独立复验确认：
+
+| 项 | 复验方式与结果 |
+| --- | --- |
+| 阻塞 1（scroll 双 overload） | 亲跑 `p5-outcome-evidence.cjs` PASS：`scroll(0,0)`/`scroll({top:1})`/错 receiver 路由 `1/0/1`；派发器 kind 为 `overload-dispatcher`、overload_count 真实 |
+| 阻塞 2（outcome 分路径） | 同驱动：分布 `{ok:300, arg-error:2, receiver-error:1, native-exception:1, call-form-error:1}`；305 入口/305 终态按 (producer, call_token) 严格配对；不可标注族（V8 模板层 receiver 检查）如实披露 |
+| 阻塞 3（覆盖表一致） | 表 v2 为生成期真派生：Element 182 supported、NADC/Performance.now 正确 partial；一致性测试 4 用例已在回归中（`run_tests.sh` 亲跑 368/28/211 全绿） |
+| 必修 4（顶层 channel） | 实测 impl 事件顶层 `channel:"impl"`（含 BrowserNetwork 四点）、webidl 事件 `"bindings"`；validator 新增 webidl 契约 |
+| 必修 5（NADC TryEnter） | 亲跑 `p5-nadc-partial-evidence.cjs` PASS；producer 单测 9/9（含 3 个新 NADC 用例，预检查拒绝/计数/水印结算确定性证明）；E2E 可见性边界如实披露 |
+
+另核验：补丁栈转为按文件不相交所有权后 `verify_patches.py` verdict=pass（0 不符、0 漂移、HEAD 钉扎不变）；契约 21/21。
+
+**确认 P5 冻结（accepted-p5）。** 流程记录：执行层按终审指令先行标记了 p5.status，经复验全部成立、确认有效；冻结动作的发出方应为架构师，后续保持先例。两条边界存档：生成器自身 57/57 套件依赖隔离 Python 3.11 环境（P1 期环境已失，本轮未跑，重建后补跑）；E2E 下 `nadc_partial` 可见性依赖 V8 走到 fast API（机制已由单测确定性证明，E2E 证明包围契约）。
+
+下一阶段：[P5.5 值观测二期](chromium-p55-value-observation-design.md)（设计 v1.2 已按 [实施侧意见](chromium-p55-implementation-notes.md) 裁决，见该文档裁决节）。
