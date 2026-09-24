@@ -1,6 +1,6 @@
 # P5.5 设计提案：值观测二期（vPC 流截获 / 值级 tap / 物化 dump）
 
-- 版本：v1.4-review（2026-09-24；总架构师复审及增强路线见 §13）。
+- 版本：v1.4-review（2026-09-24；总架构师复审及增强路线见 §13）。**已由 [chromium-p55-design-contract.md](chromium-p55-design-contract.md) v2.0 取代——本文件保留作历史（含 §13 复审原文），实施以契约为准。**
 - **当前状态：设计修订门，非无条件引擎开工批准。** §11 与实施意见原裁决保留为历史；Entry/单通道/有界观测方向保留，但 vPC、T3 输入、预算记账、对象遍历与跨导航证据语义须先按 §13 重新定稿。P5 产品回归须先闭环；允许并行做证据索引、合成fixture和分析器骨架，不将私有样本还原或现场访问作为默认执行任务。
 - 依据：[P4 交接](chromium-p4-ignition-observer-handoff.md)（observer/scope selector/两阶段弱回调）；[trace-schema-v3.md](trace-schema-v3.md) v1.2；[P5 设计](chromium-p5-design.md) DP3（反扰动分派表）；真实样本语料 `analysis/pmos-{xj,sc,jibei}-sgcc-20260923/`（瑞数 JSVMP 三站四份挑战脚本，本地 gitignored）。
 - 定位：P4 交付的是**物理层**（V8 字节码执行前事件）；本提案打开**虚拟层**——VM 自己的指令流、虚拟寄存器值、运行期物化的表数据。目标是让瑞数级 JSVMP 的 cookie/签名计算从"黑盒"变成"可重建的计算图"。
