@@ -873,6 +873,41 @@ index bd9457f779..55fb9388b6 100644
              {
                  "domain": "Network",
                  "include": [
+diff --git a/content/browser/renderer_host/render_frame_host_impl.cc b/content/browser/renderer_host/render_frame_host_impl.cc
+index 667a3d27c3..eb3b2dfe20 100644
+--- a/content/browser/renderer_host/render_frame_host_impl.cc
++++ b/content/browser/renderer_host/render_frame_host_impl.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+ 
++#include "content/browser/xtrace/xtrace_capture_controller.h"
++
+ #include <algorithm>
+ #include <cstdint>
+ #include <deque>
+@@ -5223,6 +5225,21 @@ void RenderFrameHostImpl::DidNavigate(
+     const mojom::DidCommitProvisionalLoadParams& params,
+     NavigationRequest* navigation_request,
+     bool was_within_same_document) {
++  // XTRACE P5.5 E5 (contract §7): same-frame navigation succession into
++  // the capture manifest's identity section. Observation only — never
++  // participates in the navigation decision; no-ops without an active
++  // capture. Called before any state mutation below so the frame's
++  // PREVIOUS document association (controller-side) reflects the old
++  // document on the first cross-document commit.
++  if (XTraceCaptureController::Get()) {
++    XTraceCaptureController::Get()->AcceptNavigationSuccession(
++        static_cast<uint32_t>(
++            frame_tree_node()->frame_tree_node_id().GetUnsafeValue()),
++        GetDocumentToken().ToString(),
++        params.url.spec(),
++        navigation_request && navigation_request->IsReload(),
++        was_within_same_document);
++  }
+   // The `url` and `origin` of the current document are stored in the
+   // RenderFrameHost, because:
+   // - The FrameTreeNode represents the frame.
 diff --git a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc b/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
 index db280b0576..cea936ae91 100644
 --- a/content/browser/renderer_host/render_process_host_impl_receiver_bindings.cc
@@ -1034,10 +1069,10 @@ index 0000000000..46b1cc1b44
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..b668f961e4
+index 0000000000..0d97fccff7
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1225 @@
+@@ -0,0 +1,1298 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1911,6 +1946,51 @@ index 0000000000..b668f961e4
 +}
 +
 +
++void XTraceCaptureController::AcceptNavigationSuccession(
++    uint32_t frame_tree_node_id,
++    const std::string& new_document_token,
++    const std::string& url,
++    bool is_reload,
++    bool same_document) {
++  // UI thread (DidNavigate). Recorded only while a capture is live and
++  // only when the frame's previous document token is KNOWN and DIFFERENT
++  // — first sightings are baseline state, not successions.
++  if (!base::CommandLine::ForCurrentProcess()->HasSwitch("xtrace-enable")) {
++    return;
++  }
++  base::AutoLock lock(writer_lock_);
++  if (stopping_ || finalized_.load(std::memory_order_acquire)) {
++    return;
++  }
++  auto it = last_document_by_ftn_.find(frame_tree_node_id);
++  if (it == last_document_by_ftn_.end()) {
++    last_document_by_ftn_[frame_tree_node_id] = new_document_token;
++    return;  // first sighting in this capture: baseline
++  }
++  if (it->second == new_document_token) {
++    return;  // same document (same-document navigation)
++  }
++  SuccessionRow row;
++  row.nav_chain_id = "ftn-" + base::NumberToString(frame_tree_node_id);
++  row.frame_tree_node_id = base::NumberToString(frame_tree_node_id);
++  row.from_document = it->second;
++  row.to_document = new_document_token;
++  row.to_url = url;
++  row.cause = is_reload ? "reload"
++                        : (same_document ? "same-document" : "navigation");
++  row.wall_us = base::NumberToString(
++      (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds());
++  // from_url: best effort from the identity walk's latest snapshot rows.
++  for (const auto& identity : identity_rows_) {
++    if (identity.frame_tree_node_id == row.frame_tree_node_id) {
++      row.from_url = identity.frame_url;
++      break;
++    }
++  }
++  succession_rows_.push_back(std::move(row));
++  it->second = new_document_token;
++}
++
 +bool XTraceCaptureController::DomainObserverRequested() {
 +  const base::CommandLine* command_line =
 +      base::CommandLine::ForCurrentProcess();
@@ -2166,6 +2246,34 @@ index 0000000000..b668f961e4
 +              "\",\"sampled_out\":\"0\"}");
 +  json.append(",\"overflow_intervals\":[]");
 +  // P3-E5 identity crosswalk (manifest-only; event rows stay light).
++  // P5.5 E5: the nav_chain successions ride the SAME section (event rows
++  // gain no fields — the crosswalk-in-manifest decision).
++  json.append(",\"nav_chain\":[");
++  {
++    bool first = true;
++    for (const auto& row : succession_rows_) {
++      if (!first) json.append(",");
++      first = false;
++      json.append("{\"nav_chain_id\":");
++      json.append(base::GetQuotedJSONString(row.nav_chain_id));
++      json.append(",\"frame_tree_node_id\":");
++      json.append(base::GetQuotedJSONString(row.frame_tree_node_id));
++      json.append(",\"from_document\":");
++      json.append(base::GetQuotedJSONString(row.from_document));
++      json.append(",\"to_document\":");
++      json.append(base::GetQuotedJSONString(row.to_document));
++      json.append(",\"from_url\":");
++      json.append(base::GetQuotedJSONString(row.from_url));
++      json.append(",\"to_url\":");
++      json.append(base::GetQuotedJSONString(row.to_url));
++      json.append(",\"cause\":");
++      json.append(base::GetQuotedJSONString(row.cause));
++      json.append(",\"wall_us\":");
++      json.append(base::GetQuotedJSONString(row.wall_us));
++      json.append("}");
++    }
++    json.append("]");
++  }
 +  json.append(",\"identity\":[");
 +  {
 +    {
@@ -2265,10 +2373,10 @@ index 0000000000..b668f961e4
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..5617a5e02d
+index 0000000000..d393b8a6ea
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,300 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2399,6 +2507,29 @@ index 0000000000..5617a5e02d
 +  // P3-E5: identity crosswalk — frame_tree_node -> document token +
 +  // frame URL, captured at manifest time; unresolved entries are
 +  // recorded as such (never guessed).
++  // P5.5 E5 (contract §7): same-frame navigation succession, recorded at
++  // commit time into manifest.identity — event rows gain NO new fields.
++  struct SuccessionRow {
++    std::string nav_chain_id;      // "ftn-<frame_tree_node_id>" (same-frame
++                                   // navigation sequences share the chain)
++    std::string frame_tree_node_id;
++    std::string from_document;     // previous document token (empty on
++                                   // first sighting: no succession emitted)
++    std::string to_document;
++    std::string from_url;
++    std::string to_url;
++    std::string cause;             // reload | navigation | same-document
++    std::string wall_us;
++  };
++  // RenderFrameHostImpl::DidNavigate hook (UI thread). Returns nothing;
++  // records a succession only when an ACTIVE capture knew a DIFFERENT
++  // previous document token for the frame.
++  void AcceptNavigationSuccession(uint32_t frame_tree_node_id,
++                                  const std::string& new_document_token,
++                                  const std::string& url,
++                                  bool is_reload,
++                                  bool same_document);
++
 +  struct IdentityRow {
 +    std::string frame_tree_node_id;
 +    std::string document_token;
@@ -2413,6 +2544,8 @@ index 0000000000..5617a5e02d
 +  std::string last_terminal_reason_;
 +  // P3-E5: identity rows captured on the UI thread for the manifest.
 +  std::vector<IdentityRow> identity_rows_;
++  std::vector<SuccessionRow> succession_rows_;  // writer lock
++  std::map<uint32_t, std::string> last_document_by_ftn_;  // writer lock
 +  uint64_t next_generation_ = 1;  // updateCapture allocations from "1"
 +  std::string status_generation_ = "0";
 +  std::string status_categories_;  // launch categories until first update
