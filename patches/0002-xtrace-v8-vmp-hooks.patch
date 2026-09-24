@@ -9794,10 +9794,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..d7a6c96e
+index 00000000..27f5fb4a
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1309 @@
+@@ -0,0 +1,1335 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9891,7 +9891,8 @@ index 00000000..d7a6c96e
 +// allowed here by design; the runtime predicate never parses).
 +namespace {
 +bool ParseTapWindowsJson(const std::string& json, std::string* pattern,
-+                         std::vector<IgnitionTapWindow>* windows) {
++                         std::vector<IgnitionTapWindow>* windows,
++                         TapBudget* budget) {
 +  // Expected shape (built by tooling, not user-typed):
 +  // {"script_pattern":"x","windows":[{"id":0,"start":1,"end":2},...]}
 +  auto fail = []() { return false; };
@@ -9935,6 +9936,10 @@ index 00000000..d7a6c96e
 +    if (!expect(':')) return fail();
 +    if (key == "script_pattern") {
 +      if (!parse_string(pattern)) return fail();
++    } else if (key == "max_taps") {
++      if (!parse_uint(&budget->max_taps)) return fail();
++    } else if (key == "max_window") {
++      if (!parse_uint(&budget->max_window)) return fail();
 +    } else if (key == "windows") {
 +      if (!expect('[')) return fail();
 +      skip_ws();
@@ -10748,11 +10753,15 @@ index 00000000..d7a6c96e
 +    std::vector<IgnitionTapWindow> tap_windows;
 +    std::atomic<uint32_t> tap_seen{0};
 +    std::atomic<uint32_t> tap_recorded{0};
++    // §6 probe-plan budget: per-activation total (reset only by a NEW
++    // config application — a capture is one activation family).
++    std::atomic<uint32_t> tap_budget_total{0};
 +  };
 +
 +  // Config state (SetTapConfig; isolate thread).
 +  std::string tap_script_pattern;
 +  std::vector<IgnitionTapWindow> tap_windows_config;
++  TapBudget tap_budget;
 +
 +  void CompileTapWindowsFor(Entry* entry) {
 +    entry->tap_windows.clear();
@@ -10762,6 +10771,8 @@ index 00000000..d7a6c96e
 +      return;  // script-pattern discovery filter (url is a filter, not a key)
 +    }
 +    entry->tap_windows = tap_windows_config;
++    // Fresh interval tables reset per-window budget accounting.
++    for (auto& w : entry->tap_windows) w.recorded = 0;
 +    std::sort(entry->tap_windows.begin(), entry->tap_windows.end(),
 +              [](const IgnitionTapWindow& a, const IgnitionTapWindow& b) {
 +                return a.start < b.start;
@@ -10891,9 +10902,11 @@ index 00000000..d7a6c96e
 +  // E2: (re)compile the interval tables of every known entry against
 +  // the new config (config application time — allocation allowed).
 +  void ApplyTapConfig(const std::string& pattern,
-+                      const std::vector<IgnitionTapWindow>& windows) {
++                      const std::vector<IgnitionTapWindow>& windows,
++                      const TapBudget& budget) {
 +    tap_script_pattern = pattern;
 +    tap_windows_config = windows;
++    tap_budget = budget;
 +    for (auto& [slot, entry] : by_slot_) {
 +      CompileTapWindowsFor(entry);
 +    }
@@ -10977,17 +10990,20 @@ index 00000000..d7a6c96e
 +void IgnitionObserverState::SetTapConfig(const std::string& windows_json) {
 +  std::string pattern;
 +  std::vector<IgnitionTapWindow> windows;
-+  if (!ParseTapWindowsJson(windows_json, &pattern, &windows)) {
++  TapBudget budget;
++  if (!ParseTapWindowsJson(windows_json, &pattern, &windows, &budget)) {
 +    return;  // malformed config: taps off (fail-visible at the embedder)
 +  }
-+  registry_->ApplyTapConfig(pattern, windows);
++  registry_->ApplyTapConfig(pattern, windows, budget);
 +}
 +
 +bool IgnitionObserverState::TapHitForTest(uint32_t, uint32_t version,
 +                                          uint32_t offset,
-+                                          uint32_t* window_id) const {
++                                          uint32_t* window_id) {
 +  return registry_->TapHitForTest(version, offset, window_id);
 +}
++
++// static
 +
 +bool IgnitionObserverState::RequestDump(v8::Local<v8::Value> object,
 +                                        const char* anchor_label,
@@ -11023,24 +11039,34 @@ index 00000000..d7a6c96e
 +  return true;
 +}
 +
-+bool IgnitionObserverState::TapPredicate(uint32_t version, uint32_t offset,
-+                                         uint32_t* window_id) {
++IgnitionObserverState::TapResult IgnitionObserverState::TapPredicate(
++    uint32_t version, uint32_t offset, uint32_t* window_id) {
 +  Registry::Entry* entry = registry_->FindByVersion(version);
 +  if (entry == nullptr || entry->tap_windows.empty()) {
-+    return false;
++    return TapResult::kMiss;
 +  }
 +  entry->tap_seen.fetch_add(1, std::memory_order_relaxed);
-+  const auto& w = entry->tap_windows;
++  auto& w = entry->tap_windows;  // mutable: budget counters live in rows
 +  auto it = std::lower_bound(w.begin(), w.end(), offset,
 +                             [](const IgnitionTapWindow& win, uint32_t off) {
 +                               return win.end < off;
 +                             });
 +  if (it == w.end() || it->start > offset) {
-+    return false;
++    return TapResult::kMiss;
 +  }
 +  *window_id = it->id;
++  // §6 probe-plan budgets (first-K plan): per-window cap and per-instance
++  // total. A budget skip tells the caller to ACCOUNT sampled_out — the
++  // tap itself emits NOTHING (never a fabricated value).
++  if (it->recorded >= registry_->tap_budget.max_window ||
++      entry->tap_budget_total.load(std::memory_order_relaxed) >=
++          registry_->tap_budget.max_taps) {
++    return TapResult::kBudgetSkip;
++  }
++  it->recorded++;
++  entry->tap_budget_total.fetch_add(1, std::memory_order_relaxed);
 +  entry->tap_recorded.fetch_add(1, std::memory_order_relaxed);
-+  return true;
++  return TapResult::kHit;
 +}
 +
 +bool IgnitionObserverState::FindEventMetadata(
@@ -11109,10 +11135,10 @@ index 00000000..d7a6c96e
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..b2a87b94
+index 00000000..5d947b90
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,159 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -11179,6 +11205,14 @@ index 00000000..b2a87b94
 +  uint32_t start;
 +  uint32_t end;
 +  uint32_t id;
++  uint32_t recorded = 0;  // budget accounting (per-window cap)
++};
++
++// Probe-plan budgets (contract §6 defaults; the embedder config carries
++// explicit values, clamped to these when absent).
++struct TapBudget {
++  uint32_t max_taps = 2000;
++  uint32_t max_window = 512;
 +};
 +
 +class V8_EXPORT_PRIVATE IgnitionObserverState {
@@ -11199,11 +11233,18 @@ index 00000000..b2a87b94
 +  // table from the parsed pattern + windows. Empty config = taps off.
 +  void SetTapConfig(const std::string& windows_json);
 +
++  enum class TapResult : uint8_t {
++    kMiss = 0,          // outside every window (nothing to report)
++    kHit = 1,           // record the tap
++    kBudgetSkip = 2,    // inside a window but probe-plan budget spent:
++                        // account sampled_out, emit NOTHING
++  };
++
 +  // E2 hot path: the ZERO-ALLOCATION runtime predicate (binary search
 +  // over the instance's compiled interval table; no container touch on
 +  // the miss path beyond the search itself).
-+  bool TapPredicate(uint32_t bytecode_version, uint32_t offset,
-+                    uint32_t* window_id);
++  TapResult TapPredicate(uint32_t bytecode_version, uint32_t offset,
++                         uint32_t* window_id);
 +
 +  // E4: bounded own-data dump of one object graph (see the boundary
 +  // header). Returns false when no dump callback is installed.
@@ -11234,7 +11275,7 @@ index 00000000..b2a87b94
 +  // E2 verification seam: does the entry for (script, version) have a
 +  // compiled window table containing the given offset?
 +  bool TapHitForTest(uint32_t script_id_unused, uint32_t version,
-+                     uint32_t offset, uint32_t* window_id) const;
++                     uint32_t offset, uint32_t* window_id);
 +
 +  class Registry;
 +  Registry* registry();
@@ -12219,7 +12260,7 @@ index 86fafdb8..484c9eb9 100644
  }
  
 diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
-index 1e3f6ed3..ff4ccf68 100644
+index 1e3f6ed3..bccaf8be 100644
 --- a/src/runtime/runtime-trace.cc
 +++ b/src/runtime/runtime-trace.cc
 @@ -2,6 +2,13 @@
@@ -12236,7 +12277,7 @@ index 1e3f6ed3..ff4ccf68 100644
  #include <iomanip>
  
  #include "src/execution/arguments-inl.h"
-@@ -277,5 +284,85 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+@@ -277,5 +284,100 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
  
  #endif  //  V8_DUMPLING
  
@@ -12306,14 +12347,29 @@ index 1e3f6ed3..ff4ccf68 100644
 +      std::memory_order_acquire);
 +  if (tap_cb) {
 +    uint32_t window_id = 0;
-+    if (isolate->xtrace_ignition_observer()->TapPredicate(
-+            metadata.bytecode_version, static_cast<uint32_t>(offset),
-+            &window_id)) {
-+      std::string value_json = xtrace::EncodeTapValue(*accumulator);
-+      tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
-+             static_cast<uint32_t>(script->id()), metadata.bytecode_version,
-+             static_cast<uint32_t>(offset), window_id, value_json.data(),
-+             value_json.size());
++    switch (isolate->xtrace_ignition_observer()->TapPredicate(
++        metadata.bytecode_version, static_cast<uint32_t>(offset),
++        &window_id)) {
++      case xtrace::IgnitionObserverState::TapResult::kHit: {
++        std::string value_json = xtrace::EncodeTapValue(*accumulator);
++        tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
++               static_cast<uint32_t>(script->id()), metadata.bytecode_version,
++               static_cast<uint32_t>(offset), window_id, value_json.data(),
++               value_json.size());
++        break;
++      }
++      case xtrace::IgnitionObserverState::TapResult::kBudgetSkip: {
++        // §6 accounting: the probe-plan budget spent — the EMBEDDER
++        // counts sampled_out from this marker; no value is fabricated.
++        static const char kBudgetSkip[] = "{\"budget_skip\":1}";
++        tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
++               static_cast<uint32_t>(script->id()), metadata.bytecode_version,
++               static_cast<uint32_t>(offset), window_id, kBudgetSkip,
++               sizeof(kBudgetSkip) - 1);
++        break;
++      }
++      case xtrace::IgnitionObserverState::TapResult::kMiss:
++        break;
 +    }
 +  }
 +  return ReadOnlyRoots(isolate).undefined_value();

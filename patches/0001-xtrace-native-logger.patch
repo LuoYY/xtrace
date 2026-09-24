@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..7d40efbdae
+index 0000000000..062198089a
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,652 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -535,6 +535,7 @@ index 0000000000..7d40efbdae
 +    std::optional<String> in_causality,
 +    std::optional<String> in_mode,
 +    std::optional<String> in_tier,
++    std::unique_ptr<protocol::XTrace::ValueObservation> in_valueObservation,
 +    std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback) {
 +  XTraceCaptureController* controller = XTraceCaptureController::Get();
 +  if (!controller) {
@@ -596,6 +597,61 @@ index 0000000000..7d40efbdae
 +  effective->Set("tierLock", base::Value(precise_env.tier_lock));
 +  effective->Set("tierParam",
 +                 base::Value(tier.empty() ? std::string("none") : tier));
++  // P5.5 E7: valueObservation sub-config. Validated browser-side
++  // (window bounds non-negative; budgets clamped to the contract's
++  // probe-plan defaults), serialized ONCE, and carried by every
++  // UpdateConfig push — same generation discipline, no second state
++  // machine. The renderer side treats malformed JSON as taps-off.
++  if (in_valueObservation) {
++    std::string pattern = in_valueObservation->GetScriptPattern();
++    // JSON-quote via the same helper the controller manifest uses.
++    std::string json = "{\"script_pattern\":";
++    {
++      std::string quoted = "\"";
++      for (const char c : pattern) {
++        const unsigned char b = static_cast<unsigned char>(c);
++        if (b == '"' || b == '\\') { quoted.push_back('\\'); quoted.push_back(c); }
++        else if (b < 0x20) {
++          char esc[8]; base::snprintf(esc, sizeof(esc), "\\u%04x", b);
++          quoted.append(esc);
++        } else { quoted.push_back(c); }
++      }
++      quoted.push_back('\"');
++      json += quoted;
++    }
++    json += ",\"windows\":[";
++    const auto* windows = in_valueObservation->GetWindows();
++    bool first = true;
++    if (windows) {
++      for (const auto& w : *windows) {
++        const int id = w->GetId();
++        const int start = w->GetStart();
++        const int end = w->GetEnd();
++        if (start < 0 || end < start) {
++          callback->sendFailure(Response::InvalidRequest(
++              "valueObservation window bounds invalid (id " +
++              base::NumberToString(id) + ")"));
++          return;
++        }
++        if (!first) json += ",";
++        first = false;
++        json += "{\"id\":" + base::NumberToString(id);
++        json += ",\"start\":" + base::NumberToString(start);
++        json += ",\"end\":" + base::NumberToString(end) + "}";
++      }
++    }
++    json += "]";
++    const int max_taps = in_valueObservation->GetMaxTapsPerActivation(2000);
++    const int max_window = in_valueObservation->GetMaxTapsPerWindow(512);
++    json += ",\"max_taps\":" + base::NumberToString(max_taps);
++    json += ",\"max_window\":" + base::NumberToString(max_window);
++    json += "}";
++    if (controller->DomainSetTapWindows(json).empty() &&
++        controller->DomainStateName() != "complete") {
++      // Accepted unless the capture is already settling; the renderer
++      // backfill path delivers it with the next UpdateConfig push.
++    }
++  }
 +  // The P2 contract ties capture setup to launch-time configuration;
 +  // startCapture reports the running capture's identity.
 +  callback->sendSuccess(
@@ -777,10 +833,10 @@ index 0000000000..7d40efbdae
 +}  // namespace content::protocol
 diff --git a/content/browser/devtools/protocol/xtrace_handler.h b/content/browser/devtools/protocol/xtrace_handler.h
 new file mode 100644
-index 0000000000..f3873089cb
+index 0000000000..888fda5228
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,77 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -829,6 +885,7 @@ index 0000000000..f3873089cb
 +      std::optional<String> in_causality,
 +      std::optional<String> in_mode,
 +      std::optional<String> in_tier,
++      std::unique_ptr<protocol::XTrace::ValueObservation> in_valueObservation,
 +      std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback)
 +      override;
 +  void UpdateCapture(
@@ -940,10 +997,10 @@ index db280b0576..cea936ae91 100644
  
 diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
 new file mode 100644
-index 0000000000..46b1cc1b44
+index 0000000000..91c1ada5e0
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace.pdl
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,144 @@
 +# Copyright 2026 The XTrace Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in Chromium's LICENSE file.
@@ -995,6 +1052,24 @@ index 0000000000..46b1cc1b44
 +      array of string scripts
 +      boolean denyInternal
 +
++  # P5.5 E7 (design contract §8): value-observation sub-config riding
++  # the capture lifecycle. Windows are logical-offset intervals on
++  # compilation instances whose script URL matches the discovery pattern
++  # (a filter, never the instance key). Budgets are probe-plan defaults.
++  experimental type ValueObservation extends object
++    properties
++      string scriptPattern
++      array of ValueObservationWindow windows
++      # probe-plan budgets (defaults 2000/512 when omitted)
++      optional integer maxTapsPerActivation
++      optional integer maxTapsPerWindow
++
++  experimental type ValueObservationWindow extends object
++    properties
++      integer id
++      integer start
++      integer end
++
 +  experimental type TerminalInfo extends object
 +    properties
 +      CaptureState state
@@ -1028,6 +1103,9 @@ index 0000000000..46b1cc1b44
 +      # browser (authoritative layer).
 +      optional string mode
 +      optional string tier
++      # P5.5 E7: value-observation sub-config (taps). Rides the SAME
++      # lifecycle/generation discipline — no second capture state machine.
++      optional ValueObservation valueObservation
 +    returns
 +      string captureId
 +      string generation
@@ -1069,10 +1147,10 @@ index 0000000000..46b1cc1b44
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..0d97fccff7
+index 0000000000..2f2d3d8875
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1298 @@
+@@ -0,0 +1,1347 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1583,14 +1661,17 @@ index 0000000000..0d97fccff7
 +    base::StringToUint64(watermark->enqueued, &enqueued);
 +    base::StringToUint64(watermark->dropped, &dropped);
 +    uint64_t scope_overflow = 0;
++    uint64_t sampled_out = 0;
 +    base::StringToUint64(watermark->nadc_partial, &nadc_partial);
 +    base::StringToUint64(watermark->scope_overflow, &scope_overflow);
++    base::StringToUint64(watermark->sampled_out, &sampled_out);
 +    state->final_producer_seq = final_seq;
 +    state->eligible = eligible;
 +    state->enqueued = enqueued;
 +    state->dropped = dropped;
 +    state->nadc_partial = nadc_partial;
 +    state->scope_overflow = scope_overflow;
++    state->sampled_out = sampled_out;
 +    state->assets_out = watermark->assets_out;
 +    state->watermark_received = true;
 +    state->pipe_alive = false;  // watermark is the pipe's last word
@@ -1632,6 +1713,7 @@ index 0000000000..0d97fccff7
 +        status_observer_scope_.context_patterns,
 +        status_observer_scope_.script_patterns,
 +        status_observer_scope_.deny_internal,
++        status_tap_windows_json_,
 +        base::BindOnce([](bool distributed) {}));
 +  }
 +}
@@ -1912,6 +1994,7 @@ index 0000000000..0d97fccff7
 +              remote->UpdateConfig(
 +                  generation, categories, scope.context_patterns,
 +                  scope.script_patterns, scope.deny_internal,
++                  weak->status_tap_windows_json_,
 +                  base::BindOnce([](bool distributed) {}));
 +            }
 +          },
@@ -1995,6 +2078,46 @@ index 0000000000..0d97fccff7
 +  const base::CommandLine* command_line =
 +      base::CommandLine::ForCurrentProcess();
 +  return command_line->HasSwitch("xtrace-ignition-observer");
++}
++
++std::string XTraceCaptureController::DomainSetTapWindows(
++    const std::string& tap_windows_json) {
++  // P5.5 E7: store, then ACTIVELY push to every registered renderer —
++  // unlike categories (which ride the next updateCapture), the tap
++  // config arrives mid-capture via startCapture and must reach already
++  // registered processes immediately. The push runs on the writer
++  // runner where the control remotes are bound (mojo sequence checker),
++  // mirroring DomainUpdateCapture's distribution discipline.
++  {
++    base::AutoLock lock(writer_lock_);
++    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
++      return std::string();
++    }
++    status_tap_windows_json_ = tap_windows_json;
++  }
++  WriterRunner()->PostTask(
++      FROM_HERE,
++      base::BindOnce(
++          [](base::WeakPtr<XTraceCaptureController> weak) {
++            if (!weak) {
++              return;
++            }
++            base::AutoLock lock(weak->writer_lock_);
++            for (auto& [epoch, remote] : weak->control_remotes_by_epoch_) {
++              remote->UpdateConfig(
++                  weak->status_generation_, weak->status_categories_,
++                  weak->status_observer_scope_.context_patterns,
++                  weak->status_observer_scope_.script_patterns,
++                  weak->status_observer_scope_.deny_internal,
++                  weak->status_tap_windows_json_,
++                  base::BindOnce([](bool distributed) {}));
++            }
++          },
++          weak_factory_.GetWeakPtr()));
++  {
++    base::AutoLock lock(writer_lock_);
++    return status_generation_;
++  }
 +}
 +
 +base::FilePath XTraceCaptureController::DomainManifestPath() {
@@ -2204,6 +2327,10 @@ index 0000000000..0d97fccff7
 +                // scope — reported beside the drop counters.
 +                ",\"scope_overflow\":" +
 +                null_or(state->watermark_received, state->scope_overflow) +
++                // P5.5 §6: budget-skipped taps — the eligible equation's
++                // third term (schema v1.3).
++                ",\"sampled_out\":" +
++                null_or(state->watermark_received, state->sampled_out) +
 +                // Writer-side counters are measured for every producer.
 +                ",\"accepted\":\"" + base::NumberToString(state->accepted) +
 +                "\",\"written\":\"" + base::NumberToString(state->written) +
@@ -2373,10 +2500,10 @@ index 0000000000..0d97fccff7
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..d393b8a6ea
+index 0000000000..225668b324
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,307 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2501,6 +2628,10 @@ index 0000000000..d393b8a6ea
 +    std::vector<std::string> script_patterns;
 +    bool deny_internal = true;
 +  };
++  // P5.5 E7: valueObservation sub-config — serialized tap-window JSON
++  // carried by every UpdateConfig push (generation-disciplined).
++  std::string DomainSetTapWindows(const std::string& tap_windows_json);
++
 +  std::string DomainUpdateCapture(const std::string& categories,
 +                                  const ObserverScope* observer_scope);
 +
@@ -2550,6 +2681,8 @@ index 0000000000..d393b8a6ea
 +  std::string status_generation_ = "0";
 +  std::string status_categories_;  // launch categories until first update
 +  ObserverScope status_observer_scope_;  // N3-part2 selector (backfill)
++  // P5.5 E7: valueObservation sub-config (serialized tap-window JSON).
++  std::string status_tap_windows_json_ GUARDED_BY(writer_lock_);
 +
 +  // DP5 shutdown evidence: synchronous, idempotent finalization as
 +  // incomplete/browser-shutdown using only data already at the writer (no
@@ -2661,6 +2794,7 @@ index 0000000000..d393b8a6ea
 +  uint64_t dropped = 0;
 +  uint64_t nadc_partial = 0;  // DP1 (P5): TryEnter-rejected NADC entries
 +  uint64_t scope_overflow = 0;  // P5-R2a/R5: unattributable marks dropped
++  uint64_t sampled_out = 0;  // P5.5 §6: budget-skipped value taps
 +  uint32_t assets_out = 0;
 +  bool watermark_received = false;
 +  // F1/B7: highest config_generation observed in this producer's accepted
@@ -3038,10 +3172,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..75c4a6df83
+index 0000000000..f5c8077588
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,107 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -3106,6 +3240,9 @@ index 0000000000..75c4a6df83
 +  // P5-R2a/R5 (chief review): outcome marks dropped for lack of an
 +  // attributable scope (TLS depth overflow region) — the recorded gap.
 +  string scope_overflow;
++  // P5.5 §6: budget-skipped value taps (probe-plan accounting; the
++  // eligible equation extension lands with schema v1.3).
++  string sampled_out;
 +};
 +
 +// Data plane: one pipe per producer thread. Batch is the only event path
@@ -3143,7 +3280,8 @@ index 0000000000..75c4a6df83
 +  UpdateConfig(string generation, string categories,
 +               array<string> observerContextPatterns,
 +               array<string> observerScriptPatterns,
-+               bool observerDenyInternal) => (bool distributed);
++               bool observerDenyInternal,
++               string tapWindowsJson) => (bool distributed);
 +};
 diff --git a/third_party/blink/public/platform/xtrace_control.h b/third_party/blink/public/platform/xtrace_control.h
 new file mode 100644
@@ -15341,10 +15479,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..259c5b998f
+index 0000000000..b3c74980ad
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,394 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15352,6 +15490,7 @@ index 0000000000..259c5b998f
 +#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +
 +#include <atomic>
++#include <cstring>
 +#include <optional>
 +#include <set>
 +#include <string_view>
@@ -15520,6 +15659,11 @@ index 0000000000..259c5b998f
 +void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
 +                        uint32_t bytecode_version,
 +                        const char* metadata_json, size_t metadata_len);
++void OnIgnitionTap(v8::Isolate* isolate, uint32_t script_id,
++                   uint32_t bytecode_version, uint32_t bytecode_offset,
++                   uint32_t window_id, const char* value_json,
++                   size_t value_len);
++extern std::string g_tap_windows_config;
 +
 +IgnitionScope* InstallScope(v8::Isolate* isolate) {
 +  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
@@ -15543,7 +15687,46 @@ index 0000000000..259c5b998f
 +  // lifecycle as the event callback (unregistered in WillBeDestroyed).
 +  v8::internal::xtrace::IgnitionObserverSetMetadataCallback(
 +      isolate, &OnIgnitionMetadata);
++  // P5.5 E7: value taps — same lifecycle, same scope-state second line.
++  v8::internal::xtrace::IgnitionObserverSetTapCallback(isolate,
++                                                       &OnIgnitionTap);
++  if (!g_tap_windows_config.empty()) {
++    v8::internal::xtrace::IgnitionObserverSetTapConfig(
++        isolate, g_tap_windows_config.c_str());
++  }
 +  return scope;
++}
++
++std::atomic<uint64_t> g_tap_events_observed{0};
++// Config-time cache (last applied JSON) so scopes installed AFTER a
++// config push still get their tables compiled (F1/B7 backfill parity).
++std::string g_tap_windows_config;
++base::Lock g_tap_config_lock;
++
++void OnIgnitionTap(v8::Isolate* isolate, uint32_t script_id,
++                   uint32_t bytecode_version, uint32_t bytecode_offset,
++                   uint32_t window_id, const char* value_json,
++                   size_t value_len) {
++  g_tap_events_observed.fetch_add(1, std::memory_order_relaxed);
++  // §6 budget accounting first: the V8-side marker means the probe-plan
++  // budget was spent — count sampled_out, emit NOTHING.
++  if (value_len >= 14 && memcmp(value_json, "{\"budget_skip\"", 14) == 0) {
++    if (XTraceThreadProducer* producer =
++            XTraceThreadProducer::CurrentIfExists()) {
++      producer->RecordSampledOut();
++    }
++    return;
++  }
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->Stopped() || scope->stack.empty() ||
++      !scope->stack.back().selected) {
++    return;  // second line: scope state beyond the generated-code gate
++  }
++  // Facts only (contract §4): slot/timepoint/instance/window + the
++  // V8-side bounded value encoding; value_role stays "unclassified" —
++  // interpretation belongs to the analysis layer.
++  XTraceLogger::LogValueTap(script_id, bytecode_version, bytecode_offset,
++                            window_id, value_json, value_len);
 +}
 +
 +void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
@@ -15674,19 +15857,41 @@ index 0000000000..259c5b998f
 +  RecomputeGate(isolate, scope);
 +}
 +
++void IgnitionBridge::ApplyTapWindowsConfig(
++    const std::string& tap_windows_json) {
++  // Config time: allocation allowed. Every LIVE scope re-applies; scopes
++  // created later read the cached config at install (InstallScope).
++  base::AutoLock lock(g_tap_config_lock);
++  g_tap_windows_config = tap_windows_json;
++  base::AutoLock scopes_lock(*IgnitionScope::scopes_lock());
++  for (IgnitionScope* scope : *IgnitionScope::scopes()) {
++    if (scope->isolate_) {
++      v8::internal::xtrace::IgnitionObserverSetTapConfig(
++          scope->isolate_.get(), tap_windows_json.c_str());
++    }
++  }
++}
++
++uint64_t IgnitionBridge::TapEventsObserved() {
++  return g_tap_events_observed.load(std::memory_order_relaxed);
++}
++
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
 new file mode 100644
-index 0000000000..0059684fbc
+index 0000000000..6aad3dc449
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,60 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_BRIDGE_H_
 +#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_BRIDGE_H_
++
++#include <cstdint>
++#include <string>
 +
 +#include "third_party/blink/renderer/platform/platform_export.h"
 +
@@ -15724,6 +15929,14 @@ index 0000000000..0059684fbc
 +  // always has a pair to pop; the gate reflects the innermost SELECTED
 +  // activation of THIS isolate.
 +  static void OnActivationBegin(const char* frame_url);
++
++  // P5.5 E7: valueObservation sub-config — config-time (allocation
++  // allowed): parse once, compile per-isolate interval tables on every
++  // LIVE scope; runtime gate + search stay zero-allocation. Malformed
++  // JSON = taps off (fail-visible at the browser, which validated).
++  static void ApplyTapWindowsConfig(const std::string& tap_windows_json);
++  // E7 evidence seam: taps observed by this process (test/drivers).
++  static uint64_t TapEventsObserved();
 +  static void OnActivationEnd();
 +};
 +
@@ -15732,15 +15945,17 @@ index 0000000000..0059684fbc
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
 new file mode 100644
-index 0000000000..88d0774ac2
+index 0000000000..57f87d5b3b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,79 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#include "third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h"
++
++#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +
 +#include "base/functional/bind.h"
 +#include "base/task/sequenced_task_runner.h"
@@ -15783,7 +15998,9 @@ index 0000000000..88d0774ac2
 +    const std::string& generation, const std::string& categories,
 +    const std::vector<std::string>& observer_context_patterns,
 +    const std::vector<std::string>& observer_script_patterns,
-+    bool observer_deny_internal, UpdateConfigCallback callback) {
++    bool observer_deny_internal,
++    const std::string& tap_windows_json,
++    UpdateConfigCallback callback) {
 +  // P3-E4: swap the process-wide effective config; every subsequent event
 +  // stamps the new generation. Confirmation evidence is the events
 +  // themselves — no fabricated applied-ACK (draft §8.3). N3-part2: the
@@ -15793,6 +16010,10 @@ index 0000000000..88d0774ac2
 +  scope.script_patterns = observer_script_patterns;
 +  scope.deny_internal = observer_deny_internal;
 +  XTraceProducerHub::Get()->SetCurrentConfig(generation, categories, scope);
++  // P5.5 E7: the valueObservation sub-config rides the same generation
++  // push — config time (allocation allowed), instances compile their
++  // interval tables from it.
++  xtrace::IgnitionBridge::ApplyTapWindowsConfig(tap_windows_json);
 +  std::move(callback).Run(true /* distributed */);
 +}
 +
@@ -15809,10 +16030,10 @@ index 0000000000..88d0774ac2
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
 new file mode 100644
-index 0000000000..59d49da5e7
+index 0000000000..847f5a891a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,49 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15851,6 +16072,7 @@ index 0000000000..59d49da5e7
 +      const std::vector<std::string>& observer_context_patterns,
 +      const std::vector<std::string>& observer_script_patterns,
 +      bool observer_deny_internal,
++      const std::string& tap_windows_json,
 +      UpdateConfigCallback callback) override;
 +
 + private:
@@ -16247,10 +16469,10 @@ index 0000000000..5ddb033146
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..6e41608d61
+index 0000000000..af4b8c92c2
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,509 @@
+@@ -0,0 +1,511 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16741,6 +16963,8 @@ index 0000000000..6e41608d61
 +      nadc_partial_.load(std::memory_order_relaxed));
 +  watermark->scope_overflow = base::NumberToString(
 +      scope_overflow_.load(std::memory_order_relaxed));
++  watermark->sampled_out = base::NumberToString(
++      sampled_out_.load(std::memory_order_relaxed));
 +  host()->SubmitWatermark(std::move(watermark));
 +}
 +
@@ -16762,10 +16986,10 @@ index 0000000000..6e41608d61
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..ad9abdee08
+index 0000000000..10a690e685
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,277 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16987,6 +17211,13 @@ index 0000000000..ad9abdee08
 +
 +  // P5-R2a/R5: marks dropped for lack of an attributable scope.
 +  void RecordScopeOverflow() { ++scope_overflow_; }
++
++  // P5.5 §6: budget-skipped taps (probe-plan accounting; equation
++  // extension eligible = enqueued + dropped + sampled_out).
++  void RecordSampledOut() { ++sampled_out_; }
++  uint64_t sampled_out() const {
++    return sampled_out_.load(std::memory_order_relaxed);
++  }
 +  uint64_t scope_overflow() const {
 +    return scope_overflow_.load(std::memory_order_relaxed);
 +  }
@@ -17025,6 +17256,7 @@ index 0000000000..ad9abdee08
 +  uint64_t dropped_ = 0;
 +  std::atomic<uint64_t> nadc_partial_{0};
 +  std::atomic<uint64_t> scope_overflow_{0};
++  std::atomic<uint64_t> sampled_out_{0};
 +  uint32_t assets_out_ = 0;
 +  bool settled_ = false;
 +  bool overflowed_ = false;

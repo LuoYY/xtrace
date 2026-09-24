@@ -307,10 +307,10 @@ index ecb68ce4e2..e28e8b1b32 100644
  void V8ScriptRunner::ReportException(v8::Isolate* isolate,
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 new file mode 100644
-index 0000000000..fbe69094c3
+index 0000000000..87aafea7a7
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -0,0 +1,1043 @@
+@@ -0,0 +1,1085 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1148,6 +1148,48 @@ index 0000000000..fbe69094c3
 +  return t_last_event_admitted;
 +}
 +
++void XTraceLogger::LogValueTap(uint32_t script_id,
++                                uint32_t bytecode_version,
++                                uint32_t bytecode_offset,
++                                uint32_t window_id,
++                                const char* value_json,
++                                size_t value_len) {
++  const XTraceConfig& config = GetCachedConfig();
++  if (!config.enabled ||
++      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
++    return;
++  }
++  auto snapshot = EntrySnapshot();
++  if (!CategoriesInclude(snapshot->categories, "reverse")) {
++    return;
++  }
++  std::string extra;
++  extra.append("\"value_tap\":{");
++  extra.append("\"channel\":\"impl\",");
++  extra.append("\"value_role\":\"unclassified\",");
++  extra.append("\"slot\":\"accumulator\",");
++  extra.append("\"timepoint\":\"pre-dispatch\",");
++  extra.append("\"instance\":\"");
++  extra.append(base::NumberToString(script_id));
++  extra.append("/");
++  extra.append(base::NumberToString(bytecode_version));
++  extra.append("\",");
++  extra.append("\"offset\":\"");
++  extra.append(base::NumberToString(bytecode_offset));
++  extra.append("\",\"window_id\":\"");
++  extra.append(base::NumberToString(window_id));
++  extra.append("\",\"value\":");
++  if (value_json && value_len > 0) {
++    extra.append(value_json, value_len);
++  } else {
++    extra.append("{\"state\":\"unavailable\",\"reason\":\"empty-encoding\"}");
++  }
++  extra.append("}");
++  EmitEvent(config, "reverse", "call", "ValueTap.observe", String("[]"),
++            /*capture_stack=*/false, std::string_view(), std::string_view(),
++            nullptr, nullptr, nullptr, nullptr, extra, snapshot->generation);
++}
++
 +void XTraceLogger::LogGeneratedOutcome(uint64_t call_token,
 +                                        const char* outcome,
 +                                        int selected_overload,
@@ -1356,10 +1398,10 @@ index 0000000000..fbe69094c3
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 new file mode 100644
-index 0000000000..e812fbd46a
+index 0000000000..35eb960f17
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,150 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1433,6 +1475,16 @@ index 0000000000..e812fbd46a
 +  // "lenient-receiver" | "early-return"
 +  // selected_overload: 0-based index recorded by RecordOverload on a
 +  // dispatcher-routed call; -1 when the entry had no routing fact.
++  // P5.5 E7: value-tap fact event (channel "impl" — engine observer
++  // family). value_json is the V8-side bounded layer-1 encoding; the
++  // event records slot/timepoint/instance/window with value_role
++  // "unclassified" (facts only, contract §4).
++  static void LogValueTap(uint32_t script_id,
++                          uint32_t bytecode_version,
++                          uint32_t bytecode_offset,
++                          uint32_t window_id,
++                          const char* value_json,
++                          size_t value_len);
 +  static void LogGeneratedOutcome(uint64_t call_token,
 +                                  const char* outcome,
 +                                  int selected_overload = -1,

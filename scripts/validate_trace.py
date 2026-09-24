@@ -2187,6 +2187,25 @@ def validate_v3_webidl(events: list[dict],
     for index, event in enumerate(events):
         entry = event.get("webidl_entry")
         outcome = event.get("webidl_outcome")
+        tap = event.get("value_tap")
+        if tap is not None:
+            # P5.5 v1.3: value-tap fact events (impl channel, engine
+            # family). Facts only — interpretation is the analysis
+            # layer's, so the role stays unclassified.
+            if event.get("channel") != "impl":
+                raise TraceValidationError(
+                    f"Event {index}: value_tap event top-level channel"
+                    " must be 'impl'")
+            for field in ("channel", "value_role", "slot", "timepoint",
+                          "instance", "offset", "window_id", "value"):
+                if field not in tap:
+                    raise TraceValidationError(
+                        f"Event {index}: value_tap missing {field}")
+            if tap["value_role"] != "unclassified":
+                raise TraceValidationError(
+                    f"Event {index}: value_tap.value_role must stay"
+                    " 'unclassified'")
+            continue
         if entry is None and outcome is None:
             # DP2 (review fix 4): non-webidl renderer events carry a real
             # top-level channel. Legacy captures without the field stay
