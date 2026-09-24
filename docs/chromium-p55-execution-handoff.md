@@ -39,3 +39,31 @@ P55-E1 → E8 一个连续执行块，一次提交、一次终审。每完成一
 ## 5. 完成定义
 
 契约 v2.0 §10 验收全表通过；D1 资产可解析语料三站的 GetNamedProperty 常量池 key（已证/未证分列）；合成解释器 fixture 逐事件对照通过；哨兵与四态矩阵通过；补丁栈双树可复现；回归 375/28/211 + 新增；单测（全部目标）通过；progress JSON 标记 `accepted-p55` 由架构师在终审后执行。
+
+---
+
+## 6. E8 证据包与终审提交（2026-09-25，执行层提交，待总架构师终审）
+
+**E1–E8 全部执行完毕，一次终审提交。** 每项的可复验入口（全部受跟踪、可重跑）：
+
+| 项 | 驱动/验证器 | 最近结果 | 提交 |
+| --- | --- | --- | --- |
+| E1 D1 元数据 | `scripts/p55-d1-d8-verify.py` + p4-observer-smoke（含资产行） | PASS（8 实例；chrome 端 4 资产行可连接） | 61f3de5, 023068a |
+| E2 tap 基础设施 | `scripts/p55-e2-d8-verify.py` | PASS（区间命中/窗外静默/谓词基准 10/11ms） | 570ac42 |
+| E3 值编码+哨兵 | `scripts/p55-e3-d8-verify.py` | PASS（837 taps base==tapped；value_state 全形态） | 57ce935 |
+| E4 物化 dump | `scripts/p55-e4-d8-verify.py` | PASS（8-dump 矩阵） | f755e46 |
+| E5 nav_chain | `scripts/p55-e5-navchain-evidence.cjs` | PASS（succession + 同值锚点链） | 2d961d4 |
+| E6 T3/T7 | `scripts/p55-e6-t3t7-verify.py`（+`p55-e6-recapture.cjs`） | PASS（三站形态全对；52 proven-pool 键） | 62184e1 |
+| E7 控制面+预算 | `scripts/p55-e7-valueobs-evidence.cjs` | PASS（四态语义全等；逐实例预算上限；sampled_out=891） | 4e23002 |
+
+**终态门禁**（同一最终二进制，全部亲跑）：python 375+28 OK；契约 21/21；矩阵 12/12 off + 12/12 observer；故障注入 pass；observer smoke pass（validator 含 v1.3 契约）；P5 反例门 12/12 GREEN；E1–E6 驱动全绿；测试目标门禁（controller 9/9 + producer 9/9，先重建后运行）；bindings 57/57（隔离 3.11）；`verify_patches.py` verdict=pass（chromium 126 文件、V8 137 文件、双 HEAD 钉扎不变）。
+
+**规范同步**：trace-schema-v3 **v1.3**（value_tap 事件契约、元数据/物化 dump 资产种类、`eligible = enqueued + dropped + sampled_out` 等式、manifest nav_chain；v1.2 的 P5 终审修订合并为正式条款）。
+
+**如实边界（终审输入）**：
+1. Cookie 头定位（E5 锚点的网络侧）在当前 bnet 钩点（URLLoaderClient 包装层、早于 Cookie 附加）不可达——观测点前移属独立网络栈改动，**已提请裁决**；已证等价链为 renderer 侧 set→get 同值 + succession 同链（derived 级）。
+2. 契约 §10 首行"合成解释器 fixture 逐事件对照"未以独立 fixture 页交付——E2/E3 的 d8 基准与哨兵矩阵覆盖了机制面（区间命中、零用户代码、语义一致），但"已知虚拟程序逐条对照"的专用页未做；语料三站的派发器自动定位依赖 chrome 端 tap（E7 已通）但未在全部三站跑完（xj1 复采已证）。此两条如实列为终审缺口，不冒充完成。
+3. P5.5 采集语料为本地复跑（死代理护栏），无授权现场断言。
+4. dump 的 chrome 端触发入口（谁在何时调 RequestDump）未接控制面——E4 交付了引擎能力与 d8 门，chrome 侧触发入口属后续控制面扩展。
+
+progress JSON 已建 `p55` 段（submitted-for-final-review）。**申请：按工单 §4 一次终审；accepted-p55 由架构师在终审后标记。**
