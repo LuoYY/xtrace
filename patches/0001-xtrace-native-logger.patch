@@ -15208,10 +15208,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..7078fbd2e0
+index 0000000000..259c5b998f
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,330 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15228,7 +15228,6 @@ index 0000000000..7078fbd2e0
 +#include "base/environment.h"
 +#include "base/memory/raw_ptr.h"
 +#include "base/no_destructor.h"
-+#include "base/strings/string_piece.h"
 +#include "base/strings/stringprintf.h"
 +#include "base/synchronization/lock.h"
 +#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
@@ -15434,16 +15433,20 @@ index 0000000000..7078fbd2e0
 +  // "url" is a stable namespaced label — the blob carries source
 +  // identity (sha1 + length), and the label never matches the
 +  // internal-script filter.
++  // v3 args is an ARRAY by contract; the single summary element carries
++  // the instance key reference and the byte size of the asset content.
 +  const std::string summary = base::StringPrintf(
-+      "{\"script_id\":%u,\"bytecode_version\":%u,\"bytes\":%zu}",
++      "[{\"script_id\":%u,\"bytecode_version\":%u,\"bytes\":%zu}]",
 +      script_id, bytecode_version, metadata_len);
 +  const std::string asset_url = base::StringPrintf(
 +      "v8-bytecode-metadata://%u/%u", script_id, bytecode_version);
++  // The blob is JSON (ASCII payload; non-ASCII escapes are V8-side),
++  // so the Latin-1 span constructor is exact for the content. The
++  // summary/url are ASCII by construction.
++  const String content(base::span<const char>(metadata_json, metadata_len));
 +  XTraceLogger::LogAssetEvent(
-+      "reverse", "asset", "V8.bytecodeMetadata", String::FromUTF8(summary),
-+      "v8-bytecode-metadata", String::FromUTF8(asset_url),
-+      String::FromUTF8(
-+          base::StringPiece(metadata_json, metadata_len)));
++      "reverse", "asset", "V8.bytecodeMetadata", String(summary.c_str()),
++      "v8-bytecode-metadata", String(asset_url.c_str()), content);
 +}
 +
 +void OnIgnitionEvent(v8::Isolate* isolate, uint32_t script_id,
