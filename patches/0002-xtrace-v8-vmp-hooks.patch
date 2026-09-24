@@ -35,10 +35,10 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-generator.cc",
 diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
 new file mode 100644
-index 00000000..dbeaa584
+index 00000000..3a0de6e3
 --- /dev/null
 +++ b/include/xtrace_observer_boundary.h
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,120 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -128,6 +128,29 @@ index 00000000..dbeaa584
 +                                              IgnitionTapCallback callback);
 +V8_EXPORT void IgnitionObserverSetTapConfig(v8::Isolate* isolate,
 +                                            const char* windows_json);
++
++// P5.5 E4 (design contract §5): materialized dump. The embedder requests
++// a bounded snapshot of ONE object graph; V8 walks OWN-DATA slots only
++// (fast/dictionary data properties, array element stores, TypedArray /
++// ArrayBuffer backing bytes, flattened string content, bounded BigInt)
++// and NEVER calls user code — accessors, Proxy/interceptor targets,
++// exotic objects and host objects are skipped WITH A RECORDED REASON.
++// Budget axes: max nodes, total bytes read, per-value bytes, per-dump
++// bytes, work counter; the dump reports actual saved vs original sizes
++// (truncation quadruple semantics) and stops marked partial on budget
++// exhaustion. Cycles emit a back-reference to the first-seen node id.
++using IgnitionDumpCallback = void (*)(v8::Isolate* isolate,
++                                      const char* anchor_label,
++                                      uint32_t window_id,
++                                      const char* dump_json,
++                                      size_t dump_len);
++V8_EXPORT void IgnitionObserverSetDumpCallback(
++    v8::Isolate* isolate, IgnitionDumpCallback callback);
++// Returns false when the observer/dump path is unavailable.
++V8_EXPORT bool IgnitionObserverRequestDump(v8::Isolate* isolate,
++                                           class v8::Local<v8::Value> object,
++                                           const char* anchor_label,
++                                           uint32_t window_id);
 +V8_EXPORT void IgnitionObserverSetGate(v8::Isolate* isolate,
 +                                        uint32_t open);
 +
@@ -9108,7 +9131,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..d6390a29 100644
+index fc6d62e2..c802db46 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9119,7 +9142,7 @@ index fc6d62e2..d6390a29 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,69 @@
+@@ -40,6 +41,87 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9144,6 +9167,24 @@ index fc6d62e2..d6390a29 100644
 +  FILE* f = fopen(path.c_str(), "wb");
 +  if (!f) return;
 +  fwrite(metadata_json, 1, metadata_len, f);
++  fclose(f);
++}
++std::string g_dump_dir;
++std::atomic<uint64_t> g_dump_count{0};
++void D8DumpCallback(v8::Isolate*, const char* anchor_label,
++                    uint32_t window_id, const char* dump_json,
++                    size_t dump_len) {
++  const uint64_t n = g_dump_count.fetch_add(1, std::memory_order_relaxed);
++  printf("DUMP n=%llu label=%s window=%u len=%zu\n",
++         static_cast<unsigned long long>(n),
++         anchor_label ? anchor_label : "-", window_id, dump_len);
++  if (g_dump_dir.empty()) return;
++  char path[512];
++  snprintf(path, sizeof(path), "%s/dump-%03llu.json", g_dump_dir.c_str(),
++           static_cast<unsigned long long>(n));
++  FILE* f = fopen(path, "wb");
++  if (!f) return;
++  fwrite(dump_json, 1, dump_len, f);
 +  fclose(f);
 +}
 +std::atomic<uint64_t> g_tap_events{0};
@@ -9189,7 +9230,39 @@ index fc6d62e2..d6390a29 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -7037,6 +7101,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -4602,6 +4684,31 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+                        FunctionTemplate::New(isolate, Version));
+ 
+   global_template->Set(isolate, "print", FunctionTemplate::New(isolate, Print));
++#ifdef V8_XTRACE_IGNITION_OBSERVER
++  // P5.5 E4: bounded own-data dump (d8-first). No-op unless the observer
++  // smoke wiring installed the dump callback.
++  global_template->Set(
++      isolate, "xtraceDump",
++      FunctionTemplate::New(
++          isolate,
++          [](const v8::FunctionCallbackInfo<v8::Value>& info) {
++            if (info.Length() < 1) return;
++            const char* label_c = "unlabeled";
++            std::string label_storage;
++            if (info.Length() >= 2 && info[1]->IsString()) {
++              label_storage = *v8::String::Utf8Value{
++                  info.GetIsolate(), info[1].As<v8::String>()};
++              label_c = label_storage.c_str();
++            }
++            uint32_t window_id = 0;
++            if (info.Length() >= 3 && info[2]->IsUint32()) {
++              window_id = info[2].As<v8::Uint32>()->Value();
++            }
++            const bool ok = v8::internal::xtrace::IgnitionObserverRequestDump(
++                info.GetIsolate(), info[0], label_c, window_id);
++            info.GetReturnValue().Set(ok);
++          }));
++#endif
+   global_template->Set(isolate, "printErr",
+                        FunctionTemplate::New(isolate, PrintErr));
+   global_template->Set(isolate, "write",
+@@ -7037,6 +7144,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9202,7 +9275,7 @@ index fc6d62e2..d6390a29 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +7971,23 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +8014,25 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9215,6 +9288,8 @@ index fc6d62e2..d6390a29 100644
 +                                                   &D8MetadataCallback);
 +    g_metadata_dir = i::v8_flags.xtrace_metadata_dir;
 +    i::xtrace::IgnitionObserverSetTapCallback(isolate, &D8TapCallback);
++    i::xtrace::IgnitionObserverSetDumpCallback(isolate, &D8DumpCallback);
++    g_dump_dir = i::v8_flags.xtrace_dump_dir;
 +    if (i::v8_flags.xtrace_tap_windows && *i::v8_flags.xtrace_tap_windows) {
 +      i::xtrace::IgnitionObserverSetTapConfig(
 +          isolate, i::v8_flags.xtrace_tap_windows);
@@ -9472,10 +9547,10 @@ index 9a3a6de3..c092e2ba 100644
    if (IsErrorStackData(*lookup.error_stack)) {
      auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index bf210a58..b62a5a4d 100644
+index bf210a58..17e00b18 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -252,6 +252,14 @@
+@@ -252,6 +252,15 @@
  //
  #define FLAG FLAG_FULL
  
@@ -9485,12 +9560,13 @@ index bf210a58..b62a5a4d 100644
 +// P5.5 D1: directory receiving one JSON metadata file per compilation
 +// instance (d8-first verification; never the P0 baseline outputs).
 +DEFINE_STRING(xtrace_metadata_dir, "", "write D1 bytecode-metadata assets to this directory")
++DEFINE_STRING(xtrace_dump_dir, "", "P5.5 E4: directory receiving materialized-dump JSON files")
 +DEFINE_STRING(xtrace_tap_windows, "", "P5.5 E2 tap window config JSON: {\"script_pattern\":\"...\",\"windows\":[{\"id\":0,\"start\":N,\"end\":M},...]}")
 +
  // Experimental features: Features that are still considered experimental and
  // which are not ready for fuzz testing should be defined using this macro. The
  // feature will then imply --experimental, which will indicate to the user that
-@@ -1301,6 +1309,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
+@@ -1301,6 +1310,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
  #undef FLAG
  #if V8_ENABLE_SPARKPLUG
  #define FLAG FLAG_FULL
@@ -9499,7 +9575,7 @@ index bf210a58..b62a5a4d 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -1350,6 +1360,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1350,6 +1361,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9508,7 +9584,7 @@ index bf210a58..b62a5a4d 100644
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
-@@ -3899,6 +3911,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
+@@ -3899,6 +3912,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
  #undef FLAG
  #ifdef ENABLE_GDB_JIT_INTERFACE
  #define FLAG FLAG_FULL
@@ -9517,7 +9593,7 @@ index bf210a58..b62a5a4d 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3928,6 +3942,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
+@@ -3928,6 +3943,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
  #undef FLAG
  #ifdef DEBUG
  #define FLAG FLAG_FULL
@@ -9526,7 +9602,7 @@ index bf210a58..b62a5a4d 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3989,6 +4005,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
+@@ -3989,6 +4006,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9535,7 +9611,7 @@ index bf210a58..b62a5a4d 100644
  // log.cc
  DEFINE_STRING(logfile, "v8.log",
                "Specify the name of the log file, use '-' for console, '+' for "
-@@ -4158,6 +4176,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
+@@ -4158,6 +4177,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
  #undef FLAG
  #ifdef ENABLE_DISASSEMBLER
  #define FLAG FLAG_FULL
@@ -9544,7 +9620,7 @@ index bf210a58..b62a5a4d 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -4191,6 +4211,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
+@@ -4191,6 +4212,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9553,7 +9629,7 @@ index bf210a58..b62a5a4d 100644
  //
  // Predictable mode related flags.
  //
-@@ -4441,6 +4463,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
+@@ -4441,6 +4464,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
  
  #ifdef VERIFY_PREDICTABLE
  #define FLAG FLAG_FULL
@@ -9718,10 +9794,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..ead7a92a
+index 00000000..d7a6c96e
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,883 @@
+@@ -0,0 +1,1309 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9747,9 +9823,14 @@ index 00000000..ead7a92a
 +#include "src/interpreter/bytecodes.h"
 +#include "src/numbers/conversions.h"
 +#include "src/objects/bytecode-array-inl.h"
++#include "src/objects/dictionary-inl.h"
++#include "src/objects/js-array-buffer-inl.h"
++#include "src/objects/js-objects-inl.h"
++#include "src/objects/objects-inl.h"
 +#include "src/objects/bytecode-array.h"
 +#include "src/objects/objects.h"
 +#include "src/codegen/source-position-table.h"
++#include "src/api/api-inl.h"
 +#include "src/codegen/source-position-table.h"
 +#include "src/objects/string.h"
 +
@@ -9957,11 +10038,393 @@ index 00000000..ead7a92a
 +  return "{\"t\":\"other\",\"state\":\"unavailable\",\"reason\":\"non-scalar-slot\"}";
 +}
 +
++
++namespace {
++
++// ---- P5.5 E4: bounded own-data materialized dump ------------------------
++//
++// Hard rules (contract §5): never call user code (no obj[key], no
++// Reflect, no iterators, no toString of user objects); own-data slots
++// only; accessor/Proxy/interceptor/exotic/host -> skip WITH reason;
++// budget axes enforced; cycles become node back-references.
++
++struct DumpBudget {
++  size_t nodes = 0;
++  size_t bytes_read = 0;
++  size_t work = 0;
++  bool exhausted = false;
++  static constexpr size_t kMaxNodes = 1024;
++  static constexpr size_t kMaxBytesRead = 1 << 20;
++  static constexpr size_t kMaxWork = 200000;
++};
++constexpr size_t kDumpPerValueMax = 16384;   // 16KB inline threshold
++constexpr size_t kDumpPerDumpMax = 65536;    // per-dump byte cap
++constexpr size_t kDumpWidth = 256;           // max own props/elements listed
++constexpr int kDumpMaxDepth = 2;
++
++
++void DumpAppendEscaped(std::string* out, const char* data, size_t len) {
++  out->push_back('"');
++  for (size_t i = 0; i < len; i++) {
++    const unsigned char c = static_cast<unsigned char>(data[i]);
++    if (c == '"' || c == '\\') { out->push_back('\\'); out->push_back(static_cast<char>(c)); }
++    else if (c < 0x20) { char esc[8]; snprintf(esc, sizeof(esc), "\\u%04x", c); out->append(esc); }
++    else out->push_back(static_cast<char>(c));
++  }
++  out->push_back('"');
++}
++
++void DumpAppendKeyName(std::string* out, Tagged<Name> key) {
++  const std::string c = Cast<String>(key)->ToCString().get();
++  DumpAppendEscaped(out, c.data(), c.size());
++}
++
++class DumpWalker {
++ public:
++  DumpWalker(Isolate* isolate, std::string* out, DumpBudget* budget)
++      : isolate_(isolate), out_(out), budget_(budget) {}
++
++  void Walk(DirectHandle<Object> root) { Value(root, 0); }
++
++ private:
++  bool Tick() {
++    if (++budget_->work > DumpBudget::kMaxWork ||
++        budget_->bytes_read > DumpBudget::kMaxBytesRead ||
++        budget_->nodes > DumpBudget::kMaxNodes ||
++        out_->size() > kDumpPerDumpMax) {
++      budget_->exhausted = true;
++      return false;
++    }
++    return true;
++  }
++
++  void Value(DirectHandle<Object> value, int depth) {
++    if (!Tick()) { out_->append("{\"t\":\"skip\",\"reason\":\"budget\"}"); return; }
++    if (depth > kDumpMaxDepth && IsJSReceiver(*value)) {
++      out_->append("{\"t\":\"skip\",\"reason\":\"depth\"}");
++      return;
++    }
++    if (IsSmi(*value)) {
++      budget_->bytes_read += sizeof(Smi);
++      out_->append("{\"t\":\"i\",\"v\":")
++          .append(std::to_string(Cast<Smi>(*value).value())).append("}");
++      return;
++    }
++    Tagged<HeapObject> obj = Cast<HeapObject>(*value);
++    if (IsHeapNumber(obj)) {
++      const double d = Cast<HeapNumber>(obj)->value();
++      budget_->bytes_read += sizeof(double);
++      if (std::isfinite(d)) {
++        char buf[48]; snprintf(buf, sizeof(buf), "%.17g", d);
++        out_->append("{\"t\":\"n\",\"v\":").append(buf).append("}");
++      } else if (std::isnan(d)) out_->append("{\"t\":\"n\",\"v\":\"nan\"}");
++      else out_->append(std::string("{\"t\":\"n\",\"v\":\"") + (d > 0 ? "inf" : "-inf") + "\"}");
++      return;
++    }
++    if (IsString(obj)) { String_(obj); return; }
++    if (IsBigInt(obj)) { BigInt_(obj); return; }
++    if (IsOddball(obj)) {
++      switch (Cast<Oddball>(obj)->kind()) {
++        case Oddball::kUndefined: out_->append("{\"t\":\"undef\"}"); return;
++        case Oddball::kNull: out_->append("{\"t\":\"null\"}"); return;
++        case Oddball::kTrue: out_->append("{\"t\":\"b\",\"v\":true}"); return;
++        case Oddball::kFalse: out_->append("{\"t\":\"b\",\"v\":false}"); return;
++        default: out_->append("{\"t\":\"skip\",\"reason\":\"oddball\"}"); return;
++      }
++    }
++    if (IsJSReceiver(obj)) { Receiver(obj, depth); return; }
++    out_->append("{\"t\":\"skip\",\"reason\":\"non-scalar\"}");
++  }
++
++  void String_(Tagged<HeapObject> raw) {
++    const Tagged<String> str = Cast<String>(raw);
++    const size_t len = static_cast<size_t>(str->length());
++    const size_t take = len < 64 ? len : 64;
++    budget_->bytes_read += take;
++    DirectHandle<String> h(str, isolate_);
++    const DirectHandle<String> flat = String::Flatten(isolate_, h);
++    if (take == len) {
++      out_->append("{\"t\":\"s\",\"state\":\"captured\",\"v\":");
++      {
++        DisallowGarbageCollection no_gc;
++        const String::FlatContent content = flat->GetFlatContent(no_gc);
++        if (content.IsOneByte()) {
++          DumpAppendEscaped(out_, reinterpret_cast<const char*>(
++                                     content.ToOneByteVector().begin()), take);
++        } else {
++          // two-byte: keep ASCII printable, escape the rest.
++          const base::Vector<const base::uc16> view = content.ToUC16Vector();
++          std::string buf;
++          for (size_t i = 0; i < take; i++) {
++            const base::uc16 c = view[static_cast<int>(i)];
++            if (c >= 0x20 && c < 0x7F) buf.push_back(static_cast<char>(c));
++            else { char esc[8]; snprintf(esc, sizeof(esc), "\\u%04x", c); buf.append(esc); }
++          }
++          DumpAppendEscaped(out_, buf.data(), buf.size());
++        }
++      }
++      out_->append("}");
++    } else {
++      out_->append("{\"t\":\"s\",\"state\":\"truncated\",\"len\":")
++          .append(std::to_string(len)).append("}");
++    }
++  }
++
++  void BigInt_(Tagged<HeapObject> raw) {
++    DirectHandle<BigInt> h(Cast<BigInt>(raw), isolate_);
++    // Engine-only decimal rendering (no user code); bounded.
++    Handle<String> dec_handle;
++    if (!BigInt::ToString(isolate_, h).ToHandle(&dec_handle)) {
++      out_->append("{\"t\":\"bigint\",\"state\":\"unavailable\",\"reason\":\"tostring-failed\"}");
++      return;
++    }
++    DirectHandle<String> dec(dec_handle);
++    const size_t len = static_cast<size_t>(dec->length());
++    if (len <= 128) {
++      budget_->bytes_read += len;
++      out_->append("{\"t\":\"bigint\",\"state\":\"captured\",\"v\":");
++      DumpAppendEscaped(out_, dec->ToCString().get(), len);
++      out_->append("}");
++    } else {
++      out_->append("{\"t\":\"bigint\",\"state\":\"truncated\",\"len\":")
++          .append(std::to_string(len)).append("}");
++    }
++  }
++
++  void Receiver(Tagged<HeapObject> raw, int depth) {
++    const Address addr = raw.address();
++    auto it = visited_.find(addr);
++    if (it != visited_.end()) {
++      out_->append("{\"t\":\"cycle\",\"ref\":").append(std::to_string(it->second)).append("}");
++      return;
++    }
++    const int id = next_id_++;
++    visited_[addr] = id;
++    budget_->nodes++;
++    if (!Tick()) { out_->append("{\"t\":\"skip\",\"reason\":\"budget\"}"); return; }
++
++    if (IsJSProxy(raw)) {
++      out_->append("{\"t\":\"skip\",\"reason\":\"proxy\",\"id\":")
++          .append(std::to_string(id)).append("}");
++      return;
++    }
++    Tagged<Map> map = Cast<JSReceiver>(raw)->map();
++    if (map->has_named_interceptor() || map->has_indexed_interceptor()) {
++      out_->append("{\"t\":\"skip\",\"reason\":\"interceptor\",\"id\":")
++          .append(std::to_string(id)).append("}");
++      return;
++    }
++    const InstanceType itype = map->instance_type();
++    if (IsJSArray(raw)) { Array(Cast<JSArray>(raw), id, depth); return; }
++    if (IsJSTypedArray(raw)) { TypedArray(Cast<JSTypedArray>(raw), id); return; }
++    if (IsJSArrayBuffer(raw)) { ArrayBuffer(Cast<JSArrayBuffer>(raw), id); return; }
++    if (itype != JS_OBJECT_TYPE) {
++      out_->append("{\"t\":\"skip\",\"reason\":\"exotic\",\"id\":")
++          .append(std::to_string(id)).append("}");
++      return;
++    }
++    PlainObject(Cast<JSObject>(raw), id, depth);
++  }
++
++  void PlainObject(Tagged<JSObject> obj, int id, int depth) {
++    out_->append("{\"t\":\"object\",\"id\":").append(std::to_string(id));
++    // Own-name data properties ONLY: fast descriptors (kField/kConst —
++    // kAccessor skipped) or dictionary entries (AccessorPair skipped).
++    DirectHandle<JSObject> h(obj, isolate_);
++    if (obj->HasFastProperties()) {
++      Tagged<DescriptorArray> descs = obj->map()->instance_descriptors();
++      const int nparent = obj->map()->NumberOfOwnDescriptors();
++      int written = 0, skipped = 0;
++      bool first_entry = true;
++      out_->append(",\"props\":[");
++      for (int i = 0; i < nparent && (written + skipped) < static_cast<int>(kDumpWidth); i++) {
++        const InternalIndex ix(i);
++        const PropertyDetails details = descs->GetDetails(ix);
++        Tagged<Name> key = descs->GetKey(ix);
++        if (!IsString(key)) continue;
++        if (details.kind() == PropertyKind::kData) {
++          if (!Tick()) break;
++          if (!first_entry) out_->push_back(',');
++          first_entry = false;
++          out_->append("{\"k\":");
++          DumpAppendKeyName(out_, key);
++          out_->append(",\"v\":");
++          DirectHandle<Object> vh(
++              obj->RawFastPropertyAt(FieldIndex::ForDetails(obj->map(), details)),
++              isolate_);
++          Value(vh, depth + 1);
++          out_->append("}");
++        } else {
++          if (!first_entry) out_->push_back(',');
++          first_entry = false;
++          out_->append("{\"k\":");
++          DumpAppendKeyName(out_, key);
++          out_->append(",\"reason\":\"accessor\"}");
++        }
++      }
++      out_->append("]}");
++    } else {
++      // Dictionary mode: data values only; AccessorPair values skipped.
++      Tagged<NameDictionary> dict = obj->property_dictionary();
++      int written = 0, skipped = 0;
++      bool first_entry = true;
++      out_->append(",\"props\":[");
++      for (InternalIndex ix : dict->IterateEntries()) {
++        if (written + skipped >= static_cast<int>(kDumpWidth)) break;
++        Tagged<Object> key = dict->KeyAt(ix);
++        Tagged<Object> val = dict->ValueAt(ix);
++        if (!IsString(key)) continue;
++        if (IsAccessorPair(val)) {
++          if (!first_entry) out_->push_back(',');
++          first_entry = false;
++          out_->append("{\"k\":");
++          DumpAppendKeyName(out_, Cast<Name>(key));
++          out_->append(",\"reason\":\"accessor\"}");
++        } else if (!IsTheHole(val)) {
++          if (!Tick()) break;
++          if (!first_entry) out_->push_back(',');
++          first_entry = false;
++          out_->append("{\"k\":");
++          DumpAppendKeyName(out_, Cast<Name>(key));
++          out_->append(",\"v\":");
++          DirectHandle<Object> vh(val, isolate_);
++          Value(vh, depth + 1);
++          out_->append("}");
++        }
++      }
++      out_->append("]}");
++    }
++  }
++
++  void Array(Tagged<JSArray> arr, int id, int depth) {
++    out_->append("{\"t\":\"array\",\"id\":").append(std::to_string(id));
++    out_->append(",\"length\":").append(std::to_string(static_cast<size_t>(
++        Object::NumberValue(Cast<Number>(Tagged<Object>(arr->length()))))));
++    Tagged<FixedArrayBase> elems = arr->elements();
++    // Order matters: NumberDictionary IS a FixedArray subtype — check it
++    // FIRST or the dense branch would emit raw dictionary internals.
++    if (IsNumberDictionary(elems)) {
++      Tagged<NumberDictionary> dict = Cast<NumberDictionary>(elems);
++      int written = 0;
++      out_->append(",\"sparse\":[");
++      for (InternalIndex ix : dict->IterateEntries()) {
++        if (written >= static_cast<int>(kDumpWidth)) break;
++        Tagged<Object> key = dict->KeyAt(ix);
++        Tagged<Object> val = dict->ValueAt(ix);
++        if (IsTheHole(key) || IsTheHole(val)) continue;
++        // Classify the key BEFORE emitting anything: non-index markers
++        // (dictionary metadata) are skipped without dangling output.
++        char n[24];
++        if (IsSmi(key)) { snprintf(n, sizeof(n), "%d", Cast<Smi>(key).value()); }
++        else if (IsHeapNumber(key)) {
++          snprintf(n, sizeof(n), "%llu",
++                   static_cast<unsigned long long>(Cast<HeapNumber>(key)->value()));
++        } else { continue; }
++        if (!Tick()) break;
++        if (written++) out_->push_back(',');
++        out_->append("{\"i\":");
++        out_->append(n).append(",\"v\":");
++        DirectHandle<Object> vh(val, isolate_);
++        Value(vh, depth + 1);
++        out_->append("}");
++      }
++      out_->append("]}");
++      return;
++    }
++    if (IsFixedArray(elems) || IsFixedDoubleArray(elems)) {
++      const int n = static_cast<int>(
++          std::min<size_t>(static_cast<size_t>(*elems->length()), kDumpWidth));
++      out_->append(",\"dense\":[");
++      for (int i = 0; i < n; i++) {
++        if (!Tick()) break;
++        if (i) out_->push_back(',');
++        if (IsFixedDoubleArray(elems)) {
++          const double d = Cast<FixedDoubleArray>(elems)->get_scalar(i);
++          if (std::isfinite(d)) { char b[48]; snprintf(b, sizeof(b), "%.17g", d); out_->append(b); }
++          else out_->append("null");
++        } else {
++          Tagged<Object> e = Cast<FixedArray>(elems)->get(i);
++          if (IsTheHole(e)) out_->append("{\"t\":\"hole\"}");
++          else { DirectHandle<Object> eh(e, isolate_); Value(eh, depth + 1); }
++        }
++      }
++      out_->append("]}");
++    } else {
++      out_->append(",\"reason\":\"elements-kind-unsupported\"}");
++    }
++  }
++
++  void TypedArray(Tagged<JSTypedArray> ta, int id) {
++    out_->append("{\"t\":\"typedarray\",\"id\":").append(std::to_string(id));
++    if (ta->WasDetached()) {
++      out_->append(",\"detached\":true}");
++      return;
++    }
++    const size_t bytes = static_cast<size_t>(ta->byte_length());
++    out_->append(",\"byte_length\":").append(std::to_string(bytes));
++    // Bounded hex of the first bytes (engine-internal read only; the
++    // native address NEVER leaves this function).
++    const size_t take = std::min<size_t>(bytes, kDumpPerValueMax / 2);
++    budget_->bytes_read += take;
++    const uint8_t* base = reinterpret_cast<const uint8_t*>(ta->DataPtr());
++    out_->append(",\"hex_state\":\"").append(take == bytes ? "captured" : "truncated")
++        .append("\",\"hex\":\"");
++    static const char* kHex = "0123456789abcdef";
++    for (size_t i = 0; i < take; i++) {
++      out_->push_back(kHex[base[i] >> 4]);
++      out_->push_back(kHex[base[i] & 0xF]);
++    }
++    out_->append("\"}");
++  }
++
++  void ArrayBuffer(Tagged<JSArrayBuffer> ab, int id) {
++    out_->append("{\"t\":\"arraybuffer\",\"id\":").append(std::to_string(id));
++    if (ab->was_detached()) { out_->append(",\"detached\":true}"); return; }
++    const size_t bytes = static_cast<size_t>(ab->byte_length());
++    out_->append(",\"byte_length\":").append(std::to_string(bytes));
++    const size_t take = std::min<size_t>(bytes, kDumpPerValueMax / 2);
++    budget_->bytes_read += take;
++    const uint8_t* base = reinterpret_cast<const uint8_t*>(ab->backing_store());
++    out_->append(",\"hex_state\":\"").append(take == bytes ? "captured" : "truncated")
++        .append("\",\"hex\":\"");
++    static const char* kHex = "0123456789abcdef";
++    for (size_t i = 0; i < take; i++) {
++      out_->push_back(kHex[base[i] >> 4]);
++      out_->push_back(kHex[base[i] & 0xF]);
++    }
++    out_->append("\"}");
++  }
++
++  Isolate* isolate_;
++  std::string* out_;
++  DumpBudget* budget_;
++  std::unordered_map<Address, int> visited_;
++  int next_id_ = 0;
++};
++
++}  // namespace
++
 +void IgnitionObserverSetTapConfig(v8::Isolate* v8_isolate,
 +                                  const char* windows_json) {
 +  reinterpret_cast<Isolate*>(v8_isolate)
 +      ->xtrace_ignition_observer()
 +      ->SetTapConfig(windows_json ? windows_json : "{}");
++}
++
++void IgnitionObserverSetDumpCallback(v8::Isolate* v8_isolate,
++                                     IgnitionDumpCallback cb) {
++  reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->dump_callback.store(cb, std::memory_order_release);
++}
++
++bool IgnitionObserverRequestDump(v8::Isolate* v8_isolate,
++                                 v8::Local<v8::Value> object,
++                                 const char* anchor_label,
++                                 uint32_t window_id) {
++  return reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->RequestDump(object, anchor_label, window_id);
 +}
 +
 +// ---- P5.5 D1: one-time compilation-instance metadata asset -------------
@@ -10526,6 +10989,40 @@ index 00000000..ead7a92a
 +  return registry_->TapHitForTest(version, offset, window_id);
 +}
 +
++bool IgnitionObserverState::RequestDump(v8::Local<v8::Value> object,
++                                        const char* anchor_label,
++                                        uint32_t window_id) {
++  auto dcb = dump_callback.load(std::memory_order_acquire);
++  if (dcb == nullptr || object.IsEmpty()) return false;
++  Isolate* isolate = isolate_;
++  v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate));
++  Handle<Object> obj = v8::Utils::OpenHandle(*object);
++
++  DumpBudget budget;
++  std::string out;
++  out.reserve(2048);
++  out.append("{\"kind\":\"v8.materialized-dump\",\"schema\":1");
++  out.append(",\"anchor\":{\"type\":\"custom\",\"label\":");
++  DumpAppendEscaped(&out, anchor_label ? anchor_label : "", 
++                    anchor_label ? strlen(anchor_label) : 0);
++  out.append(",\"window_id\":").append(std::to_string(window_id)).append("}");
++
++  DumpWalker walker(isolate, &out, &budget);
++  out.append(",\"root\":");
++  walker.Walk(obj);
++
++  out.append(",\"budget\":{\"nodes\":").append(std::to_string(budget.nodes));
++  out.append(",\"max_nodes\":").append(std::to_string(DumpBudget::kMaxNodes));
++  out.append(",\"bytes_read\":").append(std::to_string(budget.bytes_read));
++  out.append(",\"max_bytes_read\":").append(std::to_string(DumpBudget::kMaxBytesRead));
++  out.append(",\"work\":").append(std::to_string(budget.work));
++  out.append(",\"partial\":").append(budget.exhausted ? "true" : "false");
++  out.append("}}");
++  dcb(reinterpret_cast<v8::Isolate*>(isolate), anchor_label, window_id,
++      out.data(), out.size());
++  return true;
++}
++
 +bool IgnitionObserverState::TapPredicate(uint32_t version, uint32_t offset,
 +                                         uint32_t* window_id) {
 +  Registry::Entry* entry = registry_->FindByVersion(version);
@@ -10599,6 +11096,11 @@ index 00000000..ead7a92a
 +void IgnitionObserverSetMetadataCallback(v8::Isolate*, IgnitionMetadataCallback) {}
 +void IgnitionObserverSetTapCallback(v8::Isolate*, IgnitionTapCallback) {}
 +void IgnitionObserverSetTapConfig(v8::Isolate*, const char*) {}
++void IgnitionObserverSetDumpCallback(v8::Isolate*, IgnitionDumpCallback) {}
++bool IgnitionObserverRequestDump(v8::Isolate*, v8::Local<v8::Value>,
++                                 const char*, uint32_t) {
++  return false;
++}
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
 +
@@ -10607,10 +11109,10 @@ index 00000000..ead7a92a
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..c834852e
+index 00000000..b2a87b94
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,144 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -10623,6 +11125,7 @@ index 00000000..c834852e
 +#include <cstddef>
 +#include <cstdint>
 +
++#include "include/v8-local-handle.h"
 +#include "src/base/macros.h"
 +#include "src/objects/tagged.h"
 +
@@ -10701,6 +11204,13 @@ index 00000000..c834852e
 +  // the miss path beyond the search itself).
 +  bool TapPredicate(uint32_t bytecode_version, uint32_t offset,
 +                    uint32_t* window_id);
++
++  // E4: bounded own-data dump of one object graph (see the boundary
++  // header). Returns false when no dump callback is installed.
++  bool RequestDump(v8::Local<v8::Value> object, const char* anchor_label,
++                   uint32_t window_id);
++
++  std::atomic<IgnitionDumpCallback> dump_callback{nullptr};
 +
 +  // Hot path (isolate thread only): metadata for the array at the given
 +  // NORMALIZED logical offset, registering and pre-decoding the array on
