@@ -616,3 +616,37 @@ progress JSON `p55` = `s1-dump-ownership-landed`（下一阶段 S2：配置状�
 - 并发交错门禁的 updateCapture 只切 categories/scope 分代；tap 计划本身（plan_serial>1 的多计划交错）需 startCapture 重复安装通道，当前命令面未暴露，如实记录为边界。
 
 progress JSON `p55` = `s2-accounting-budgets-landed`（下一阶段 S3：编码器统一有界 writer）。
+
+---
+
+## 17. S3 执行记录：编码器统一有界 writer（2026-09-26）
+
+按 §12.4-4 / §13.2-4 执行。输出上限改为**编码后字节**；accessor 跳过记录与键编码纳入预算；RAB 视图报告当前合法长度；double 按 kind 区分 hole/NaN/±Inf/-0；遍历内部不持裸 Tagged 跨分配点（gc-interval 门禁证）。
+
+### 17.1 实现（V8 observer，patch 0002）
+
+- **Tick() 输出字节上限**：`out_->size() >= kDumpPerDumpMax` 判耗尽——walker 内每个 append 前置 Tick 或显式 `Room()` 预留；键预留按剩余字节/6（每转义字符 ≤6 输出字节），字节预算截断键标 truncated。
+- **accessor 跳过记录纳入预算**（fast + dictionary 双路径）：每条记录先 `Room(768+32)`（单条上界：128 字符键 ×6 + 框架），不满足即停并标 exhausted；记录同时计入 work。180×120 中文键场景实测 135505 字节→上限内 + partial=true。
+- **RAB/length-tracking**：`GetByteLength()`（重算当前合法长度；旧代码读存储字段对 tracking 视图恒 0）+ `GetLengthOrOutOfBounds` 显式 `rab-out-of-bounds` unavailable 态；resize(16→48→8) 实测报 [16,48,8]。
+- **double kind 区分**：dense 循环先 `is_the_hole(i)`（修复 get_scalar 对 hole 的 DCHECK fatal exit=-5），再 NaN/inf/-inf 显式 marker、-0 经 %.17g 保号；不再统一 null。
+- **深度截断标 partial**：depth-skip 置 truncated（诚实部分视图）。
+- **walk 内部 GC 安全**：PlainObject/Array 的 descs、dictionary、elements 等长驻裸 Tagged 全部改为**每迭代从 DirectHandle 重取**（稀疏/字典路径改整数下标循环）；`--gc-interval=40` 使 GC 落在 walk 内部分配点——hostile 形状三 dump 全部不崩、可解析。
+
+### 17.2 证据（2026-09-26 亲跑）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `scripts/p55-s3-encoder-verify.py`（新） | **8/8 GREEN**：hostile 三形状不崩/输出 ≤64KiB+2KiB/partial 诚实；RAB [16,48,8]；double 五元素 hole+nan+inf+-0 区分；gc-inside-walk 不崩且全部可解析 |
+| S0 冻结反例 | `s0.dump-accessor-byte-budget`、`s0.dump-rab-length-tracking`、`s0.dump-double-hole` **全部转绿**（python 套件 5/8 绿；余 3 = t3/t7→S4、printf→S5） |
+| chrome 回归（S3 二进制） | E7 PASS、S0 浏览器全不变量绿、S1 证据 GREEN、S2 交错 GREEN |
+| 补丁栈 | 重生成后 `verify_patches.py` **pass**（证据 `validation/p55-s3-patch-verify.json`） |
+
+证据目录：`out/XTraceP55D8/validation/p55-s3-20260926-030643/`、`p55-s0-20260926-030653/`、`p55-s0-SefBST/` 等。
+
+### 17.3 边界
+
+- Room() 的 2KiB 松弛是单条记录最大越界（一条已预留的记录可写完）；硬上界 = 64KiB+2KiB，驱动按此断言。
+- gc-interval 门禁证明"遍历中不持失效地址"；描述符/元素在无用户代码的 dump 期间不会被结构性替换（map/elements 指针不变，搬迁经句柄跟踪）——如未来 walker 引入可分配的用户对象访问，需重验。
+- EncodeTapValue（tap 侧层一编码）本就逐值有界，未触碰；本阶段只改 dump walker。
+
+progress JSON `p55` = `s3-bounded-writer-landed`。

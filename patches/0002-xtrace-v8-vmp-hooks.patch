@@ -9875,10 +9875,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..2dad4fd4
+index 00000000..f8764c02
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1765 @@
+@@ -0,0 +1,1856 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -10196,9 +10196,20 @@ index 00000000..2dad4fd4
 +                       DumpBudget* budget) {
 +  // R3: keys are read EXACTLY (no ToCString) and enter the READ budget;
 +  // a key longer than 128 chars is truncated to its length record.
++  // S3 (RR4): the reservation is by ENCODED bytes — every escaped char
++  // costs up to 6 output bytes, so a key near the 128-char cap may only
++  // take as many chars as the remaining per-dump budget can encode.
 +  Tagged<String> str = Cast<String>(key);
 +  const size_t len = static_cast<size_t>(str->length());
-+  const size_t take = std::min<size_t>(len, 128);
++  size_t take = std::min<size_t>(len, 128);
++  {
++    const size_t headroom = kDumpPerDumpMax + 2048 - out->size();
++    const size_t by_bytes = headroom / 6;
++    if (take > by_bytes) {
++      take = by_bytes;
++      budget->truncated = true;  // S3: byte-budget key truncation
++    }
++  }
 +  budget->bytes_read += take;
 +  if (take == len) {
 +    out->push_back('"');
@@ -10219,19 +10230,35 @@ index 00000000..2dad4fd4
 +
 + private:
 +  bool Tick() {
++    // S3 (RR4): the cap is on ENCODED OUTPUT BYTES — every append in
++    // the walker is preceded by this check (or an explicit Room()
++    // reservation), so no shape (escape blowup, accessor records,
++    // wide dictionaries) can exceed the per-dump byte budget.
 +    if (++budget_->work > DumpBudget::kMaxWork ||
 +        budget_->bytes_read > DumpBudget::kMaxBytesRead ||
 +        budget_->nodes > DumpBudget::kMaxNodes ||
-+        out_->size() > kDumpPerDumpMax) {
++        out_->size() >= kDumpPerDumpMax) {
 +      budget_->exhausted = true;
 +      return false;
 +    }
 +    return true;
 +  }
 +
++  // S3: explicit reservation for the NEXT bounded append — used where a
++  // record is written without a Tick first (accessor skip rows). The
++  // 2KiB slack is the max single-record overshoot (one escaped key ≤
++  // 128 chars → ≤ 768 bytes + record framing); the hard cap plus slack
++  // is the enforced bound.
++  bool Room(size_t bytes) const {
++    return out_->size() + bytes <= kDumpPerDumpMax + 2048;
++  }
++
 +  void Value(DirectHandle<Object> value, int depth) {
 +    if (!Tick()) { out_->append("{\"t\":\"skip\",\"reason\":\"budget\"}"); return; }
 +    if (depth > kDumpMaxDepth && IsJSReceiver(*value)) {
++      // S3: a depth cut is a PARTIAL observation — flagged, never
++      // presented as a complete view.
++      budget_->truncated = true;
 +      out_->append("{\"t\":\"skip\",\"reason\":\"depth\"}");
 +      return;
 +    }
@@ -10358,13 +10385,16 @@ index 00000000..2dad4fd4
 +    // kAccessor skipped) or dictionary entries (AccessorPair skipped).
 +    DirectHandle<JSObject> h(obj, isolate_);
 +    if (obj->HasFastProperties()) {
-+      Tagged<DescriptorArray> descs = obj->map()->instance_descriptors();
-+      const int nparent = obj->map()->NumberOfOwnDescriptors();
++      // S3 (RR4): descriptors are RE-DERIVED every iteration — the
++      // recursive Value() can allocate and move them; no raw Tagged
++      // survives across an allocation point.
++      const int nparent = h->map()->NumberOfOwnDescriptors();
 +      int written = 0, skipped = 0;
 +      bool first_entry = true;
 +      out_->append(",\"props\":[");
 +      for (int i = 0; i < nparent && (written + skipped) < static_cast<int>(kDumpWidth); i++) {
 +        const InternalIndex ix(i);
++        Tagged<DescriptorArray> descs = h->map()->instance_descriptors();
 +        const PropertyDetails details = descs->GetDetails(ix);
 +        Tagged<Name> key = descs->GetKey(ix);
 +        if (!IsString(key)) continue;
@@ -10377,14 +10407,22 @@ index 00000000..2dad4fd4
 +          DumpAppendKeyName(out_, key, budget_);
 +          out_->append(",\"v\":");
 +          DirectHandle<Object> vh(
-+              obj->RawFastPropertyAt(FieldIndex::ForDetails(obj->map(), details)),
++              h->RawFastPropertyAt(FieldIndex::ForDetails(h->map(), details)),
 +              isolate_);
 +          Value(vh, depth + 1);
 +          out_->append("}");
 +        } else {
++          // S3 (RR4): the skip RECORD itself enters the encoded-byte
++          // budget (a key of 120 CJK chars escapes to ~724 bytes —
++          // 180 such records used to blow past the cap uncounted).
++          if (!Room(768 + 32)) {
++            budget_->exhausted = true;
++            break;
++          }
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
 +          skipped++;  // R3: accessor skips count toward the width cap
++          budget_->work++;  // the record costs work like any entry
 +          out_->append("{\"k\":");
 +          DumpAppendKeyName(out_, key, budget_);
 +          out_->append(",\"reason\":\"accessor\"}");
@@ -10396,19 +10434,30 @@ index 00000000..2dad4fd4
 +      out_->append("]}");
 +    } else {
 +      // Dictionary mode: data values only; AccessorPair values skipped.
-+      Tagged<NameDictionary> dict = obj->property_dictionary();
++      // S3 (RR4): the dictionary is RE-DERIVED every iteration (the
++      // recursive Value() can allocate and move it).
 +      int written = 0, skipped = 0;
 +      bool first_entry = true;
 +      out_->append(",\"props\":[");
-+      for (InternalIndex ix : dict->IterateEntries()) {
++      const int capacity = h->property_dictionary()->Capacity();
++      for (int idx = 0; idx < capacity; idx++) {
++        InternalIndex ix(idx);
 +        if (written + skipped >= static_cast<int>(kDumpWidth)) break;
++        Tagged<NameDictionary> dict = h->property_dictionary();
 +        Tagged<Object> key = dict->KeyAt(ix);
 +        Tagged<Object> val = dict->ValueAt(ix);
 +        if (!IsString(key)) continue;
 +        if (IsAccessorPair(val)) {
++          // S3 (RR4): dictionary accessor skip records are budgeted on
++          // ENCODED bytes exactly like the fast path.
++          if (!Room(768 + 32)) {
++            budget_->exhausted = true;
++            break;
++          }
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
 +          skipped++;  // R3: dictionary accessor skips count
++          budget_->work++;
 +          out_->append("{\"k\":");
 +          DumpAppendKeyName(out_, Cast<Name>(key), budget_);
 +          out_->append(",\"reason\":\"accessor\"}");
@@ -10435,20 +10484,30 @@ index 00000000..2dad4fd4
 +
 +  void Array(Tagged<JSArray> arr, int id, int depth) {
 +    out_->append("{\"t\":\"array\",\"id\":").append(std::to_string(id));
++    // S3 (RR4): the array and its elements are pinned via indirect
++    // handles; every loop iteration RE-DERIVES the raw views so no
++    // stale address survives a GC triggered by the recursive Value()
++    // calls (allocation points live inside the walk).
++    DirectHandle<JSArray> arr_h(arr, isolate_);
++    DirectHandle<FixedArrayBase> elems_h(arr->elements(), isolate_);
 +    // R3: the LOGICAL length is the JS-visible truth; the backing store
 +    // capacity is NEVER reported as the element count.
 +    const size_t logical = static_cast<size_t>(Object::NumberValue(
 +        Cast<Number>(Tagged<Object>(arr->length()))));
 +    out_->append(",\"length\":").append(std::to_string(logical));
-+    Tagged<FixedArrayBase> elems = arr->elements();
++    Tagged<FixedArrayBase> elems = *elems_h;
 +    // Order matters: NumberDictionary IS a FixedArray subtype — check it
 +    // FIRST or the dense branch would emit raw dictionary internals.
 +    if (IsNumberDictionary(elems)) {
-+      Tagged<NumberDictionary> dict = Cast<NumberDictionary>(elems);
 +      int written = 0;
 +      out_->append(",\"sparse\":[");
-+      for (InternalIndex ix : dict->IterateEntries()) {
++      // Manual index loop: the dictionary view is RE-DERIVED every
++      // iteration (the recursive Value() can allocate and move it).
++      const int capacity = Cast<NumberDictionary>(*elems_h)->Capacity();
++      for (int idx = 0; idx < capacity; idx++) {
++        InternalIndex ix(idx);
 +        if (written >= static_cast<int>(kDumpWidth)) break;
++        Tagged<NumberDictionary> dict = Cast<NumberDictionary>(*elems_h);
 +        Tagged<Object> key = dict->KeyAt(ix);
 +        Tagged<Object> val = dict->ValueAt(ix);
 +        if (IsTheHole(key) || IsTheHole(val)) continue;
@@ -10484,10 +10543,31 @@ index 00000000..2dad4fd4
 +      for (int i = 0; i < n; i++) {
 +        if (!Tick()) break;
 +        if (i) out_->push_back(',');
++        // S3: fresh view each iteration — Value() below can allocate.
++        elems = *elems_h;
 +        if (IsFixedDoubleArray(elems)) {
-+          const double d = Cast<FixedDoubleArray>(elems)->get_scalar(i);
-+          if (std::isfinite(d)) { char b[48]; snprintf(b, sizeof(b), "%.17g", d); out_->append(b); }
-+          else out_->append("null");
++          // S3 (RR4): the hole test comes FIRST (get_scalar DCHECKs on
++          // holes — the old order was a fatal crash), and the special
++          // doubles encode DISTINCTLY: nan / inf / -inf markers; -0
++          // keeps its sign via %.17g ("-0"). No null collapse.
++          Tagged<FixedDoubleArray> darr = Cast<FixedDoubleArray>(elems);
++          const uint32_t di = static_cast<uint32_t>(i);
++          if (darr->is_the_hole(di)) {
++            out_->append("{\"t\":\"hole\"}");
++          } else {
++            const double d = darr->get_scalar(di);
++            if (std::isnan(d)) {
++              out_->append("{\"t\":\"n\",\"state\":\"captured\",\"v\":\"nan\"}");
++            } else if (std::isinf(d)) {
++              out_->append(d > 0
++                               ? "{\"t\":\"n\",\"state\":\"captured\",\"v\":\"inf\"}"
++                               : "{\"t\":\"n\",\"state\":\"captured\",\"v\":\"-inf\"}");
++            } else {
++              char b[48];
++              snprintf(b, sizeof(b), "%.17g", d);
++              out_->append(b);
++            }
++          }
 +        } else {
 +          Tagged<Object> e = Cast<FixedArray>(elems)->get(i);
 +          if (IsTheHole(e)) out_->append("{\"t\":\"hole\"}");
@@ -10512,7 +10592,18 @@ index 00000000..2dad4fd4
 +      out_->append(",\"state\":\"unavailable\",\"reason\":\"shared-no-consistency\"}");
 +      return;
 +    }
-+    const size_t bytes = static_cast<size_t>(ta->byte_length());
++    // S3 (RR4): length-tracking views over a resizable buffer report
++    // the CURRENT LEGAL length (GetByteLength recomputes it; the stored
++    // byte_length field is 0 for tracking views and was misreported).
++    // An out-of-bounds tracking view is an explicit unavailable state,
++    // never a fabricated empty capture.
++    bool rab_oob = false;
++    const size_t bytes = ta->GetByteLength();
++    (void)ta->GetLengthOrOutOfBounds(rab_oob);
++    if (rab_oob) {
++      out_->append(",\"state\":\"unavailable\",\"reason\":\"rab-out-of-bounds\"}");
++      return;
++    }
 +    out_->append(",\"byte_length\":").append(std::to_string(bytes));
 +    // Bounded hex of the first bytes (engine-internal read only; the
 +    // native address NEVER leaves this function).
