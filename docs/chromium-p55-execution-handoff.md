@@ -242,6 +242,14 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 
 **R6-b 固定 tier 分项基准**（`scripts/p55-r6-perfbench.py` PASS）：同一 2M 迭代派发负载、--max-opt=0 全程 Ignition（tier 由 R6a 同二进制同旗标断言）、无 printf 于被测环。**谓词**隔离测量：预算 0 模式（窗口全匹配、预算 0——每次命中为 budget skip：谓词+标记跨边界、零编码零写入）；**编码+写入**：全预算模式与谓词模式的差。结果（5 次取中位）：off 47.4s / predicate-only 54.0s（+6.6s，≈**131 ns/命中**，50M 次命中）/ full 57.4s（编码+写入再 +3.5s）。全量开销 ≈21%（2M 迭代派发循环、50M 字节码事件——每 Ignition 事件全开 tap 的极端上界；实际探针按窗口预算截断）。tier 逃逸问题不复存在（对比 E7 时代 10/11ms 默认分层基准）。
 
+### 8.8 R7-a 执行记录（2026-09-25，工程师）：chrome dump 全链路打通
+
+三处缺陷连环修复后 `requestDump` 端到端 PASS（`accepted:true`，trace 含 `V8.materializedDump` 资产行 + 内容文件 + 四元组）：
+1. **求值机制**：裸 posted-task 的 `Script::Run` 触发 blink 微任务 CallDepthScope DCHECK——改为经典嵌入者形态（进入 context 后包 `v8::MicrotasksScope(kRunMicrotasks)` + TryCatch），DCHECK 消除。
+2. **扇出语义**：首接受者胜的原子旗标版存在 null-callback 二次 Run 崩溃（`!is_null()` fatal，浏览器进程）——重构为**回调驻槽**（DumpFanoutState 持有回调、锁内判定+消费、二次调用结构性 no-op）。
+3. **dump 门控**：OnIgnitionDump 原要求激活栈非空——dump 是显式操作者动作，运行于无脚本激活的投递任务；改为仅 scope 停止态门控（脚本过滤已在锚点求值时由浏览器端完成——它选这个 renderer 正因其页面在范围内）。
+E6 验收器同步对齐 R5 语义（本地复放的诚实期望：family observed（密度+随机路径 bundle URL）、mode=本 capture 实测 200、stages 无证据即 unresolved、语料 bundle 名作出处元数据）；修复 T7 的语料 manifest 查找在 R5 重构中丢失、bundle 版本标记宽度（6-8 hex）、状态码字段双名（status_code/response_code）；T3 新鲜复采按 mtime 选取并以 proven-read/candidate-pool 双等级断言。**E6 PASS**。
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计

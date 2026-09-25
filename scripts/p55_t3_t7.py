@@ -225,7 +225,15 @@ def t3(trace: pathlib.Path) -> dict:
 
 
 def t7(trace: pathlib.Path, site_name: str, corpus_manifest) -> dict:
+    # Corpus manifest = EXTERNAL RESEARCH INPUT ONLY (R5 ruling): the
+    # bundle name is listed as provenance metadata; it never feeds the
+    # classification rules below.
     recorded = {}
+    if corpus_manifest:
+        for row in corpus_manifest:
+            if row.get("name") == site_name:
+                recorded = row
+                break
     status_codes = []
     ignition = 0
     script_urls = Counter()
@@ -236,7 +244,11 @@ def t7(trace: pathlib.Path, site_name: str, corpus_manifest) -> dict:
             ignition += 1
         elif api == "BrowserNetwork.response":
             args = event.get("args") or [{}]
-            code = args[0].get("status_code") if isinstance(args[0], dict) else None
+            # field name varies by hook vintage: status_code /
+            # response_code both observed in captured corpora
+            code = None
+            if isinstance(args[0], dict):
+                code = args[0].get("status_code", args[0].get("response_code"))
             if code is not None:
                 status_codes.append(int(code))
         elif api in ("Document.cookie.set", "Document.cookie.get"):
@@ -266,8 +278,9 @@ def t7(trace: pathlib.Path, site_name: str, corpus_manifest) -> dict:
     # activity AND a distinctive script shape (random-path bundle) —
     # density alone proves nothing (any hot page has ignition events).
     dense_vm = ignition >= 100000
+    # corpus bundles carry 6-8 hex version tags (W1bH0CpS9gGF.1058d2a.js)
     random_path_bundle = any(
-        re.search(r"/[A-Za-z0-9]{8,}\.[0-9a-f]{6}\.(js)$", url)
+        re.search(r"/[A-Za-z0-9]{8,}\.[0-9a-f]{6,8}\.(js)$", url)
         for url in script_urls)
     if ignition == 0:
         family = {"value": "unresolved", "grade": "unresolved",

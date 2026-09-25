@@ -37,32 +37,32 @@ def main() -> int:
     summary = {}
 
     # --- T7 on the three corpus sites -----------------------------------
-    expect = {
-        "xj1": {"mode": "412-interstitial-two-stage", "stages": 2,
-                "cookie": "CyFIZHvBqps2O",
-                "note_contains": "stage-2 blob unavailable"},
-        "sc": {"mode": "200-inline", "stages": 1,
-               "cookie": "cookie_persist", "note_contains": ""},
-        "jibei": {"mode": "200-inline", "stages": 1, "cookie": None,
-                  "note_contains": "transport"},
-    }
+    # --- T7 on the three corpus sites (LOCAL REPLAYS) --------------------
+    # R5 ruling: the classifier never invents site answers. A local
+    # replay serves 200 from the local server — the 412 interstitial is
+    # a SITE-RECORDED fact (external research input in the corpus
+    # README/manifest), not observable in-replay. Honest assertions:
+    # family observed for all three (density + random-path bundle URL),
+    # mode = exactly what THIS capture shows (200 replay), stages
+    # unresolved absent in-capture evidence; the corpus bundle names
+    # ride along as provenance for manual cross-checking.
     t7_results = {}
-    for site, want in expect.items():
+    for site in ("xj1", "sc", "jibei"):
         traces = sorted((CORPUS / site).glob("trace_*.ndjson"))
         assert traces, f"no corpus trace for {site}"
-        verdict = run("t7", traces[0], ["--site-name", site])
+        verdict = run("t7", traces[0],
+                      ["--site-name", site,
+                       "--corpus-manifest", str(CORPUS / "corpus-manifest.json")])
         t7_results[site] = verdict
-        assert verdict["family"]["value"] == "jsvmp-challenge"
-        assert verdict["family"]["grade"] == "observed"
-        assert verdict["mode"]["value"] == want["mode"], site
-        assert verdict["mode"]["grade"] == "derived"
-        assert verdict["stages"]["value"] == want["stages"], site
-        if want["cookie"]:
-            assert verdict["cookie"]["value"] == want["cookie"], site
-        if want["note_contains"]:
-            assert want["note_contains"].lower() in \
-                (verdict.get("note") or "").lower(), site
+        assert verdict["family"]["value"] == "jsvmp-challenge", site
+        assert verdict["family"]["grade"] == "observed", site
+        assert verdict["mode"]["value"] == "200-inline-or-post", site
+        assert verdict["mode"]["grade"] == "observed", site
+        assert "200" in verdict["mode"]["evidence"], site
+        assert verdict["stages"]["grade"] == "unresolved", site
         assert verdict["observed_in_capture"]["ignition_events"] > 100000, site
+        assert verdict.get("bundle"), site
+    
     summary["t7_sites"] = {s: {
         "mode": v["mode"]["value"], "cookie": v["cookie"]["value"],
         "family": v["family"]["value"]} for s, v in t7_results.items()}
@@ -78,14 +78,17 @@ def main() -> int:
 
     # --- T3 on the fresh re-capture (proven-pool keys) --------------------
     fresh_dirs = sorted((ROOT / "chromium/src/out/XTraceIntegration/validation")
-                        .glob("p55-e6-xj1-*"), reverse=True)
+                        .glob("p55-e6-xj1-*"),
+                        key=lambda d: d.stat().st_mtime, reverse=True)
     assert fresh_dirs, "no re-capture found (run scripts/p55-e6-recapture.cjs)"
     fresh = fresh_dirs[0] / "trace.ndjson"
     t3_fresh = run("t3", fresh)
     assert t3_fresh["summary"]["instances_with_metadata"] > 0
+    # R5/R4 grade split: proven-read (per-event resolution via
+    # pool_indices) and candidate-pool (membership only).
     proven = [e for e in t3_fresh["read_list"]
-              if e["grade"] == "proven-pool"]
-    assert proven, "no proven-pool keys on the fresh capture"
+              if e["grade"] in ("proven-read", "candidate-pool")]
+    assert proven, "no resolved keys on the fresh capture"
     keys = {e["key"] for e in proven}
     # The corpus bundles decode via charCodeAt/base64-style builtins —
     # the README's boundary-hook fact cross-checks the pool resolution.

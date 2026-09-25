@@ -2006,10 +2006,10 @@ index 0000000000..3f6b84980e
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..1a890deaaa
+index 0000000000..a9683f5ae8
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1462 @@
+@@ -0,0 +1,1477 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2950,9 +2950,36 @@ index 0000000000..1a890deaaa
 +// in the renderer that ran page scripts, which is usually the LAST to
 +// answer, so a refusal-first policy would misreport).
 +struct DumpFanoutState {
-+  explicit DumpFanoutState(int endpoints) : remaining(endpoints) {}
-+  std::atomic<bool> done{false};
-+  int remaining;  // diagnostic only
++  using DumpResult = XTraceCaptureController::DumpResult;
++  DumpFanoutState(int endpoints, DumpResult cb)
++      : remaining(endpoints), cb(std::move(cb)) {}
++  // First acceptance resolves; the LAST refusal resolves. The callback
++  // lives here and is consumed exactly once under the lock — a double
++  // invocation is a structural no-op, never a null Run.
++  void Resolve(bool accepted, const std::string& r) {
++    DumpResult local;
++    {
++      base::AutoLock lock(this->lock);
++      if (resolved || !cb) {
++        return;
++      }
++      if (accepted) {
++        resolved = true;
++      } else if (--remaining > 0) {
++        return;  // still waiting for a possible acceptance
++      } else {
++        resolved = true;
++      }
++      local = std::move(this->cb);
++    }
++    if (local) {
++      std::move(local).Run(accepted, r);
++    }
++  }
++  base::Lock lock;
++  bool resolved = false;
++  int remaining;  // refusals still expected
++  DumpResult cb;
 +};
 +}  // namespace
 +
@@ -2981,37 +3008,25 @@ index 0000000000..1a890deaaa
 +            // page scripts; other renderers answer no-activation-context
 +            // and must not shadow it.
 +            // First ACCEPTANCE resolves; only when every endpoint has
-+            // REFUSED does the failure report go out (the anchor lives
-+            // in the page renderer, which is rarely the first replier).
++            // REFUSED does the failure report go out. Mutex-protected
++            // result slot: no re-entrancy hazards, the callback runs
++            // exactly once under the lock.
 +            auto* state = new DumpFanoutState(
-+                static_cast<int>(weak->control_remotes_by_epoch_.size()));
++                static_cast<int>(weak->control_remotes_by_epoch_.size()),
++                std::move(callback));
 +            for (auto& [epoch, remote] : weak->control_remotes_by_epoch_) {
 +              remote->DumpAnchor(
 +                  expression, label, 0,
 +                  base::BindOnce(
 +                      [](base::WeakPtr<XTraceCaptureController> w,
-+                         DumpResult cb, DumpFanoutState* state,
++                         DumpFanoutState* state,
 +                         bool accepted, const std::string& r) {
 +                        if (!w) {
 +                          return;
 +                        }
-+                        if (accepted) {
-+                          if (!state->done.exchange(true)) {
-+                            std::move(cb).Run(true, r);
-+                          }
-+                          return;
-+                        }
-+                        // refusal: only the LAST refusal concludes
-+                        if (state->done.exchange(true)) {
-+                          return;
-+                        }
-+                        if (--state->remaining == 0) {
-+                          std::move(cb).Run(false, r);
-+                        } else {
-+                          state->done.store(false);  // still waiting
-+                        }
++                        state->Resolve(accepted, r);
 +                      },
-+                      weak, std::move(callback), state));
++                      weak, base::Unretained(state)));
 +            }
 +          },
 +          weak_factory_.GetWeakPtr(), anchor_expression, label,
@@ -16469,10 +16484,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..99779bb47e
+index 0000000000..da0c4c4b16
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,620 @@
+@@ -0,0 +1,632 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16769,9 +16784,13 @@ index 0000000000..99779bb47e
 +void OnIgnitionDump(v8::Isolate* isolate, const char* anchor_label,
 +                    uint32_t window_id, const char* dump_json,
 +                    size_t dump_len) {
++  // The dump is an EXPLICIT operator action, not per-event observation:
++  // it runs on a posted task with no script activation on the stack, so
++  // only the scope's stop state gates it (the script-scope filter was
++  // already applied at anchor-evaluation time — the browser chose this
++  // renderer precisely because its page scripts were in scope).
 +  IgnitionScope* scope = ScopeFor(isolate);
-+  if (!scope || scope->Stopped() || scope->stack.empty() ||
-+      !scope->stack.back().selected) {
++  if (!scope || scope->Stopped()) {
 +    return;
 +  }
 +  // The blob rides the ASSET channel: quadruple accounting identical to
@@ -17082,9 +17101,17 @@ index 0000000000..99779bb47e
 +    *reason = "compile-failed";
 +    return;
 +  }
++  // R7: the classic embedder pattern for running script OUTSIDE a
++  // blink-managed execution scope — a draining MicrotasksScope so the
++  // CallDepthScope microtask DCHECK holds (the bare posted-task Run
++  // tripped api-inl CallDepthScope without one).
++  v8::MicrotasksScope microtasks(isolate,
++                                 context->GetMicrotaskQueue(),
++                                 v8::MicrotasksScope::kRunMicrotasks);
++  v8::TryCatch try_catch(isolate);
 +  v8::Local<v8::Value> result;
 +  if (!script->Run(context).ToLocal(&result)) {
-+    *reason = "eval-threw";
++    *reason = try_catch.HasCaught() ? "eval-threw" : "eval-failed";
 +    return;
 +  }
 +  *accepted = v8::internal::xtrace::IgnitionObserverRequestDump(
