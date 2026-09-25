@@ -473,3 +473,39 @@ T7已删site答案字典并正确处理空trace，但合成普通100000条执行
 - `summary.json`：汇总范围及未重编译/未执行私有语料/未触第三方/未覆盖原证据说明。超时UAF仅做源码审计，不声称有利用或崩溃实测。
 
 本轮完成的是**审核**，不是产品整改；当前新增阻塞和未交付命名空间/预算/时序契约仍需工程师落实。最终状态维持changes required，不因提交标题“remediation complete”或测试计数全绿而提前冻结。
+
+---
+
+## 13. 项目架构师全面复核与裁定（2026-09-25）
+
+**结论：与总审一致——changes required，不 accepted-p55。** RR1–RR6 六项我逐条独立核验**全部属实**（源码/证据级，见 13.1）；已修复且被总审认可的部分（宽度计数、NUL/CJK 编码、shared 不可用、数组逻辑长度、负参数校验、producer sampled_out、echo oracle、identity.nav_chain、or-True 恒真断言）**保留不回退**。以下为我的裁定与对 S0–S6 的门槛补充；13.3 记录我两处过宽延期的自我纠正。
+
+### 13.1 独立核验记录
+
+| 项 | 我的源码/证据核验 | 结论 |
+| --- | --- | --- |
+| RR1 | `xtrace_handler.cc:548–571`：`executionContextId` 接收后**从未使用**；注释自认"first accepting endpoint wins"；bridge:610 `v8::Script::Compile` + :618 `MicrotasksScope(kRunMicrotasks)`——renderer 编译并**执行**锚点表达式且主动推进微任务 | **属实**：违反"构造性不调用用户代码"与 scope/stop 前置 |
+| RR2 | bridge:547–568：投递 lambda 按值捕获 `&inner_accepted/&inner_reason/&done`（调用栈局部）；`TimedWait(10s)` 超时返回后局部析构，队列任务仍可写失效地址/Signal 已销毁 event | **属实**（源码可证生命周期错误，无需 UAF 实验） |
+| RR3 | controller:1123 终态裁决仍用旧式 `eligible != enqueued + dropped`（无 sampled_out）→ 有预算跳过的 capture 永远 incomplete/inconsistent；observer:1029–1052 `tap_budget_total` 挂编译实例、仅新配置清零（"generation=activation" 注释替代了每激活语义）；事件/manifest 无完整计划引用 | **属实** |
+| RR4 | observer:513–519 accessor 分支只 `skipped++` 计宽度、**键的编码字节从不预留**（180×120 中文字符键 → 135KB 且 partial=false）；:620 `ta->byte_length()` 对 length-tracking 视图非当前合法长度；:592–593 `get_scalar` 先于 hole 判定（holey double → DCHECK exit -5） | **属实** |
+| RR5 | `p55_t3_t7.py:123,136` join 键仅 `(script_id, bytecode_version)`，扫描 trace 父目录全部 assets 且无摘要/归属校验 → 跨 producer 同 id 错连为确定性错误；T7:280–288 `random_path_bundle` 正则 `/[A-Za-z0-9]{8,}\.[0-9a-f]{6,8}\.js$` 会命中任何内容哈希命名的普通 SPA bundle，配合 density 即输出 `observed`；R0 decoy 回归仍断言旧 grade `proven-pool`（:172）→ 新错连漏网 | **属实** |
+| RR6 | `p55-r6-synvm-evidence.cjs:136–146`：仅按 offset 相等计数、不比对 tap 的实例/值/顺序，断言 `linkedTaps > 0`；`v8/src/d8/d8.cc:91,101` 每次 tap/observation 逐条 printf——"无打印谓词基准"不成立 | **属实** |
+
+### 13.2 裁定与 S0–S6 门槛（在总审 12.4 基础上收紧/明确）
+
+1. **RR1 dump 根定位器（我正式定约）**：本期 dump **彻底移除表达式求值**——根只允许三类：(a) 同 capture+producer+isolate epoch 内已登记对象 token（来自先前 tap/dump）；(b) 已知激活的显式 frame/register slot；(c) 自 token 起的显式 own-data 路径。accessor/Proxy 根拒绝并给原因；scope/stop/capture 校验在**执行任何读取之前**；唯一 target（context/isolate），禁止广播竞答；返回实际 asset/request 身份与保存状态。若将来需要表达式求值，另立"有副作用调试求值"能力契约（独立授权、独立披露），**不得以只读 dump 名义开放**。
+2. **RR2 所有权模型**：堆上请求状态 + 取消/失效 token + 生命周期 epoch 键；**删除 TimedWait 模式本身**（不接受加长等待/空指针 if/进程全局锁作为替代）；配置以不可变快照投递、所属线程替换；Worker 销毁使该 epoch 请求整体失效。并发契约测试（并行 Worker × 配置更新交错）为 S2 硬门禁。
+3. **RR3 计账**：§10.2 冻结语义逐字生效——**每激活**预算在激活边界（Script.evaluate call/return）重置，per-instance 累计只作二级上限；`producers[].generations[]` 分代窗口统计 + 事件携带 plan revision；coverage 轴纳入 dump 截断/unsupported/unconfirmed（无 sampled ≠ full）；controller 的旧式等式分支**删除**（兼容只存在于 validator 的 accounting_model 开关）；新增"有 sampled 且等式成立 → transport complete + coverage partial"的单测与真实用例；**所有产出 capture 的证据驱动必须断言预期 (terminal, coverage) 对**。
+4. **RR4 编码器**：统一有界 writer/预留接口覆盖 key、accessor 跳过记录、数组元素、JSON 收尾结构；上限按**编码后字节**；array 按元素 kind 区分 hole/NaN/±Inf/-0；TypedArray 校验 shared/detached/length-tracking/RAB-OOB 的当前合法长度；三反例（accessor 字节、RAB、double-hole）先入库再修；GC 内部安全以"不持裸 Tagged/地址跨分配点"的重建遍历证明（gcstress 需覆盖 walk 内部，非仅在 walk 之间）。
+5. **RR5 身份与分析**：D1 键补全为我原裁定的五元命名空间（capture+producer/process_epoch+**isolate_epoch**+script_id+bytecode_version），asset 摘要+路径边界校验先于分析，坏记录显式报告不静默；T3 每条已证读取记录 offset→operand→pool 索引的可重算证据，receiver 分类保持 candidate；T7 的 `observed` 只承载原始事实字段（density、状态码、URL 形状各自单列），family 分类降为 hypothesis，除非有 echo/412-oracle 级证据；R0 decoy 回归改断言**当前** grade 并新增跨 producer 错连负例。
+6. **RR6 重证**：synvm 断言改为逐值/逐顺序对照页面真值表（12 步 PC/opcode/值），加篡改/错位/跨实例负例（必须红）；性能基准用计数回调或固定容量 sink（零逐事件打印），分项报告 gate/predicate/encode/transport/write，保留每轮 stdout/退出码/有效 tap 数/实际执行层证据；d8 printf 成本不得计入 producer 写入成本。
+7. S0/S6 沿用总审：反例先入库（旧实现必红、独立输出目录、不覆写历史证据）；每阶段同步补丁+重放；稳定后重建全部受影响测试目标再跑门禁；381/28/211 等既有绿不作为新缺项豁免。
+
+### 13.3 自我纠正（两处过宽延期，采纳总审驳回）
+
+- §11"诚实边界"曾把**每激活预算被实现为每实例 family**记为边界说明——这是用注释替换裁决，总审驳回正确，现按 13.2.3 恢复每激活语义。
+- §11 曾把 **isolate_epoch/完整命名空间**记为"R4 后续"——RR5 的跨 producer 确定性错连证明它是正确性前置而非精化，现按 13.2.5 提前为硬交付。
+
+### 13.4 状态
+
+progress JSON `p55` = `changes-required-rr1-rr6`。S0–S6 完成并经总审反例复验、我核对本节门槛后，方可 accepted-p55；在此之前 P6/报告/Agent 不得引用 P5.5 任何结论为已验证事实。
