@@ -2,7 +2,7 @@
 
 - 版本：v2.0（2026-09-24，设计契约定稿）。v1.0–v1.3 为提案与裁决轮；本版并入 [总审 §13](chromium-p55-value-observation-design.md)（若本文件与原设计文档并存，以本契约为准）、[§15 架构师裁定](chromium-p5-webidl-generator-handoff.md) 与 P5-R1 教训；原设计文档保留作历史。
 - 依据：P2/P3/P4 已冻结设施、P5 交付（含重开整改）、trace-schema-v3、真实语料（`analysis/pmos-*-sgcc-20260923/` + 本次采集 `analysis/corpus-capture/`）。
-- 状态：**契约为验收依据，不代表实现通过。2026-09-25 总架构师终审为 changes required**，发现范围/线程、预算等式、dump安全编码、实例元数据与分析证据缺口，详见 [执行工单 §7～§9](chromium-p55-execution-handoff.md)。原六决策方向保留；每激活预算、Chrome dump和请求锚点不能由实施方自动改成每实例预算、d8切片或set→get替代。下一执行块按工单P55-R0～R7，不标accepted-p55。
+- 状态：**契约为验收依据，不代表实现通过。71a69c1 整改复审仍为 changes required**，最新裁决与 S0～S6 执行任务见 [执行工单 §12](chromium-p55-execution-handoff.md)。旧反例部分修复、echo本地oracle获认可；但dump任意表达式求值/多renderer广播/超时栈指针、controller旧计数式、每激活预算和完整实例身份未闭合。不得把后者自动登记为不阻塞的后续项；根定位同样须遵守不执行用户代码、唯一目标和stop范围纪律。
 
 ## 1. 目标与交付框架
 

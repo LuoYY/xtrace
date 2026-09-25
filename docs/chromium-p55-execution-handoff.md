@@ -1,7 +1,7 @@
 # P5.5 执行工单：值观测二期（引擎长程块）
 
-- 版本：v1.1-review（2026-09-25，总架构师独立终审见 §7～§9）。
-- **当前裁决：P5.5 不通过终审（changes required），不得标记 accepted-p55。** E1～E8 的勾选及“全部执行完毕”为历史申报；本轮实际发现 scope 绕过、计账未闭合、dump 越界/编码失真和分析假阳性，且 browser dump/请求锚点/合成解释器验收缺项。下一任务按 §8 的 P55-R0～R7 执行。
+- 版本：v1.2-rereview（2026-09-25，基线71a69c1的整改复审见 §12）。
+- **当前裁决：仍为 changes required，不得标记 accepted-p55。** 旧d8 7项/browser 5项反例已亲跑转绿，echo补证有效；但新增dump违反只读/范围/停止语义，跨线程等待存在栈生命周期缺陷，controller计数裁决仍用旧公式，并复现dump上限/数组崩溃和分析错连。§11“全部整改完毕”保留为历史申报；工程师下一任务以 §12.4 为准，不重复推倒已验证成果。
 - 冻结输入：P1–P5 历史验收与[设计契约 v2.0](chromium-p55-design-contract.md)保留；本轮 P5 既有反例门 12/12 通过。不以修复 P5 为由豁免本期新缺陷，也不将 d8 切片当成完整 Chromium 交付。
 - 分工：执行层 agent 实施；总架构师终审。执行模式沿用长程单次终审（§4）。
 - 规范依据：设计契约 v2.0（本文不重复其技术内容，只规定顺序、门禁与升级触发）。
@@ -341,3 +341,135 @@ R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调
 5. 跨线程发布现为投递-等待式；并行 Worker + 配置交错的完全异步契约测试为后续。
 
 progress JSON p55 = `r0-r7-remediation-submitted`。**申请：按工单 §4 一次终审；accepted-p55 由架构师在终审后标记。**
+
+## 12. 总架构师整改复审（2026-09-25，71a69c1）
+
+### 12.1 复审裁决与独立通过项
+
+**结论：本轮不能 accepted-p55；不是只剩文档/后续优化。** 审查 `32a175c..71a69c1` 十个提交（ca7eb9b、d397130、d0752fb、7a13798、bb9e452、4f6fee1、ab58824、6a79466、7cf9d93、71a69c1），逐条对照 §8 与项目架构师 §10 的四项裁定。只做低负载/串行本地复验，没有重编译、跑私有语料、访问第三方目标或覆盖历史证据。
+
+本轮亲跑与证据：
+
+| 项目 | 结果 / 边界 |
+| --- | --- |
+| 最终补丁重放 | Chromium **133** / V8 **137** 文件，0 mismatch、0清单外漂移、双HEAD pin正确；tree=`d187dc0f4f13f826ca9af7ce51f94d703d674cca` / `011708352c4a89f262299a6337a7366dbc0ee9c6` |
+| 基础回归 | **381 Python / 28 launcher / 211 GUI逻辑** 通过 |
+| Blink bindings | 已有隔离Python 3.11，**57/57** 通过 |
+| 上轮反例 | `p55-r0-d8-counterexamples.py` **7/7**、browser驱动 **5/5** 转绿；不代表更广边界已覆盖 |
+| 本地echo | E5驱动亲跑PASS，stage2实际请求Cookie与写入值相符；认可为独立本地oracle，不声称bnet已采到最终Cookie头 |
+| 合成解释器驱动 | 亲跑PASS（563tap、12个链接到op常量的tap、12个页面truth）；该断言强度仍不足以证明逐值/逐实例轨迹，见下文 |
+| 身份 | `identity.json` 绑定当前root HEAD、补丁、组件、d8/浏览器/快照与驱动；旧记录保留 |
+
+认可的实质改善：普通宽度计数、NUL/CJK编码、Shared不可用、数组逻辑长度、负参数校验、producer sampled_out和全局求和、空trace T7降级、D1新增pool_indices、本地echo。**不撤销这些成果；需要补齐的是未覆盖的同类路径与新dump控制引入的回归。** 本轮未重建或声称亲跑“重建后C++目标门禁”，未重新跑15轮长时间性能基准。
+
+### 12.2 高优先级阻塞项
+
+#### RR1：requestDump 实际执行用户代码，忽略目标context，排除scope及stop后仍执行
+
+定位：`content/browser/devtools/protocol/xtrace_handler.cc:548–571`；`content/browser/xtrace/xtrace_capture_controller.cc:974–1021`；`platform/xtrace/xtrace-ignition-bridge.cc:294–318,533–629`。
+
+**实测**：本地页面把 `reviewBox` 定义为getter，读取会使 `reviewReads++`。配置排除全部script后，指定不存在的 `executionContextId="999999"` 请求dump该属性，返回accepted=true，计数 **0→1**；stop返回complete后再请求，仍accepted=true，计数 **1→2**。最后只有第一次dump有资产，说明accepted甚至不等于实际保存。
+
+根因：handler完全不使用executionContextId；controller对所有renderer广播表达式，首接受者胜只防重复回复，不防多处执行；renderer对 `anchorExpression` 做 `Script::Compile/Run`，且 `MicrotasksScope(kRunMicrotasks)` 还可能主动推进页面微任务。scope/stop检查位于结果回调，已经晚于表达式执行；browser也未检查停止状态或精细环境。字符串属性路径同样能触发getter/Proxy，不能因操作者传入就改称“构造性不执行用户代码”。
+
+**整改决定**：本期dump只接受明确目标身份与无用户代码的根定位器，例如受控暂停/锚点下的已登记对象token、合法frame/register slot或显式own-data路径；访问器/Proxy根拒绝并给原因。不能把任意JavaScript求值藏进只读dump。若需要expression求值，项目架构师须把它定义为独立有副作用的调试能力并重新授权/定约，不以本期dump名义默认开放。选择唯一target/context/isolate，校验capture/scope/stop在执行前成立；结果返回实际asset/request身份和保存状态。禁止广播后“谁先接受就是谁”。
+
+必过：无效context、同名对象跨tab/Worker、scope排除、stop前后、getter/Proxy根、微任务计数哨兵、并发请求不重复执行；真正dump读取额外用户代码调用为0。
+
+#### RR2：线程投递超时后使用已失效栈地址；所谓原子发布仍未落地
+
+定位：bridge `:98–127,151–158,272–285,472–478,509–521,546–566,575–595`。
+
+投递lambda携带局部 `inner_accepted/inner_reason/WaitableEvent done` 的地址；`TimedWait(10s)` 超时会返回并析构这些局部，但队列内任务未取消，之后可能写已失效栈地址或对已销毁event Signal。**这是源码可证的生命周期错误，本轮未故意触发UAF**，不是仅有“异步测试未补”。
+
+同文件仍有：`ApplyTapWindowsConfig` 直接跨线程改所有isolate registry/vector；进程全局 `InstanceUrlMap` 无锁却由多个isolate调用；全局Anchor可被别的scope销毁清空；OnActivationBegin只改context，没有同步更新isolate/runner三元组；线程跳转后又重新读取全局anchor，可能取到另一个isolate/context。strong Global context还会延长旧页面寿命，不能作为无成本锚点缓存。
+
+**整改路径**：以目标isolate/runner/生命周期epoch为键管理请求；堆上拥有请求状态、完成回调、取消/失效token，所有V8操作在所属线程完成；超时只取消/返回一次，迟到任务仅检查取消后退出，绝不持调用栈地址。配置通过不可变snapshot投递并在所属线程替换，Worker销毁使该epoch所有请求失效，不去清别人的anchor。不能用更长TimedWait、额外空指针if或进程全局锁替代所有权设计。
+
+项目架构师§10.2/10.3已要求所属线程原子发布与并发测试；§11把它叫“功能等价物/后续完全异步测试”不成立，本轮不追认延期。
+
+#### RR3：model-2等式只修了一半，预算语义与计划引用仍偏离裁决
+
+定位：controller `:1123–1127`；V8 observer `:1029–1052,1323–1349`；logger的value_tap字段。
+
+**独立新capture**：eligible=**7400**、enqueued=written=**7133**、sampled_out=**267**、dropped=failed=0、全部producer确认；`7400=7133+267`成立，validator PASS，但controller按旧式 `eligible=enqueued+dropped` 判为 **incomplete/inconsistent-counts**。最近E7目录也保留同类结果；E7门禁未断言预期terminal，所以“PASS”没有覆盖传输结算。
+
+全局sum和accounting_model=2已经正确进步，但：
+
+- maxTapsPerActivation仍存Entry里，只在新计划清零；连续两个Script.evaluate中调用同一编译函数仍共用原实例预算。代码用“generation boundary=activation boundary”解释，不是§10明确要求的每激活。
+- tapPlanSerial只在CDP应答/内部JSON，事件/manifest没有完整计划引用与 `producers[].generations[]` 分代窗口统计，仍不能核对一条tap按哪份预算记录。
+- coverage仅由sampled总数决定，dump截断/不支持值/未确认producer等未知状态没有正确纳入，不能把没有sampled当full。
+- valueObservation仍可在mode=semantic中安装；本轮以semantic请求实际产出tap。strict参数检查不等于精细环境权威拒绝，函数/实例/offset元数据绑定也未补齐。
+
+整改：controller/producer/validator共同使用同一revision契约；补“有sampled且等式正确→transport complete、coverage partial”的controller单测与真实case。按已裁决激活身份设置预算生命周期，另保留单独的实例/capture资源上限。计划必须写入status/manifest并由事件引用，更新、旧事件、stop边界可重算；回执表明applied/not-applied，不返回仅已排队的假成功。
+
+#### RR4：旧dump例修好，但同类边界仍可越预算、失真或崩溃
+
+定位：`v8/src/interpreter/xtrace-ignition-observer.cc:300–663`。
+
+新增本地d8反例：
+
+| 输入 | 结果 | 原因 |
+| --- | --- | --- |
+| 180个accessor属性，每key为120个中文字符 | **135503字节**，getter调用0，但 `partial=false`、work=2 | accessor分支没有Tick/输出预留；单key≤128仍可因转义膨胀超过64KiB |
+| 长度跟踪RAB视图，JS byteLength=16、首字节23 | dump报 **byte_length=0、captured、hex=""** | 使用存储字段而非当前合法逻辑长度 |
+| `[1.5, , Infinity, NaN]` | **exit=-5**；`fixed-primitive-array-inl.h:165 !is_the_hole(index)` | FixedDoubleArray先get_scalar，没有先判hole；特殊double也会统一写null失真 |
+
+GC安全仍不能由“dump前后有CollectGarbage”证明：walker循环里持Tagged descriptors/elements/obj和visited裸地址，小BigInt转换仍可分配；现gcstress在walk之间强制GC而非证明walk内部无搬迁。应在不保留这些裸局部跨分配的前提下重建遍历：handle保活且每次重新取可能移动的对象/descriptor，或使用已证明无分配的读取路径；不可通过禁GC或强持有整个堆兜底。
+
+整改：一次统一的有界writer/预留接口覆盖key、accessor跳过记录、数组元素、JSON结束结构；上限按编码后的实际字节，不是源字符数。array按元素kind区分hole/NaN/Infinity/-0；TypedArray验证shared/detach/length-tracking/RAB-OOB的合法当前长度。预算必须在读/转换前生效，截断与unavailable明示。先把三反例入库，不继续逐单例手补计数。
+
+#### RR5：D1/T3身份缺口仍制造确定错连；T7仍把特征推断标observed
+
+定位：`scripts/p55_t3_t7.py:82–224,277–311`，D1键仍为script_id/version。
+
+新增**合成两producer/capture**，都有script_id=1/version=1，但pool分别是`actualA`和`foreignB`：读取A事件时T3用另一份metadata覆盖，输出 **foreignB / proven-read**。因此isolate_epoch/完整命名空间不是“后续精化”，而是结果正确性的前置；只给pool_indices不能闭合身份。当前扫描全部assets子目录、缺摘要/路径/捕获归属校验、静默吞坏JSON的问题仍在；按set汇总也丢掉每次读取的顺序、次数、证据索引。
+
+T7已删site答案字典并正确处理空trace，但合成普通100000条执行事件+普通版本化bundle URL仍输出 **jsvmp-challenge/observed**。密度与文件名只能支持hypothesis，普通资源的412/200也不能直接证明挑战部署形态。必须让observed只承载观测事实，分类是带证据与替代解释的推断，不能把“两个弱特征”升级为真值。
+
+整改：按capture/producer/epoch/isolate/script/version资产键精确join，单capture目录和摘要校验先于分析；函数元数据/源hash采用明确编码，metadata丢失要可报告/可补发。T3为每次已证读取记录offset→operand→pool证据，receiver分类保持候选。T7证据等级和分类字段分离，加入普通版本化bundle、跨请求412、混capture等负例。现R0 decoy测试仍只查已经删除的 `proven-pool` 等级，**即使新的proven-read错误也能过**，须更新语义断言。
+
+#### RR6：合成fixture与固定tier基准的证明仍不符合申报
+
+- `p55-r6-synvm-evidence.cjs:129–146` 选一个含op的metadata，然后遍历**所有tap**只按offset相等计数；没比较tap的instance、没比较value与12步PC/opcode真值、只要求linkedTaps>0。本轮该驱动也PASS，但“12 truth-linked taps”不等于12个值逐条一致。PC/opcode不同与循环边只检查页面自记truth，生产数据真值没有连上。
+- 固定tier优于旧JIT逃逸基准，但 `p55-r6-perfbench.py` 的“无printf、谓词隔离”不成立：d8 `D8ObserverCallback:101` 每指令打印OBS，`D8TapCallback:91` 每命中或budget_skip打印TAP。**本轮5次循环的小探针产生82条OBS+82条TAP budget_skip**。15次50M事件且capture_output还放大内存/IO，未测Blink producer写入，不能由相减得到纯131ns谓词或完整序列化成本。
+- tier字段恒为Ignition只证明已看见的事件来自Ignition，不证明不存在未采到的优化执行；应保留启动flags与真实执行层证据。性能结果缺每轮stdout/stderr/退出码/有效tap数量、脚本结果核对与产物摘要，本轮不花数分钟重跑不成立的基准。
+
+整改：按完整实例与准确Entry含义挑选tap，再逐值/逐顺序对照独立golden；故意篡改/错位/跨实例tap必须失败。性能用不逐事件打印的计数回调或固定容量sink，显式分离gate、predicate、编码、传输与落盘，实测实际执行层/工作量并保存每轮证据；不把d8 printf成本叫producer写入成本。
+
+### 12.3 对项目架构师边界申请的裁决
+
+| 申请 / 现状 | 裁决 |
+| --- | --- |
+| echo取代本期bnet最终Cookie头直接观测 | **接受为本地独立oracle**，本轮亲跑通过；bnet缺口继续披露。不能扩大成任意站点/跨frame因果证明，仍需身份/负例 |
+| strict JSON代typed plan | 不是必须追求某种语法；只有严格、单一语义、错误可见、完整快照和所属线程原子应用均成立才可等价。当前双解析、旁路精细模式与跨线程直接修改仍存在，**不接受已等价/可延期的声明** |
+| 每激活预算解释为每配置/实例“family” | **不接受**；§10已明确恢复每激活。要改变语义须先说明需求与代价，不可用注释替换裁决 |
+| isolate_epoch/完整命名空间后置 | **不接受**；本轮跨producer proven-read错连直接证明其阻塞性 |
+| posted-and-waited与并发测试后置 | **不接受**；存在明确栈生命周期错误，且tap配置仍直接跨isolate线程改registry，不只是测试形态差异 |
+| requestDump用任意expression求值 | **不接受作为只读dump默认实现**；读取root也在无用户代码保证范围内。需受控根定位器和唯一target；副作用调试另立契约 |
+| R6性能与合成fixture已全绿 | 保留“驱动可运行”的事实，**撤回对逐值轨迹与纯谓词成本的证明力**，按RR6补验 |
+
+### 12.4 下一执行任务（集中收口，不再机械重复R0～R7）
+
+1. **S0：固定本轮反例与冻结边界。** 工程师把getter/context/stop、timeout生命周期模型、accessor预算、RAB视图、double-hole、跨producer T3、普通bundle T7、计数终态加入可移植回归；项目架构师将本节裁决写入正式契约，而不是只改执行记录。禁止运行会修改受跟踪fixture/覆盖旧证据的旧门禁。
+2. **S1：重做dump请求所有权和目标定位（最高优先）。** 删除栈指针异步捕获/同步TimedWait设计；唯一目标、epoch、堆拥有请求、取消/断连/迟到单次结算；根定位不执行JS，scope与stop前置。先fake runner/线程单测再本地多context/Worker测试，不故意触发UAF实验。
+3. **S2：统一tap/metadata/dump的配置状态。** 所属isolate线程应用快照、完整计划revision与事件引用、精细环境校验；清理全局可变Anchor/URL map，停止/销毁失效配对。实现已裁决每激活/每window计数与分代报告；controller新等式及coverage包括截断/未知，旧公式全部消除。
+4. **S3：编码器按类型与编码字节预算统一。** 先保证double-hole不崩、RAB长度正确、accessor/escape预算真实，再验证GC内部安全、环/特殊数字/元数据source编码与总资产预算；所有不支持类型明示，不假装captured空值。
+5. **S4：元数据身份与分析证据收口。** 补完整命名空间、真实operand/源绑定、asset摘要和路径边界；T3每条读取有可重算证据，T7机制分类hypothesis、obs字段仅事实。测试打乱文件顺序、同id跨producer、错池、坏asset、未知输入，不能仅用命中数验收。
+6. **S5：合成/性能重证。** 值序列与golden逐一对照，加篡改负例；打印关闭的同tier分项基准与浏览器端到端另测，产物摘要绑定且资源限流。保留echo本地证明，不访问第三方原站。
+7. **S6：一次性最终验收包。** 产品修复每阶段回写补丁并重放；稳定后重建全部受影响测试目标再跑、保留exit/log/binary证据。总架构师复验旧反例+新反例+合同缺项全部闭合后才accepted-p55；已通过381/28/211不再被当成缺项豁免。
+
+### 12.5 本轮证据与审查边界
+
+独立目录：[p55-rereview-1r08lh6z](../chromium/src/out/XTraceIntegration/validation/p55-rereview-1r08lh6z/)。
+
+- `replay.json`、`identity.json`：当前71a69c1、十提交、补丁/六组件及16项实际产物/驱动摘要。
+- `r0-d8.log`、`r0-browser.log`、`regression.log`、`bindings.log`、`echo-oracle.log`：本轮亲跑通过的旧门禁，不覆盖新缺陷。
+- `dump-control-BNmsl6/report.json`：getter 0→1→2、错误context/scope/stop仍accepted；本次最终只一份asset，第二次假成功。
+- `edge-probes.json`、`accessor-output-budget/dumps/`、`length-tracking-view/dumps/`、`double-holes/stderr.log`：135503字节越上限、RAB视图误报、double-hole V8 fatal。
+- `tap-budget-SJ1joZ/report.json`、`fresh-accounting-check.json`：正确model2等式被controller旧逻辑判inconsistent；同函数两次激活复用实例预算。
+- `cross-producer/result.json`、`t7-ordinary.json`：foreignB被证明为A读取、普通trace被分类observed JSVMP。
+- `perf-print-proof.json`、`tiny-perf-loop.stdout`、`synvm.log`：predicate-only依然逐事件打印；合成驱动PASS与断言缺口。
+- `summary.json`：汇总范围及未重编译/未执行私有语料/未触第三方/未覆盖原证据说明。超时UAF仅做源码审计，不声称有利用或崩溃实测。
+
+本轮完成的是**审核**，不是产品整改；当前新增阻塞和未交付命名空间/预算/时序契约仍需工程师落实。最终状态维持changes required，不因提交标题“remediation complete”或测试计数全绿而提前冻结。
