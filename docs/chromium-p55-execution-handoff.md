@@ -650,3 +650,40 @@ progress JSON `p55` = `s2-accounting-budgets-landed`（下一阶段 S3：编码�
 - EncodeTapValue（tap 侧层一编码）本就逐值有界，未触碰；本阶段只改 dump walker。
 
 progress JSON `p55` = `s3-bounded-writer-landed`。
+
+---
+
+## 18. S4 执行记录：元数据身份与分析证据收口（2026-09-26）
+
+按 §12.4-5 / §13.2-5 执行。D1 资产补全**五元命名空间**身份；分析侧摘要/边界校验先于 join；T3 每条已证读取携带可重算证据；T7 事实与机制分类分离（observed 只承载原始事实，family 无 oracle 至多 hypothesis）。
+
+### 18.1 实现
+
+| 项 | 改动 |
+| --- | --- |
+| 五元命名空间 | bridge：`IgnitionScope` 安装时取进程级 `isolate_epoch`（原子串号）；`OnIgnitionMetadata` 在资产头部注入 `producer_id/process_epoch/isolate_epoch`（sha1/去重按注入后内容结算）——资产键 = (producer, process_epoch, isolate_epoch, script_id, bytecode_version)；producer 头新增 id/epoch 访问器 |
+| 摘要边界 | `p55_t3_t7.load_metadata_assets`：分析前按**生产者公式** `sha1(kind\nurl\ncontent)` 验证每条资产行（实测 12/12 对齐），不匹配/坏 JSON/缺文件全部进显式 `asset_problems[]`（绝不静默跳过）；单 capture 目录内分析；无身份字段的 legacy 资产仅在**唯一 ignition producer** 时可 join 且标注 |
+| T3 可重算证据 | `reads[]` 逐读取行：{key, grade: proven-read, producer_id, process_epoch, script_id, bytecode_version, **offset, pool_index**}——每条可独立重放 offset→pool_indices→constants；聚合 read_list 不再替代证据行；**歧义 join（同进程多 isolate 同 script/version 且事件无 isolate 标识）显式报告 `ambiguous_joins[]`，绝不猜**；script/version 双侧 int 归一 |
+| T7 事实/分类分离 | 输出新增 `facts`：ignition_events/density_tier/status_codes/url_shapes/cookie_names 各自带独立 grade（全 observed 级原始事实）；family 分类：**无 oracle 至多 hypothesis**（observed 仅当本 capture 观测到 412 interstitial + 版本化 bundle + 高密度，或语料记录级 412 两阶段引用）；普通内容哈希 SPA bundle 不再被标 observed |
+| 对齐 | R0 decoy 案例改断言当前语义（actualKey=proven-read、decoy 仅 candidate-pool，夹具改真实摘要+pool_indices 指向被读常量）；S0 cross 夹具改真实摘要+五元身份；E6 验证器对齐（语料本地重放 family=hypothesis + facts 断言、keyed 事实行、identity_model 字段） |
+
+### 18.2 证据（2026-09-26 亲跑，S4 二进制）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `s0.t3-cross-producer`（S0 冻结） | **转绿**：双 producer 同 (script,version)、各自真实摘要与完整身份——foreignB 不再可能被证明为捕获 A 的读取 |
+| `s0.t7-ordinary-bundle`（S0 冻结） | **转绿**：10 万普通事件 + webpack 内容哈希 bundle → family=jsvmp-challenge/**hypothesis** |
+| R0 反例套件（7 案例） | **GREEN**（decoy 语义断言升级后全过；此前的恒真断言消除） |
+| S0 python 套件 | **7/8 绿**（仅余 `s0.d8-no-per-event-print`→S5） |
+| E6 重采集 + 验证器 | 重采集（身份资产流动）→ **PASS**：identity join 0 歧义 0 问题、proven reads 正常、语料三站 family 全部诚实降为 hypothesis 且 facts 断言通过 |
+| 浏览器回归 | S0 浏览器（dump 不变量）/S1 证据/S2 交错全部 exit 0；S1 d8 矩阵、S3 编码器矩阵 GREEN |
+
+证据目录：`validation/p55-e6-xj1-p9RhkI/`（重采集）、`p55-s0-20260926-031628/`、`p55-r0-20260926-031627/`、`p55-s0-TczCzJ/` 等。
+
+### 18.3 边界
+
+- 事件行暂无 isolate_epoch 字段（ignition 事件六字段冻结）——同进程多 isolate 的 (script,version) 冲突按歧义报告（不猜）。若分析层需要消歧，后续把 isolate_epoch 加入事件行随 schema 修订（当前Worker 与主 isolate 的 script_id 空间经 registry version 序列自然分离，实测 0 歧义）。
+- 语料 manifest 无 412 记录字段——xj1 的两阶段 412 属 README 级站点记录，本地重放无 412，按 S4 语义 family=hypothesis（R5 时代的 observed 断言已如实撤回）。
+- E6 重采集驱动报 terminal=incomplete：该旧夹具存在未确认 producer（未走 S2 门禁的采集序列），与计账修复无关——S0/S2 门禁拥有 terminal 语义证据。
+
+progress JSON `p55` = `s4-identity-analysis-landed`（下一阶段 S5：合成 VM 逐值 golden + 零打印基准）。

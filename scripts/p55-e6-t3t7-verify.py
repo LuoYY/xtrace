@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""P55-E6 acceptance (execution handoff E6 row).
+"""P55-E6/S4 acceptance: T3 five-part identity + per-read evidence,
+T7 facts/hypothesis separation (handoff §12.4-5).
 
 T3: on the three-site corpus traces the read list is NON-EMPTY with the
 proven/unproven split explicit (pre-D1 captures: all unproven-no-
@@ -54,8 +55,14 @@ def main() -> int:
                       ["--site-name", site,
                        "--corpus-manifest", str(CORPUS / "corpus-manifest.json")])
         t7_results[site] = verdict
+        # S4 (RR5): a local replay serves 200 — no 412/oracle evidence IN
+        # the capture, so the mechanism claim tops out at HYPOTHESIS.
+        # The raw FACTS (density tier, statuses, URL shape) are observed.
         assert verdict["family"]["value"] == "jsvmp-challenge", site
-        assert verdict["family"]["grade"] == "observed", site
+        assert verdict["family"]["grade"] == "hypothesis", site
+        assert verdict["facts"]["status_codes"]["value"] == [200], site
+        assert verdict["facts"]["ignition_density_tier"]["value"] == "high", site
+        assert verdict["facts"]["url_shapes"]["value"]["versioned_hash_bundle"] is True, site
         assert verdict["mode"]["value"] == "200-inline-or-post", site
         assert verdict["mode"]["grade"] == "observed", site
         assert "200" in verdict["mode"]["evidence"], site
@@ -73,7 +80,9 @@ def main() -> int:
         t3_old = run("t3", traces[0])
         assert t3_old["summary"]["read_list_nonempty"], site
         grades = {e["grade"] for e in t3_old["read_list"]}
-        assert grades == {"unproven-no-metadata"}, (site, grades)
+        # pre-D1 captures: nothing proven; keyed-read facts ride along
+        assert grades <= {"unproven-no-metadata", "unproven-keyed"}, (site, grades)
+        assert "proven-read" not in grades and "candidate-pool" not in grades, site
     summary["t3_corpus"] = "non-empty, all unproven-no-metadata (pre-D1)"
 
     # --- T3 on the fresh re-capture (proven-pool keys) --------------------
@@ -88,6 +97,7 @@ def main() -> int:
     # pool_indices) and candidate-pool (membership only).
     proven = [e for e in t3_fresh["read_list"]
               if e["grade"] in ("proven-read", "candidate-pool")]
+    assert "identity_model" in t3_fresh["summary"], "S4 identity model"
     assert proven, "no resolved keys on the fresh capture"
     keys = {e["key"] for e in proven}
     # The corpus bundles decode via charCodeAt/base64-style builtins —
@@ -98,10 +108,12 @@ def main() -> int:
         t3_fresh["summary"]["instances_with_metadata"] > 0
     summary["t3_fresh"] = {
         "dir": fresh_dirs[0].name,
+        "identity_model": t3_fresh["summary"]["identity_model"],
         "instances_with_metadata": t3_fresh["summary"]["instances_with_metadata"],
-        "proven_keys": len(proven),
+        "proven_reads": t3_fresh["summary"]["proven_reads"],
+        "ambiguous_joins": t3_fresh["summary"]["ambiguous_joins"],
+        "asset_problems": t3_fresh["summary"]["asset_problems"],
         "sample": sorted(k for k in keys if k)[:10],
-        "classes": t3_fresh["summary"]["classes"],
     }
 
     summary["verdict"] = "pass"

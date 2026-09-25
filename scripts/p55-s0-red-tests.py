@@ -198,6 +198,8 @@ def main() -> int:
                      "bytecode_offset": "0", "opcode": "GetNamedProperty",
                      "tier": "ignition", "activation_ref": None}}) + "\n")
 
+    import hashlib
+
     def meta_blob(first_constant):
         return {"kind": "v8.bytecode-metadata", "schema": 1, "script_id": 1,
                 "bytecode_version": 1,
@@ -206,19 +208,34 @@ def main() -> int:
                                  "pool_indices": [0]},
                 "constants": [{"s": first_constant}]}
 
-    # SAME (script_id, bytecode_version) from TWO producers; the loader's
-    # dict overwrite hands capture A's reads to whichever row sorts last.
-    (assets / ("sha1_" + "A" * 40 + ".js")).write_text(
-        json.dumps(meta_blob("actualKey")))
-    (assets / ("sha1_" + "B" * 40 + ".js")).write_text(
-        json.dumps(meta_blob("foreignB")))
+    # SAME (script_id, bytecode_version) from TWO producers, each with a
+    # VALID digest and full five-part identity — the only defense against
+    # the mis-join is the identity namespace itself (S4).
+    def write_asset(content_blob, producer, iso_epoch):
+        text = json.dumps(content_blob)
+        digest = hashlib.sha1(text.encode()).hexdigest()
+        blob = dict(content_blob)
+        blob["producer_id"] = producer
+        blob["process_epoch"] = "1"
+        blob["isolate_epoch"] = iso_epoch
+        blob_text = json.dumps(blob)
+        # digest uses the producer's formula:
+        #   sha1(kind + "\n" + url + "\n" + content)
+        material = ("v8-bytecode-metadata" + chr(10) +
+                    "v8-bytecode-metadata://1/1" + chr(10) + blob_text)
+        digest = hashlib.sha1(material.encode()).hexdigest().upper()
+        (assets / f"sha1_{digest}.js").write_text(blob_text)
+        return digest
+
+    da = write_asset(meta_blob("actualKey"), "producerA", 1)
+    db = write_asset(meta_blob("foreignB"), "producerFOREIGN", 1)
     (assets / "manifest.ndjson").write_text(
         json.dumps({"kind": "v8-bytecode-metadata",
-                    "asset_id": "sha1:" + "A" * 40,
+                    "asset_id": "sha1:" + da,
                     "url": "v8-bytecode-metadata://1/1",
                     "producer_id": "producerA"}) + "\n" +
         json.dumps({"kind": "v8-bytecode-metadata",
-                    "asset_id": "sha1:" + "B" * 40,
+                    "asset_id": "sha1:" + db,
                     "url": "v8-bytecode-metadata://1/1",
                     "producer_id": "producerFOREIGN"}) + "\n")
     proc = subprocess.run(

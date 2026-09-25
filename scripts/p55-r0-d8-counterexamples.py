@@ -152,26 +152,46 @@ def main() -> int:
         "ignition": {"script_id": "1", "bytecode_version": "1",
                      "bytecode_offset": "0", "opcode": "GetNamedProperty",
                      "tier": "ignition", "activation_ref": None}}) + "\n")
+    import hashlib
     meta = {"kind": "v8.bytecode-metadata", "schema": 1, "script_id": 1,
             "bytecode_version": 1,
             "instructions": {"count": 1, "offsets": [0], "opcodes": [1],
-                             "operands": [1], "register_operands": [0]},
+                             "operands": [1], "register_operands": [0],
+                             "pool_indices": [1]},
             "constants": [{"s": "NOT_READ_decoy"}, {"s": "actualKey"}]}
-    (synth / "assets" / "t" / "sha1_DECOYDECOYDECOYDECOYDECOYDECOYDECOY1234.js"
-     ).write_text(json.dumps(meta))
+    # S4: full five-part identity + a VALID digest (the loader verifies
+    # digests before analysis; fixture ids must be real).
+    trace_event = json.loads(trace.read_text().strip())
+    producer = trace_event.get("producer_id", "r1")
+    epoch = trace_event.get("process_epoch", "1")
+    meta["producer_id"] = producer
+    meta["process_epoch"] = epoch
+    meta["isolate_epoch"] = 1
+    blob_text = json.dumps(meta)
+    # digest uses the producer's formula:
+    #   sha1(kind + "\n" + url + "\n" + content)
+    material = ("v8-bytecode-metadata" + chr(10) +
+                "v8-bytecode-metadata://1/1" + chr(10) + blob_text)
+    digest = hashlib.sha1(material.encode()).hexdigest().upper()
+    (synth / "assets" / "t" / f"sha1_{digest}.js").write_text(blob_text)
     (synth / "assets" / "t" / "manifest.ndjson").write_text(json.dumps({
         "kind": "v8-bytecode-metadata",
-        "asset_id": "sha1:DECOYDECOYDECOYDECOYDECOYDECOYDECOY1234",
-        "url": "v8-bytecode-metadata://1/1"}) + "\n")
+        "asset_id": "sha1:" + digest,
+        "url": "v8-bytecode-metadata://1/1",
+        "producer_id": producer}) + "\n")
     proc = subprocess.run(
         [sys.executable, str(ROOT / "scripts/p55_t3_t7.py"), "t3",
          "--trace", str(trace)], capture_output=True, text=True, timeout=120)
     try:
         t3 = json.loads(proc.stdout)
-        keys = {e["key"] for e in t3["read_list"]
-                if e["grade"] == "proven-pool"}
-        check("r0.t3-decoy-not-proven", "NOT_READ_decoy" not in keys,
-              f"proven keys={sorted(keys)}")
+        # S4 semantics: per-read rows grade proven-read; the decoy (never
+        # read at a resolved offset) may appear ONLY as candidate-pool.
+        proven = {r["key"] for r in t3.get("reads", [])
+                  if r["grade"] == "proven-read"}
+        grades = {e["grade"] for e in t3["read_list"]}
+        check("r0.t3-decoy-not-proven",
+              "actualKey" in proven and "NOT_READ_decoy" not in proven,
+              f"proven keys={sorted(proven)} grades={sorted(grades)}")
     except Exception as e:  # noqa: BLE001
         check("r0.t3-decoy-not-proven", False, f"analyzer error {e}")
 

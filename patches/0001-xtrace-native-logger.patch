@@ -16640,10 +16640,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..efa46f56a8
+index 0000000000..a23978a324
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,794 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16795,6 +16795,10 @@ index 0000000000..efa46f56a8
 +  raw_ptr<v8::Isolate> isolate_ = nullptr;
 +  std::vector<Activation> stack;          // isolate thread only
 +  std::atomic<bool> closed_{false};       // capture stop: never reopens
++  // S4 (RR5): per-ISOLATE epoch within this process — the five-part
++  // metadata namespace (producer, process_epoch, isolate_epoch,
++  // script_id, bytecode_version) keys asset identity.
++  uint64_t isolate_epoch_ = 0;
 +
 +  bool Stopped() const {
 +    return closed_.load(std::memory_order_acquire) || StoppedLatch();
@@ -17011,6 +17015,10 @@ index 0000000000..efa46f56a8
 +                    size_t dump_len);
 +extern std::string g_tap_windows_config;
 +
++// S4: process-global isolate-epoch serial (main thread, workers — each
++// isolate's scope install takes the next epoch).
++std::atomic<uint64_t> g_next_isolate_epoch{1};
++
 +IgnitionScope* InstallScope(v8::Isolate* isolate) {
 +  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
 +    return nullptr;  // V8 dylib compiled without the observer
@@ -17023,6 +17031,8 @@ index 0000000000..efa46f56a8
 +  }
 +  auto* scope = MakeGarbageCollected<IgnitionScope>();
 +  scope->isolate_ = isolate;
++  scope->isolate_epoch_ =
++      g_next_isolate_epoch.fetch_add(1, std::memory_order_relaxed);
 +  data->SetUserData(
 +      V8PerIsolateData::UserData::Key::kXTraceIgnitionObserver, scope);
 +  {
@@ -17198,6 +17208,25 @@ index 0000000000..efa46f56a8
 +  }
 +  if (!metadata_json || metadata_len == 0) {
 +    return;
++  }
++  // S4 (RR5): the asset carries its FIVE-PART identity (producer,
++  // process_epoch, isolate_epoch — script/version already in the blob)
++  // so analysis joins exactly, never across producers/isolates with
++  // colliding (script_id, version). The injection is a head-splice
++  // into the JSON object; the sha1/dedup settle on the INJECTED blob.
++  std::string identity_blob(metadata_json, metadata_len);
++  {
++    const XTraceThreadProducer* producer =
++        XTraceThreadProducer::CurrentIfExists();
++    if (producer && identity_blob.size() > 1 && identity_blob[0] == '{') {
++      identity_blob.insert(
++          1, "\"producer_id\":\"" + producer->producer_id() +
++                 "\",\"process_epoch\":\"" + producer->process_epoch() +
++                 "\",\"isolate_epoch\":" +
++                 std::to_string(scope->isolate_epoch_) + ",");
++      metadata_json = identity_blob.data();
++      metadata_len = identity_blob.size();
++    }
 +  }
 +  // The asset content is the assembled blob verbatim (UTF-8-safe: the
 +  // blob escapes control chars; non-ASCII source bytes are hex in the
@@ -18584,10 +18613,10 @@ index 0000000000..7a527a2929
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..4ce224aa7a
+index 0000000000..5d62a69b3d
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,295 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -18756,6 +18785,9 @@ index 0000000000..4ce224aa7a
 +  // P5-R1: observe an existing producer WITHOUT creating one — the NADC
 +  // reject path must not initialize anything as a side effect.
 +  static XTraceThreadProducer* CurrentIfExists();
++
++  const std::string& producer_id() const { return producer_id_; }
++  const std::string& process_epoch() const { return process_epoch_; }
 +
 +  // F1/B7: register this process's control endpoint at renderer startup
 +  // (main thread, before any page script). A renderer spawned AFTER an
