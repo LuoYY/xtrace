@@ -140,22 +140,31 @@ def main() -> int:
          "-e", "print('ACT2-BEGIN');f(60);print('ACT2-END');"],
         capture_output=True, text=True, timeout=120)
     (RUN / "per-activation.log").write_text(proc.stdout + proc.stderr)
-    seg = {}
+    # Per-(activation, compile-instance) tap counts: the budget is
+    # per-activation AND per-instance (two instances may each tap 5 in
+    # one activation), and the ACTIVATION RESET means activation 2 sees
+    # fresh taps even after activation 1 exhausted its instances.
+    import collections
+    seg_inst = collections.defaultdict(int)  # (act, script) -> taps
     cur = None
     for line in proc.stdout.splitlines():
         if line.startswith("ACT"):
             cur = line.split("-")[0]
-            seg.setdefault(cur, 0)
         elif line.startswith("TAP ") and cur:
             # budget skips ride the same callback with value
             # {"budget_skip":1} — only REAL taps (hits) count here.
-            if "budget_skip" not in line:
-                seg[cur] += 1
-    ok = (proc.returncode == 0 and 0 < seg.get("ACT1", 0) <= 5 and
-          1 <= seg.get("ACT2", 0) <= 5)
+            if "budget_skip" in line:
+                continue
+            script = line.split("script=")[1].split()[0]
+            seg_inst[(cur, script)] += 1
+    per_ok = all(1 <= n <= 5 for n in seg_inst.values()) and seg_inst
+    act2_ok = any(act == "ACT2" for (act, _) in seg_inst)
+    ok = proc.returncode == 0 and per_ok and act2_ok
+    detail = {f"{a}/{s}": n for (a, s), n in sorted(seg_inst.items())}
     check("s0.tap-budget-per-activation", ok,
-          f"act1_taps={seg.get('ACT1')} act2_taps={seg.get('ACT2')} "
-          f"(both activations must see taps within max_taps=5)")
+          f"per-(activation,instance) taps {detail} — activation 2 must "
+          f"see fresh taps within max_taps=5 after activation 1 "
+          f"exhausted its budgets (per-activation reset)")
 
     # --- RR6: taps/observations are counted, never printed per event -----
     proc = subprocess.run(

@@ -28,7 +28,7 @@ async function launch(opts) {
     argv.push('--xtrace-enable', `--xtrace-file=${opts.trace}`,
       '--xtrace-categories=reverse', '--xtrace-causality=sync',
       '--xtrace-ignition-observer',
-      '--js-flags=--allow-natives-syntax --no-maglev');
+      '--js-flags=--allow-natives-syntax --max-opt=0');
   }
   const fd = fs.openSync(path.join(runDir, `stderr-${opts.tag}.log`), 'w');
   const child = spawn(exe, argv, { env, cwd: root, stdio: ['ignore','ignore',fd,'pipe','pipe'] });
@@ -88,6 +88,7 @@ async function launch(opts) {
       // calls, so the Ignition window is exactly the warm-up.
       const start = await s.c.send('XTrace.startCapture', {
         categories: 'reverse',
+        mode: 'ignition-precise', tier: 'ignition',
         valueObservation: {
           scriptPattern: 'causality-smoke',
           windows: [{ id: 0, start: 0, end: 4000000 }],

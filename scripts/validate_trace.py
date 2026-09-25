@@ -2460,6 +2460,19 @@ def validate_v3_accounting_model_2(manifest: dict) -> None:
     counts = manifest.get("counts") or {}
     producers = manifest.get("producers") or []
     total_sampled = 0
+    # S2: reduced observations (truncated/unavailable encodings, partial
+    # dumps) force the coverage axis to partial, exactly like sampled
+    # skips; an unconfirmed producer does too (its counts are unknown,
+    # not zero).
+    total_partial_obs = int(counts.get("partial_observations") or 0)
+    any_unconfirmed = any(not p.get("confirmed", False) for p in producers)
+    coverage = str(manifest.get("observation_coverage", "full"))
+    if (total_sampled or 0) > 0 or total_partial_obs > 0 or any_unconfirmed:
+        if coverage != "partial":
+            raise TraceValidationError(
+                "accounting_model=2: coverage must be partial when "
+                "sampled_out>0 or partial_observations>0 or any producer "
+                "is unconfirmed")
     for producer in producers:
         if not producer.get("confirmed", False):
             continue  # unconfirmed counters are null — not zero-filled

@@ -38,7 +38,7 @@ async function launch(tag, trace) {
     '--xtrace-enable', `--xtrace-file=${trace}`,
     '--xtrace-categories=reverse', '--xtrace-causality=sync',
     '--xtrace-ignition-observer',
-    '--js-flags=--allow-natives-syntax --no-maglev',
+    '--js-flags=--allow-natives-syntax --max-opt=0',
     'about:blank'];
   const fd = fs.openSync(path.join(runDir, `stderr-${tag}.log`), 'w');
   const child = spawn(exe, argv, { env, cwd: root, stdio: ['ignore','ignore',fd,'pipe','pipe'] });
@@ -76,6 +76,7 @@ async function launch(tag, trace) {
         '"sentinel-installed"', returnByValue: true }, sessionId);
       const start = await s.c.send('XTrace.startCapture', {
         categories: 'reverse',
+        mode: 'ignition-precise', tier: 'ignition',
         valueObservation: {
           scriptPattern: 'causality-smoke',  // in scope: taps DO flow
           windows: [{ id: 0, start: 0, end: 1000000 }],
@@ -160,6 +161,7 @@ async function launch(tag, trace) {
       await s.c.send('Runtime.enable', {}, sessionId);
       const start = await s.c.send('XTrace.startCapture', {
         categories: 'reverse',
+        mode: 'ignition-precise', tier: 'ignition',
         valueObservation: {
           scriptPattern: 'causality-smoke',
           windows: [{ id: 0, start: 0, end: 4000000 }],
@@ -202,11 +204,20 @@ async function launch(tag, trace) {
     want(r.valueTaps > 0, 'no taps recorded');
     want(r.sampledOut > 0, 'budget skips missing: sampled_out=0');
     want(r.validatorExit === 0, 'validator must pass the model-2 equation');
-    // DESIRED (frozen): correct equation => transport-complete terminal.
+    // DESIRED (frozen, S2): correct equation => (terminal, coverage)
+    // PAIR — transport complete with observation coverage partial.
+    const manifest2 = JSON.parse(fs.readFileSync(path.join(runDir, 'sampled-terminal.manifest.json'), 'utf8'));
+    r.coverage = manifest2.observation_coverage;
+    r.partialObservations = manifest2.counts ? manifest2.counts.partial_observations : undefined;
+    r.generationsRows = (manifest2.producers || []).reduce((a, p) => a + ((p.generations || []).length), 0);
     want(r.terminal === 'complete',
       `sampled capture judged "${r.terminal}" (${r.terminalReason}) — `
       + `eligible=enqueued+dropped+sampled_out holds and validator passes, `
       + `the terminal must be transport-complete`);
+    want(r.coverage === 'partial',
+      `coverage must be partial when sampled_out=${r.sampledOut}, got ${r.coverage}`);
+    want(r.generationsRows >= 1,
+      `producers[].generations[] must carry per-generation counts, got ${r.generationsRows} rows`);
   }
 
   server.kill();

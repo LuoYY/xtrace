@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..701f723bfb
+index 0000000000..da2248d86d
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,779 @@
+@@ -0,0 +1,788 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -570,6 +570,15 @@ index 0000000000..701f723bfb
 +  if (mode == "ignition-precise" && tier != "ignition") {
 +    callback->sendFailure(Response::InvalidRequest(
 +        "ignition-precise mode requires tier=ignition"));
++    return;
++  }
++  // S2 (RR3): value taps are an IGNITION-PRECISE-environment capability.
++  // The browser is the fine-grained-environment authority — a plan is
++  // never installed into a semantic capture (strict parameter checks
++  // alone did not prevent it).
++  if (in_valueObservation && mode != "ignition-precise") {
++    callback->sendFailure(Response::InvalidRequest(
++        "valueObservation requires mode=ignition-precise"));
 +    return;
 +  }
 +  if (mode == "ignition-precise") {
@@ -2055,10 +2064,10 @@ index 0000000000..0de4c65efb
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..a17e0ef2a9
+index 0000000000..f61988b61f
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1505 @@
+@@ -0,0 +1,1549 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2570,9 +2579,12 @@ index 0000000000..a17e0ef2a9
 +    base::StringToUint64(watermark->dropped, &dropped);
 +    uint64_t scope_overflow = 0;
 +    uint64_t sampled_out = 0;
++    uint64_t partial_observations = 0;
 +    base::StringToUint64(watermark->nadc_partial, &nadc_partial);
 +    base::StringToUint64(watermark->scope_overflow, &scope_overflow);
 +    base::StringToUint64(watermark->sampled_out, &sampled_out);
++    base::StringToUint64(watermark->partial_observations,
++                         &partial_observations);
 +    state->final_producer_seq = final_seq;
 +    state->eligible = eligible;
 +    state->enqueued = enqueued;
@@ -2580,6 +2592,8 @@ index 0000000000..a17e0ef2a9
 +    state->nadc_partial = nadc_partial;
 +    state->scope_overflow = scope_overflow;
 +    state->sampled_out = sampled_out;
++    state->partial_observations = partial_observations;
++    state->generation_counts = watermark->generation_counts;
 +    state->assets_out = watermark->assets_out;
 +    state->watermark_received = true;
 +    state->pipe_alive = false;  // watermark is the pipe's last word
@@ -3209,7 +3223,12 @@ index 0000000000..a17e0ef2a9
 +      all_confirmed = false;
 +      continue;
 +    }
-+    if (state->eligible != state->enqueued + state->dropped ||
++    // S2 (RR3, §10.2 frozen semantics): the model-2 equation — budget
++    // skips are a LEGAL settlement (eligible includes them); the old
++    // two-term form is deleted. Compatibility for the old form lives
++    // ONLY in the validator's accounting_model switch, never here.
++    if (state->eligible !=
++            state->enqueued + state->dropped + state->sampled_out ||
 +        state->enqueued != state->accepted ||
 +        state->accepted != state->written + state->failed ||
 +        state->assets_out !=
@@ -3386,6 +3405,28 @@ index 0000000000..a17e0ef2a9
 +                // third term (schema v1.3).
 +                ",\"sampled_out\":" +
 +                null_or(state->watermark_received, state->sampled_out) +
++                ",\"partial_observations\":" +
++                null_or(state->watermark_received,
++                        state->partial_observations) +
++                ",\"generations\":[" +
++                [&state]() {
++                  std::string rows;
++                  bool first = true;
++                  for (const auto& row : state->generation_counts) {
++                    const size_t colon = row.rfind(':');
++                    if (colon == std::string::npos) {
++                      continue;
++                    }
++                    if (!first) {
++                      rows.push_back(',');
++                    }
++                    first = false;
++                    rows += "{\"generation\":\"" + row.substr(0, colon) +
++                           "\",\"eligible\":\"" + row.substr(colon + 1) +
++                           "\"}";
++                  }
++                  return rows;
++                }() + "]" +
 +                // Writer-side counters are measured for every producer.
 +                ",\"accepted\":\"" + base::NumberToString(state->accepted) +
 +                "\",\"written\":\"" + base::NumberToString(state->written) +
@@ -3409,13 +3450,17 @@ index 0000000000..a17e0ef2a9
 +  // counter — the era of the hardcoded 0 is over.
 +  uint64_t total_eligible = 0, total_enqueued = 0, total_dropped = 0,
 +           total_sampled = 0, total_accepted = 0, total_written = 0,
-+           total_failed = 0;
++           total_failed = 0, total_partial_obs = 0;
++  bool any_unconfirmed = false;
 +  for (const auto& [id, state] : producers_) {
 +    if (state->watermark_received) {
 +      total_eligible += state->eligible;
 +      total_enqueued += state->enqueued;
 +      total_dropped += state->dropped;
 +      total_sampled += state->sampled_out;
++      total_partial_obs += state->partial_observations;
++    } else {
++      any_unconfirmed = true;
 +    }
 +    total_accepted += state->accepted;
 +    total_written += state->written;
@@ -3431,12 +3476,20 @@ index 0000000000..a17e0ef2a9
 +              base::NumberToString(total_failed) +
 +              // R2: real global sum (was a hardcoded "0").
 +              "\",\"sampled_out\":\"" +
-+              base::NumberToString(total_sampled) + "\"}");
-+  // R2 (accounting model 2 + coverage axis): the manifest declares its
-+  // accounting semantics and the observation completeness INDEPENDENTLY
-+  // of the transport terminal. Any budget refusal leaves coverage
-+  // partial even when every written event landed (green != complete).
-+  const std::string coverage = (total_sampled > 0) ? "partial" : "full";
++              base::NumberToString(total_sampled) +
++              // S2 (RR3): reduced-observation count on the same axis.
++              "\",\"partial_observations\":\"" +
++              base::NumberToString(total_partial_obs) + "\"}");
++  // R2+S2 (accounting model 2 + coverage axis): the manifest declares
++  // its accounting semantics and the observation completeness
++  // INDEPENDENTLY of the transport terminal. Coverage is partial when
++  // anything observed-but-reduced happened: budget skips, truncated/
++  // unavailable value encodings, partial dumps, OR a producer that
++  // never confirmed (its counts are unknown, not zero).
++  const std::string coverage =
++      (total_sampled > 0 || total_partial_obs > 0 || any_unconfirmed)
++          ? "partial"
++          : "full";
 +  json.append(",\"accounting_model\":\"2\"");
 +  json.append(",\"observation_coverage\":\"" + coverage + "\"");
 +  json.append(",\"overflow_intervals\":[]");
@@ -3566,10 +3619,10 @@ index 0000000000..a17e0ef2a9
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..639297d38c
+index 0000000000..90ce1ef8dc
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,327 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -3875,6 +3928,12 @@ index 0000000000..639297d38c
 +  uint64_t nadc_partial = 0;  // DP1 (P5): TryEnter-rejected NADC entries
 +  uint64_t scope_overflow = 0;  // P5-R2a/R5: unattributable marks dropped
 +  uint64_t sampled_out = 0;  // P5.5 §6: budget-skipped value taps
++  // S2 (RR3): delivered-but-reduced observations (truncated/unavailable
++  // tap encodings, partial dumps) — coverage axis input.
++  uint64_t partial_observations = 0;
++  // S2: per-config-generation eligible counts, as reported by the
++  // producer's watermark ("generation:count" rows).
++  std::vector<std::string> generation_counts;
 +  uint32_t assets_out = 0;
 +  bool watermark_received = false;
 +  // F1/B7: highest config_generation observed in this producer's accepted
@@ -4252,10 +4311,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..78bac80c44
+index 0000000000..f336c28ecb
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,129 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -4323,6 +4382,14 @@ index 0000000000..78bac80c44
 +  // P5.5 §6: budget-skipped value taps (probe-plan accounting; the
 +  // eligible equation extension lands with schema v1.3).
 +  string sampled_out;
++  // S2 (re-review RR3): observations emitted in a REDUCED state —
++  // truncated/unavailable tap value encodings and partial dumps. These
++  // do NOT affect the transport terminal (they were all delivered);
++  // they force the observation COVERAGE axis to partial.
++  string partial_observations;
++  // S2: per-config-generation eligible counts ("generation:count") —
++  // the producers[].generations[] manifest input.
++  array<string> generation_counts;
 +};
 +
 +// Data plane: one pipe per producer thread. Batch is the only event path
@@ -16573,16 +16640,17 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..f85a297172
+index 0000000000..efa46f56a8
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,765 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
 +
 +#include "third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h"
 +
++#include <algorithm>
 +#include <atomic>
 +#include <cstring>
 +#include <map>
@@ -16676,34 +16744,6 @@ index 0000000000..f85a297172
 +namespace {
 +// The frame whose script context evaluated the most recent activation —
 +// the dump anchor evaluates in that frame's main world.
-+// R4: anchor triple written ATOMICALLY as one unit (two writer threads
-+// must never mix isolate A with runner B — the isolate.cc thread DCHECK
-+// turns any mismatch into a crash).
-+struct AnchorState {
-+  // v8::Isolate is process-scoped engine state, not a blink heap object.
-+  RAW_PTR_EXCLUSION v8::Isolate* isolate = nullptr;
-+  v8::Global<v8::Context> context;
-+  scoped_refptr<base::SequencedTaskRunner> runner;
-+};
-+AnchorState& Anchor() {
-+  static base::NoDestructor<AnchorState> state;
-+  return *state;
-+}
-+base::Lock& AnchorLock() {
-+  static base::NoDestructor<base::Lock> lock;
-+  return *lock;
-+}
-+void SetAnchor(v8::Isolate* isolate) {
-+  // Caller runs INSIDE bytecode execution: context current, runner is
-+  // the isolate-owning sequence.
-+  v8::Local<v8::Context> ctx = isolate->GetCurrentContext();
-+  base::AutoLock lock(AnchorLock());
-+  Anchor().isolate = isolate;
-+  Anchor().runner = base::SequencedTaskRunner::GetCurrentDefault();
-+  if (!ctx.IsEmpty()) {
-+    Anchor().context.Reset(isolate, ctx);
-+  }
-+}
 +}  // namespace
 +
 +bool ScriptSelected(const xtrace::ObserverScopeConfig& scope,
@@ -16727,14 +16767,6 @@ index 0000000000..f85a297172
 +  ~IgnitionScope() override = default;
 +
 +  void WillBeDestroyed() override {
-+    // R4: release the captured anchor context with the scope.
-+    if (isolate_) {
-+      {
-+        base::AutoLock lock(AnchorLock());
-+        Anchor().context.Reset();
-+        Anchor().isolate = nullptr;
-+      }
-+    }
 +    // N2 (review R2): runs on the OWNING isolate thread during
 +    // V8PerIsolateData teardown, serialized with worker teardown. The
 +    // isolate pointer stays valid until unregistration completes — it is
@@ -16816,6 +16848,15 @@ index 0000000000..f85a297172
 +  std::string request_id;
 +};
 +thread_local PendingTokenDump* t_pending_token_dump = nullptr;
++
++// S2: literal substring probe over an emitted (char, len) encoding.
++bool ContainsLiteral(const char* data, size_t len, const char* needle) {
++  const size_t n = strlen(needle);
++  if (len < n) {
++    return false;
++  }
++  return std::search(data, data + len, needle, needle + n) != data + len;
++}
 +
 +// Token -> owning (isolate, runner), recorded by the tap callback while
 +// executing ON that runner. Bounded LRU; guarded (taps and dumps may
@@ -16974,8 +17015,8 @@ index 0000000000..f85a297172
 +  if (!v8::internal::xtrace::IgnitionObserverIsCompiled()) {
 +    return nullptr;  // V8 dylib compiled without the observer
 +  }
-+  // R4: observer env installed — the first bytecode event completes
-+  // the anchor triple (SetAnchor).
++  // S1: observer env installed; token ROUTES (not a global anchor)
++  // carry dump targeting from here on.
 +  V8PerIsolateData* data = V8PerIsolateData::From(isolate);
 +  if (IgnitionScope* existing = ScopeFor(isolate)) {
 +    return existing;
@@ -17013,11 +17054,18 @@ index 0000000000..f85a297172
 +// isolate thread from OnIgnitionEvent, read on the same thread from the
 +// sibling callbacks — single-threaded per isolate by construction.
 +std::string LookupInstanceUrl(uint32_t script_id, uint32_t version);
++base::Lock& InstanceUrlLock() {
++  static base::NoDestructor<base::Lock> lock;
++  return *lock;
++}
 +std::map<std::pair<uint32_t, uint32_t>, std::string>& InstanceUrlMap() {
-+  static std::map<std::pair<uint32_t, uint32_t>, std::string> map;
-+  return map;
++  static base::NoDestructor<std::map<std::pair<uint32_t, uint32_t>, std::string>>
++      map;
++  return *map;
 +}
 +std::string LookupInstanceUrl(uint32_t script_id, uint32_t version) {
++  // S2 (RR2): multiple isolates share this process-wide map — guarded.
++  base::AutoLock lock(InstanceUrlLock());
 +  const auto& map = InstanceUrlMap();
 +  auto it = map.find({script_id, version});
 +  return it == map.end() ? std::string() : it->second;
@@ -17028,6 +17076,9 @@ index 0000000000..f85a297172
 +// config push still get their tables compiled (F1/B7 backfill parity).
 +std::string g_tap_windows_config;
 +base::Lock g_tap_config_lock;
++// S2: plan revision of the CURRENT tap config (0 = none). Events stamp
++// this so a tap row names the budget plan that admitted it.
++std::atomic<uint32_t> g_tap_plan_serial{0};
 +
 +void OnIgnitionDump(v8::Isolate* isolate, const char* anchor_label,
 +                    uint32_t window_id, const char* dump_json,
@@ -17061,6 +17112,14 @@ index 0000000000..f85a297172
 +  if (t_pending_token_dump) {
 +    t_pending_token_dump->admitted = admitted;
 +    t_pending_token_dump->asset_locator = asset_url;
++  }
++  // S2 (RR3): a truncated/partial dump was DELIVERED — coverage axis
++  // input, not a transport failure.
++  if (ContainsLiteral(dump_json, dump_len, R"("partial":true)")) {
++    if (XTraceThreadProducer* producer =
++            XTraceThreadProducer::CurrentIfExists()) {
++      producer->RecordPartialObservation();
++    }
 +  }
 +}
 +
@@ -17098,6 +17157,16 @@ index 0000000000..f85a297172
 +      producer->RecordSampledOut();
 +    }
 +    return;
++  }
++  // S2 (RR3): a delivered-but-REDUCED encoding (truncated/unavailable)
++  // still landed on the wire — transport is fine, but the coverage axis
++  // must know. Substring probes on the V8-side layer-1 encoding.
++  if (ContainsLiteral(value_json, value_len, R"("state":"truncated")") ||
++      ContainsLiteral(value_json, value_len, R"("state":"unavailable")")) {
++    if (XTraceThreadProducer* producer =
++            XTraceThreadProducer::CurrentIfExists()) {
++      producer->RecordPartialObservation();
++    }
 +  }
 +  // Facts only (contract §4): slot/timepoint/instance/window + the
 +  // V8-side bounded value encoding; value_role stays "unclassified" —
@@ -17165,12 +17234,11 @@ index 0000000000..f85a297172
 +  // the selector from the CURRENT snapshot. R1: cache the URL per
 +  // (script_id, version) FIRST — even out-of-scope scripts register, so
 +  // a scope CHANGE that re-includes the script keeps the URL known.
-+  InstanceUrlMap()[{script_id, bytecode_version}] =
-+      script_url ? script_url : "";
-+  // R4: bytecode execution implies an entered context — capture the
-+  // (isolate, context, owning runner) triple atomically for the dump
-+  // anchor (BeginActivation can run context-less).
-+  SetAnchor(isolate);
++  {
++    base::AutoLock lock(InstanceUrlLock());
++    InstanceUrlMap()[{script_id, bytecode_version}] =
++        script_url ? script_url : "";
++  }
 +  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
 +  if (!ScriptSelected(snapshot->observer_scope, script_url)) {
 +    return;
@@ -17225,15 +17293,6 @@ index 0000000000..f85a297172
 +  if (!scope) {
 +    return;
 +  }
-+  // R4: capture the main-world context for later dump-anchor evaluation
-+  // (this hook runs INSIDE script execution — the context is current).
-+  {
-+    v8::Local<v8::Context> context = isolate->GetCurrentContext();
-+    if (!context.IsEmpty()) {
-+      base::AutoLock lock(AnchorLock());
-+      Anchor().context.Reset(isolate, context);
-+    }
-+  }
 +  // One snapshot also feeds the CONTEXT selection (design §2: same
 +  // immutable object as categories/generation).
 +  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
@@ -17241,6 +17300,10 @@ index 0000000000..f85a297172
 +  // unselected inner explicitly suppresses only ITSELF (review B1/B8-B).
 +  scope->stack.push_back(
 +      {ContextSelected(snapshot->observer_scope, frame_url)});
++  // S2 (§10.2): a NEW Script activation begins here — the per-
++  // activation tap budgets (totals + per-window counters) reset on the
++  // owning thread. The per-instance cumulative cap is untouched.
++  v8::internal::xtrace::IgnitionObserverResetActivationBudgets(isolate);
 +  RecomputeGate(isolate, scope);
 +}
 +
@@ -17268,6 +17331,17 @@ index 0000000000..f85a297172
 +  // created later read the cached config at install (InstallScope).
 +  base::AutoLock lock(g_tap_config_lock);
 +  g_tap_windows_config = tap_windows_json;
++  // S2: the plan revision rides the config JSON ("plan_serial"); events
++  // stamp it so every tap names the budget plan it was recorded under.
++  {
++    size_t pos = tap_windows_json.find("\"plan_serial\":");
++    uint32_t serial = 0;
++    if (pos != std::string::npos) {
++      serial = static_cast<uint32_t>(
++          strtoul(tap_windows_json.c_str() + pos + 14, nullptr, 10));
++    }
++    g_tap_plan_serial.store(serial, std::memory_order_relaxed);
++  }
 +  base::AutoLock scopes_lock(*IgnitionScope::scopes_lock());
 +  for (IgnitionScope* scope : *IgnitionScope::scopes()) {
 +    if (scope->isolate_) {
@@ -17275,6 +17349,10 @@ index 0000000000..f85a297172
 +          scope->isolate_.get(), tap_windows_json.c_str());
 +    }
 +  }
++}
++
++uint32_t IgnitionBridge::CurrentTapPlanSerial() {
++  return g_tap_plan_serial.load(std::memory_order_relaxed);
 +}
 +
 +uint64_t IgnitionBridge::TapEventsObserved() {
@@ -17333,10 +17411,10 @@ index 0000000000..f85a297172
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
 new file mode 100644
-index 0000000000..9cd607ad10
+index 0000000000..e72ac98e5d
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,89 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -17393,6 +17471,10 @@ index 0000000000..9cd607ad10
 +  static void ApplyTapWindowsConfig(const std::string& tap_windows_json);
 +  // E7 evidence seam: taps observed by this process (test/drivers).
 +  static uint64_t TapEventsObserved();
++
++  // S2: the plan revision of the CURRENT tap config (0 = none); taps
++  // stamp it so every row names the budget plan that admitted it.
++  static uint32_t CurrentTapPlanSerial();
 +
 +  // S1 (re-review RR1): token-rooted dump — the ONLY dump root. The
 +  // expression-evaluation path is DELETED. Fully asynchronous and
@@ -17969,10 +18051,10 @@ index 0000000000..5ddb033146
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_GENERATED_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
 new file mode 100644
-index 0000000000..af4b8c92c2
+index 0000000000..7a527a2929
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.cc
-@@ -0,0 +1,511 @@
+@@ -0,0 +1,527 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -18349,6 +18431,11 @@ index 0000000000..af4b8c92c2
 +  // overflow drops leave a tail-only gap accounted for by the counters.
 +  const uint64_t seq = next_seq_++;
 +  ++eligible_;
++  // S2: per-generation window stats (serialized at settle).
++  {
++    base::AutoLock lock(generation_counts_lock_);
++    ++generation_counts_[config_generation];
++  }
 +  const uint32_t capacity = XTraceProducerHub::Get()->config().buffer_capacity;
 +  if (overflowed_ || buffer_.size() >= capacity) {
 +    // drop-newest (DP3 ruling): only tail gaps are allowed. Under sustained
@@ -18465,6 +18552,17 @@ index 0000000000..af4b8c92c2
 +      scope_overflow_.load(std::memory_order_relaxed));
 +  watermark->sampled_out = base::NumberToString(
 +      sampled_out_.load(std::memory_order_relaxed));
++  watermark->partial_observations = base::NumberToString(
++      partial_observations_.load(std::memory_order_relaxed));
++  // S2: per-generation eligible counts as compact "generation:count"
++  // rows — the producers[].generations[] manifest input.
++  {
++    base::AutoLock lock(generation_counts_lock_);
++    for (const auto& [generation, count] : generation_counts_) {
++      watermark->generation_counts.push_back(generation + ":" +
++                                             base::NumberToString(count));
++    }
++  }
 +  host()->SubmitWatermark(std::move(watermark));
 +}
 +
@@ -18486,10 +18584,10 @@ index 0000000000..af4b8c92c2
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..aab389833e
+index 0000000000..4ce224aa7a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,292 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -18720,6 +18818,11 @@ index 0000000000..aab389833e
 +    ++sampled_out_;
 +    ++eligible_;
 +  }
++  // S2: emitted-but-reduced observations (truncated/unavailable tap
++  // encodings, partial dumps) — the coverage axis input.
++  void RecordPartialObservation() {
++    ++partial_observations_;
++  }
 +  uint64_t sampled_out() const {
 +    return sampled_out_.load(std::memory_order_relaxed);
 +  }
@@ -18762,6 +18865,11 @@ index 0000000000..aab389833e
 +  std::atomic<uint64_t> nadc_partial_{0};
 +  std::atomic<uint64_t> scope_overflow_{0};
 +  std::atomic<uint64_t> sampled_out_{0};
++  std::atomic<uint64_t> partial_observations_{0};
++  // S2: per-config-generation eligible counts (events accepted under
++  // each generation) — the producers[].generations[] manifest input.
++  base::Lock generation_counts_lock_;
++  std::map<std::string, uint64_t> generation_counts_;
 +  uint32_t assets_out_ = 0;
 +  bool settled_ = false;
 +  bool overflowed_ = false;

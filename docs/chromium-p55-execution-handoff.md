@@ -577,3 +577,42 @@ progress JSON `p55` = `s0-counterexamples-frozen`（下一阶段 S1：dump 请�
 - S0 冻结反例中 RR3/RR4/RR5/RR6 对应案例仍红（S2–S5 范畴），S1 未触碰其缺陷面。
 
 progress JSON `p55` = `s1-dump-ownership-landed`（下一阶段 S2：配置状态统一 + 每激活预算 + controller 新等式/coverage）。
+
+---
+
+## 16. S2 执行记录：计账闭合、每激活预算与配置状态统一（2026-09-26）
+
+按 §12.4-3 / §13.2-3 执行。controller **旧等式删除**；coverage 轴三因子化；**每激活预算**在激活边界重置（实例累计仅作二级上限）；事件携带 plan revision、manifest 携带分代统计；semantic 模式拒绝 valueObservation；全局 Anchor 删除、InstanceUrlMap 加锁。
+
+### 16.1 实现
+
+| 项 | 改动 |
+| --- | --- |
+| 计账（RR3 前半） | `FinalizeLocked`：`eligible != enqueued + dropped + **sampled_out**` 判不一致（旧二项式删除；兼容只留在 validator 的 accounting_model 开关）；watermark 新增 `partial_observations`（截断/不可用 tap 编码 + partial dump，由**发射点**计数：OnIgnitionTap 对 value_json 子串探测 `"state":"truncated"/"unavailable"`、OnIgnitionDump 探测 `"partial":true`） |
+| coverage 轴 | `observation_coverage = partial` 当 `sampled_out>0 ∨ partial_observations>0 ∨ 存在未确认 producer`（其计数是未知而非零）；counts 新增 `partial_observations` 全局和；validator 同规则强制（model-2 下违反即报错） |
+| 每激活预算（RR3 后半） | V8 `IgnitionObserverResetActivationBudgets`：激活边界清零**全部实例**的 tap_budget_total 与每窗 recorded；`tap_recorded`（实例累计）保留为二级上限（kTapInstanceCap=100000，同样计入 budget_skip→sampled_out）；blink 在 OnActivationBegin（所属线程）调用；d8 在 ExecuteSource 顶部调用（每个 -e/脚本=一次激活） |
+| plan revision | bridge 配置时解析 `plan_serial` 存原子量；`LogValueTap` 事件行携带 `"plan_serial"`（经 `IgnitionBridge::CurrentTapPlanSerial()` 访问器） |
+| 分代统计 | producer 在 AcceptEvent 按分代计数（锁保护 map）；watermark 携带 `generation_counts[]`（"gen:count" 行）；manifest `producers[].generations[] = [{generation, eligible}]` |
+| 环境权威（RR3 尾项） | handler：`valueObservation` + `mode!=ignition-precise` → **拒绝**（"valueObservation requires mode=ignition-precise"）；配套：三个既有驱动的 startCapture 补 `mode/tier`、js-flags 改 `--max-opt=0`（precise 环境校验要求） |
+| RR2 清理尾项 | **全局 AnchorState/Anchor()/AnchorLock()/SetAnchor 整体删除**（S1 删表达式路径后已无消费者，含 OnActivationBegin 的 context 捕获与 WillBeDestroyed 清理——strong Global 延长页面寿命的问题随之消失）；`InstanceUrlMap` 读写均加锁（多 isolate 共享进程级 map） |
+
+### 16.2 证据（2026-09-26 亲跑，S2 二进制）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `s0.tap-budget-per-activation`（S0 冻结） | **转绿**：max_taps=5 下两激活按 (activation,instance) 各 ≤5（act1: f=5+顶层=5、act2=5——激活 2 在激活 1 耗尽后拿到全新预算；断言按实例粒度校验） |
+| `s0.controller-sampled-terminal`（S0 冻结） | **转绿**：sampled_out=12925、validator exit=0 → **terminal=complete** 且 coverage=partial、generations[] 有行 |
+| `scripts/p55-s2-config-interleave.cjs`（新，13.2-2 硬门禁） | **GREEN**：4 并行 Worker（各自线程 tap）× 3 次 updateCapture 分代交错——零崩溃、Worker 全存活、76 taps 全带 plan_serial=1、事件覆盖两代、terminal complete + coverage partial、8 producer 带 generations[]、validator 通过 |
+| semantic 拒绝探针 | `startCapture(valueObservation)` 无 mode → `-32600 valueObservation requires mode=ignition-precise` **PASS** |
+| 回归 | E7 PASS（mode/tier 适配后）；S1 浏览器证据 GREEN（Worker 路由/并发 dump 不回归）；S0 dump-control 全不变量保持绿 |
+| 补丁栈 | 重生成 chromium 133/V8 137，`verify_patches.py` **pass**（0 mismatch、0 漂移、双 HEAD pin）——证据 `validation/p55-s2-patch-verify.json` |
+
+证据目录：`validation/p55-s2-atj3U3/`（交错门禁）、`p55-s0-R3gOvH/`（S0 浏览器转绿）、`p55-e7-rxjiQM/`、`p55-s1-ZUf2O3/`、`p55-s0-20260926-023658/`（d8 per-activation）。
+
+### 16.3 边界
+
+- d8 的激活边界取 **ExecuteSource 顶部**（每个脚本一次）；blink 取 OnActivationBegin（Script 执行进入）。嵌套激活（同 isolate 内嵌套脚本执行）按"进入即重置"语义处理——内层激活重置后外层恢复时不再补回计数（与"激活边界重置"的字面语义一致，如实记录）。
+- `producers[].generations[]` 目前只携带 eligible 计数（分代事件量）；分代 × tap 细粒度矩阵留待 S4 命名空间工作一并考虑（分析层现在需要的分代证据已可重算：事件行自带 config_generation + plan_serial）。
+- 并发交错门禁的 updateCapture 只切 categories/scope 分代；tap 计划本身（plan_serial>1 的多计划交错）需 startCapture 重复安装通道，当前命令面未暴露，如实记录为边界。
+
+progress JSON `p55` = `s2-accounting-budgets-landed`（下一阶段 S3：编码器统一有界 writer）。

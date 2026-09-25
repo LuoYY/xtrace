@@ -307,10 +307,10 @@ index ecb68ce4e2..e28e8b1b32 100644
  void V8ScriptRunner::ReportException(v8::Isolate* isolate,
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 new file mode 100644
-index 0000000000..10da12acdb
+index 0000000000..f5d897deda
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -0,0 +1,1091 @@
+@@ -0,0 +1,1096 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1181,6 +1181,11 @@ index 0000000000..10da12acdb
 +  extra.append(base::NumberToString(window_id));
 +  extra.append("\",\"object_token\":\"");
 +  extra.append(base::NumberToString(object_token));
++  extra.append("\",\"plan_serial\":\"");
++  // S2: the budget-plan revision in force when this tap was admitted —
++  // supplied by the bridge's config-time cache.
++  extra.append(base::NumberToString(
++      xtrace::IgnitionBridge::CurrentTapPlanSerial()));
 +  extra.append("\",\"value\":");
 +  if (value_json && value_len > 0) {
 +    extra.append(value_json, value_len);

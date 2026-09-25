@@ -34,7 +34,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
     `--user-data-dir=${path.join(runDir,'p')}`,
     '--xtrace-enable', `--xtrace-file=${trace}`,
     '--xtrace-categories=reverse', '--xtrace-causality=sync',
-    '--xtrace-ignition-observer', '--js-flags=--no-maglev',
+    '--xtrace-ignition-observer', '--js-flags=--max-opt=0',
     'about:blank'];
   const fd = fs.openSync(path.join(runDir, 'stderr.log'), 'w');
   const child = spawn(exe, argv, { env, cwd: root, stdio: ['ignore','ignore',fd,'pipe','pipe'] });
@@ -49,6 +49,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
     await c.send('Runtime.enable', {}, sessionId);
     const start = await c.send('XTrace.startCapture', {
       categories: 'reverse',
+      mode: 'ignition-precise', tier: 'ignition',
       valueObservation: {
         scriptPattern: '',  // all scripts: main page AND the worker
         windows: [{ id: 0, start: 0, end: 4000000 }],
