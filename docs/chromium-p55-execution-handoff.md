@@ -196,6 +196,13 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 | R6：完整合成验收与性能 | 自有解释器fixture、精细环境同负载on/off、GC/预算/shape矩阵；热路径基准分项 | 逐事件真值与误选tap负例；stop后零增长；无默认tiering逃逸；原私有语料只在明确隔离授权下补充 |
 | R7：最终交付与终审 | 每阶段同步补丁，最终重放/组件/驱动/args/数据schema摘要，重建后测试目标门禁与回归 | 对契约§10逐项有可核证据，未完成不accepted；无需将本机原始trace整体进Git |
 
+### 8.3 R0 执行记录（2026-09-25，工程师——反例冻结，旧实现全红）
+
+- `scripts/p55-r0-d8-counterexamples.py`：**7/7 红**——width（300 props、partial=false）、large-key（70,288 字节超预算）、shared（captured 而非 unavailable）、array-logical-length（backing 容量 17 项）、tap NUL/CJK 保真（30 tap 无一字面量）、T3 decoy 升格、T7 空 trace 判 observed。每次运行独立目录（`out/XTraceP55D8/validation/p55-r0-<ts>/`），不覆写任何既有证据。
+- `scripts/p55-r0-browser-counterexamples.cjs`：**5/5 红**——scope 绕过（ignition=0 但 taps=675、metadata=5 泄漏）、负 window id 接受、负预算接受、两次计划同报 generation 0、global `counts.sampled_out=0` vs producers 合计 891（两目录复核）。
+- 恒真断言修复：`p55-e4-d8-verify.py` 的 `assert … or True` 改为严格断言并重跑通过（该测试本身的缺陷，非实现变化）。
+- 反例首红目录：d8 `p55-r0-20260925-095702`、browser `p55-r0b-tzdlsm`。
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计

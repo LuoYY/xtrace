@@ -71,7 +71,9 @@ def main() -> int:
         assert b["kind"] == "v8.materialized-dump" and b["schema"] == 1
         assert b["anchor"]["type"] == "custom" and b["anchor"]["window_id"] == 7
         assert "budget" in b and b["budget"]["max_nodes"] > 0
-        assert "0x" not in json.dumps(b).lower() or True  # hex payload uses no 0x prefix
+        # R0 (chief review F7): the old `... or True` made this vacuous.
+        # Strict: no native-address-shaped tokens in any dump payload.
+        assert "0x" not in json.dumps(b).lower(), "native address leaked"
     root = blobs[0]
     props = {p["k"]: p.get("v") for p in root["root"]["props"]}
     skips = {p["k"]: p["reason"] for p in root["root"]["props"] if "reason" in p}
