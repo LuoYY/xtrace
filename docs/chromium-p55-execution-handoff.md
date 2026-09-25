@@ -214,3 +214,54 @@ R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调
 | 未做项 | 本轮未重建测试目标/全量chrome，未执行私有语料、未访问原站 | 不把执行层历史测试当本轮亲跑 |
 
 完成审计：浏览器dump入口、请求锚点、完整实例身份/元数据、计账/coverage和合成解释器golden均缺失或不符合契约；已证“机制可工作”不是“任务全完成”。本轮仅完成review，不宣告P55目标完成，不更新为accepted。
+
+---
+
+## 10. 项目架构师独立复核与裁定（2026-09-25）
+
+**方法**：对总审 F1–F7 逐条做了独立源码/证据核验（不依赖总审结论），再对总审移交我的四个裁决点给出裁定。结论：**F1–F7 全部属实；整改序列 R0–R7 确认，附加本节目的裁定与补充门槛。** 工程师按 §8.2 + 本节执行。
+
+### 10.1 逐条独立核验（全部与总审一致）
+
+| 发现 | 我的核验 | 结论 |
+| --- | --- | --- |
+| F1 范围绕过 | `xtrace-ignition-bridge.cc` 中 `ScriptSelected` 仅一个调用点（line 294，OnIgnitionEvent）；`OnIgnitionTap`/`OnIgnitionMetadata` 不经它；`ApplyTapWindowsConfig` 在控制线程直接遍历 scope 改他线程 V8 状态 | **属实** |
+| F2 配置无权威校验 | `xtrace_handler.cc:424–470`：window 只查 `start<0 \|\| end<start`，**id 不校验、预算不校验**（负值直通 JSON）；"clamped" 注释无对应代码；`valueObservation` 在 mode=semantic 下不经 precise 拒绝；配置为手拼 JSON | **属实** |
+| F3 计账未闭合 | `xtrace_capture_controller.cc:1220` 全局 `counts.sampled_out` 硬编码 `"0"`；`validate_trace.py` 全文件无 sampled_out 检查；producer 行有值（891）而全局为 0、终态 complete | **属实**（我另验：manifest 无 coverage 轴、无 accounting revision） |
+| F4 dump 边界失守 | `xtrace-ignition-observer.cc:442–470`：`written/skipped` 声明后**循环体内从不递增**，宽度上限形同虚设；`:541` 用 backing `elements()->length()`（容量）而非 JS 逻辑长度；`:216/283` ToCString（NUL 替换、Latin-1 非 UTF-8）；`:350/382` Flatten/BigInt 全量转换先于截断 | **属实** |
+| F5 T3/T7 假阳性 | `scripts/p55_t3_t7.py`：T3 在实例存在任一 named 读时把**全部**常量池字符串标 `proven-pool`（内部字段还叫 candidates，输出 grade 却升格为 proven）；T7 按 `site_name` 查硬编码字典出 cookie/mode，`family=jsvmp-challenge/observed` 无条件 | **属实**（空 trace 也能"分类成功"） |
+| F6 缺项与锚点 | manifest `nav_chain` 在**顶层**（controller:1225）而契约写 `identity.nav_chain`；E5 驱动对 stage2 的断言是全 trace 搜含锚点的任意 `Document.cookie.get`（stage1 自身读回即可满足）；dump 无 chrome 侧触发入口；合成解释器 fixture 未交付 | **属实** |
+| F7 门禁过弱 | E7 off/on 用不同程序（`PLAIN` 200k 循环 vs `LOOP` f(10)/f(20)）且只断言 allFinite；`p55-e4-d8-verify.py:74` 的 `assert … or True` 是恒真断言；10/11ms 基准含打印且默认 tiering 提前离开 Ignition | **属实** |
+
+另确认总审两处记账/措辞问题：E8 自报"chromium 126 文件"为过期值（总审实测 133）；契约"预算每激活"被实现为每实例累计（`maxTapsPerActivation` 无激活边界重置、窗口更新不清 `tap_budget_total`）——**不追认，恢复每激活语义**。
+
+### 10.2 对总审移交裁决点的裁定
+
+1. **请求 Cookie 头的锚点方案（F6）**：三级证据，主次分明——
+   - **主 oracle：本地 echo 服务**。自有 HTTP 服务记录实际收到的 Cookie 头，作为"服务端真收到锚点值"的独立真值（无需任何引擎改动、不碰权限边界）。E5 验收改为：renderer cookie.set 值 == echo 服务收到的 Cookie 头值 == 二阶段 cookie.get 值，三者经 nav_chain 同链。
+   - **辅证**：set→get 同值保留为 renderer 侧 derived 级链接，**不再充当请求锚点**。
+   - **引擎侧缺口登记**：bnet 钩点早于 Cookie 附加，"请求头不可见"作为能力表缺口披露；**本轮不做网络栈观测点前移**（独立设计轮，含权限/来源/时序论证后再裁决）。
+2. **计账语义（F3）**：冻结如下，R2 一次性落地——
+   - producer 级：`eligible` = 通过 scope+版本+kind+至少一个 window 匹配的机会（多窗口命中只计一次）；`sampled_out` = eligible 之后被预算拒绝；等式 `eligible = enqueued + dropped + sampled_out`。
+   - window 级：每 window 记 seen/recorded/skipped 与首末位置、缺口段，绑定 plan generation；window 是**报告视图**，不是独立 eligible 池。
+   - 配置更新：window 计数随 generation 重置；producer 级传输计数跨代累计；manifest 增 `producers[].generations[]` 承载分代窗口统计。
+   - 完整性两轴：`terminal.state`（传输）与新增 `observation_coverage: full|partial|unknown`（观测）分列；任一 window skipped>0 或预算耗尽或 dump 截断 → partial；manifest 增 `accounting_model: 2`，validator 对 model≥2 强制校验新等式与 coverage 自洽，**绿不再自动等于完整**。
+   - `maxTapsPerActivation` 恢复**每激活**重置语义；per-instance 累计若保留只能作为文档化的二级上限。
+3. **tap 计划 schema（F2）**：typed mojom 结构取代手拼 JSON——`XTraceTapPlan{generation, script_pattern, windows:[XTraceTapWindow{id,start,end}](≤64), budgets{per_activation, per_window}, reset_policy}`；硬上限（per_activation ≤ 100k、per_window ≤ 64k）；负值/重复 id/未声明重叠策略 → 显式拒绝；未知实例窗口 → 拒绝该窗口并在 status 报告，不静默；**计划按 generation 原子发布到所属 isolate 线程**，失败保留旧计划并返回 not-applied（禁止静默成功）；V8 侧不得第二份 JSON 解析器重释 browser 计划（传结构化计划对象或严格解析+错误响应）。
+4. **nav_chain 位置与范围缩减（F6）**：schema 为准——`nav_chain` 迁入 `manifest.identity`（实现改、规范不改）；dump 的 chrome 侧受控触发（锚点、资产计账、stop）**不缩减范围**，入 R4 交付。
+
+### 10.3 对整改序列的确认与补充门槛（R0–R7）
+
+- 序列与责任划分（§8.2）确认。补充门槛：
+  - **R1** 附并发契约测试：并行 Worker + 配置更新交错，断言无跨线程 registry/vector 竞争（总审 F1 的源码确认项需要行为级证明）。
+  - **R3** 附 GC 压力 fixture：强制 MarkCompact 下的存活/搬迁/释放矩阵（d8 门内），覆盖递归 flatten/BigInt 转换期间的 GC——总审未做内存破坏实验，R3 必须补正向压力而非仅静态修复。
+  - **R5** 的 T7 整改后，语料 README 的研究记录保留为**外部输入**（可列参考文献），不得回流为分类器答案；空 trace/普通循环/冲突特征必须 unresolved 或 hypothesis。
+  - **R6** 性能基准用固定 tier（全程 max-opt=0 且断言实际 tier）与确定性负载，报告分项（谓词查找/编码/序列化/写入），删除含打印的混合基准。
+  - **R7** 补丁栈逐文件比对 + `verify_patches.py` + 全测试目标重建后门禁；E8 记账修正为实测文件数。
+- 明确拒绝的降级路径：把规范改成与缺陷一致、删功能终结整改、以 d8 切片冒充 chrome 交付、以 set→get 冒充请求锚点——与总审一致。
+
+### 10.4 对执行层的直接要求
+
+1. R0 先迁反例（总审 7 组 + 本文确认的恒真断言/假阳性脚本），**旧实现必红**、独立输出目录、不覆写既有证据。
+2. 每项修复按"反例先红 → 修复 → 反例转绿 → 正向矩阵复跑"四段留证；门禁表恢复 controller/producer 全目标并沿用自动化脚本。
+3. 本块结束前，`trace-schema-v3` 的 v1.3 文本与实现对齐（sampled_out 等式、nav_chain 位置、accounting_model、coverage 轴），validator 与负例同批。
