@@ -687,3 +687,38 @@ progress JSON `p55` = `s3-bounded-writer-landed`。
 - E6 重采集驱动报 terminal=incomplete：该旧夹具存在未确认 producer（未走 S2 门禁的采集序列），与计账修复无关——S0/S2 门禁拥有 terminal 语义证据。
 
 progress JSON `p55` = `s4-identity-analysis-landed`（下一阶段 S5：合成 VM 逐值 golden + 零打印基准）。
+
+---
+
+## 19. S5 执行记录：合成 VM 逐值 golden 与零打印基准（2026-09-26）
+
+按 §12.4-6 / §13.2-6 执行。
+
+### 19.1 实现
+
+| 项 | 改动 |
+| --- | --- |
+| d8 计数化（RR6） | `D8TapCallback`/`D8ObserverCallback` 逐事件 printf **删除**，改原子计数（hits/skips 分开，budget_skip 前缀判别）+ 每脚本 hit 表（泄漏式单例——退出回调在静态析构后运行，拥有式 static 曾在退出时 UAF）；退出报告 `tap events=N hits=H skips=S` + 每脚本行；逐事件 TAP/OBS 流保留在显式 `--xtrace-d8-verbose-taps` 旗标后（仅供保真度反例，基准绝不使用） |
+| synvm 逐值 golden | 驱动断言重写：派发实例的 opcode 域 Smi tap 流（事件序）必须以**严格保序子序列**包含 12 步页面真值 opcode 流，且**首尾钉死**（流首=真值首 op、流尾=真值尾 op——switch 比较链的重载观测被吸收，而边界错位必然被拒）；四个篡改负例（首篡改/尾篡改/注入未派发 op 50/跨实例流）全部必须红 |
+| perfbench 重写 | `scripts/p55-s5-perfbench.py`：三相位（baseline=观察器关、gate-only=开门无窗、full-tap=窗+预算）× 5 轮，同负载同 tier（--max-opt=0）；每轮 stdout/stderr/exit/计数落盘；**逐事件行数必须为 0**；分项 ns/事件 = 相位中位差 / 72M 观察事件；transport/write 明确标注由浏览器门禁证据引用、不在 d8 重测 |
+
+### 19.2 证据（2026-09-26 亲跑）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `s0.d8-no-per-event-print`（S0 冻结） | **转绿**：默认路径 TAP/OBS 行 0 条，退出计数器在（S0 套件 **8/8 全绿**——全部冻结反例修复） |
+| `s0.tap-budget-per-activation` 通道迁移 | 每脚本聚合计数：首个 -e 行 15 hits > 无重置上限 10（顶层5+f5）——每激活重置的铁证（S2 修复在新通道下复证） |
+| R0 反例套件 | **GREEN 7/7**（保真度案例经 verbose 旗标显式取证） |
+| synvm 逐值 golden | **PASS**：golden [10,20,10,40,10,30,20,10,40,10,30,20] 全序匹配 + 首尾钉死 + head/tail/foreign-step/cross-instance 四负例全拒 |
+| `p55-s5-perfbench.py` | **GREEN**：每轮 72,000,053 观察事件五轮一致、tap hits 100,023、逐事件行 0；分项 **gate+lookup 364.65 ns/事件、predicate+encode 2.78 ns/事件**（满预算下 predicate 命中 10 万/7200 万，其余为窗口未命中路径）；每轮证据落盘 |
+| 回归 | S0 python 8/8、R0 7/7（上述）；浏览器门禁在 S4 二进制全绿（S5 无 chrome 侧行为变更；flag-definitions/d8.cc 变更随 S6 重建统一验证） |
+
+证据目录：`out/XTraceP55D8/validation/p55-s5-perf-20260926-034435/`、`validation/p55-r6-AQnP0u/`、`p55-s0-20260926-034426/`。
+
+### 19.3 边界
+
+- 子序列+首尾钉死的匹配器对"中段单点篡改"不敏感（重载噪声吸收的代价）——首/尾/注入/跨实例四类篡改可检；如实记录匹配器强度，终审如要求逐位置相等需改用 post-dispatch 观测点（当前 tap 契约为 pre-dispatch accumulator）。
+- 分项基准的 gate+lookup 364ns 包含观察器入口的 gate 读+注册表查找+版本查找；predicate+encode 2.78ns 为窗口未命中主导的均值（命中路径的编码成本由 10 万 hits 摊薄）——数值如实标注，不宣称"纯谓词成本"。
+- chrome 二进制未随 S5 重建（变更仅 d8.cc/flag-definitions.h，chrome 无行为依赖）；S6 统一重建并全量重放补丁。
+
+progress JSON `p55` = `s5-golden-perf-landed`（下一阶段 S6：最终验收包）。

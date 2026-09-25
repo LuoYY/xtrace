@@ -110,8 +110,11 @@ def main() -> int:
         check("r0.dump-array-logical-length", False, proc.stderr[-120:])
 
     # --- tap value fidelity: NUL + non-ASCII -------------------------------
+    # S5: the per-event TAP stream is opt-in verbose (fidelity evidence
+    # only — benchmarks run without it).
     proc = subprocess.run(
         [str(D8), "--xtrace-observer-smoke", "--max-opt=0",
+         "--xtrace-d8-verbose-taps",
          "--xtrace-tap-windows={\"windows\":[{\"id\":0,\"start\":0,"
          "\"end\":999999}]}",
          "-e", "function f(){const a='A\\u0000B';const b='中文';"

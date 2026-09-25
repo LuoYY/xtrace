@@ -129,7 +129,11 @@ def main() -> int:
 
     # --- RR3: per-ACTIVATION tap budget reset ----------------------------
     # f is compiled ONCE (script 1); activations 1/2 are the top-level
-    # runs of scripts 2/3. max_taps=5: each activation may record 5 taps.
+    # runs of scripts 2/3. max_taps=5 per activation per instance. S5
+    # channel: taps are COUNTED (per-script hit totals at exit) — f's
+    # total exceeding ONE activation's budget (5) proves the budget
+    # reset at the activation boundary; without the reset f could only
+    # ever emit 5.
     cfg = ('{"windows":[{"id":0,"start":0,"end":999999}],"max_taps":5,'
            '"max_window":100}')
     proc = subprocess.run(
@@ -140,31 +144,27 @@ def main() -> int:
          "-e", "print('ACT2-BEGIN');f(60);print('ACT2-END');"],
         capture_output=True, text=True, timeout=120)
     (RUN / "per-activation.log").write_text(proc.stdout + proc.stderr)
-    # Per-(activation, compile-instance) tap counts: the budget is
-    # per-activation AND per-instance (two instances may each tap 5 in
-    # one activation), and the ACTIVATION RESET means activation 2 sees
-    # fresh taps even after activation 1 exhausted its instances.
-    import collections
-    seg_inst = collections.defaultdict(int)  # (act, script) -> taps
-    cur = None
+    per_script = {}
     for line in proc.stdout.splitlines():
-        if line.startswith("ACT"):
-            cur = line.split("-")[0]
-        elif line.startswith("TAP ") and cur:
-            # budget skips ride the same callback with value
-            # {"budget_skip":1} — only REAL taps (hits) count here.
-            if "budget_skip" in line:
-                continue
-            script = line.split("script=")[1].split()[0]
-            seg_inst[(cur, script)] += 1
-    per_ok = all(1 <= n <= 5 for n in seg_inst.values()) and seg_inst
-    act2_ok = any(act == "ACT2" for (act, _) in seg_inst)
-    ok = proc.returncode == 0 and per_ok and act2_ok
-    detail = {f"{a}/{s}": n for (a, s), n in sorted(seg_inst.items())}
-    check("s0.tap-budget-per-activation", ok,
-          f"per-(activation,instance) taps {detail} — activation 2 must "
-          f"see fresh taps within max_taps=5 after activation 1 "
-          f"exhausted its budgets (per-activation reset)")
+        m = re.match(r"XTRACE-P55 d8 taps script=(\d+) hits=(\d+)", line)
+        if m:
+            per_script[m.group(1)] = int(m.group(2))
+    # f and its DEFINING script share one script id, so the first -e's
+    # row aggregates: top-level taps (<=5) + f's taps across BOTH
+    # activations. Without an activation reset f could emit at most 5,
+    # capping that row at 10; exceeding 10 proves f tapped in BOTH
+    # activations (fresh budget each time).
+    ids = sorted(int(s) for s in per_script)
+    first = str(ids[0]) if ids else "0"
+    second = str(ids[1]) if len(ids) > 1 else "0"
+    first_hits = per_script.get(first, 0)
+    second_hits = per_script.get(second, 0)
+    ok = (proc.returncode == 0 and first_hits > 10 and
+          0 < second_hits <= 5 and "ACT2-END" in proc.stdout)
+    detail = (f"per_script={per_script} (first -e row must exceed the "
+              f"no-reset ceiling of 10 = top-level 5 + f 5; second -e "
+              f"top-level <= 5)")
+    check("s0.tap-budget-per-activation", ok, detail)
 
     # --- RR6: taps/observations are counted, never printed per event -----
     proc = subprocess.run(

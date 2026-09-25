@@ -34,6 +34,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
   const report = {};
   try {
     await c.send('XTrace.startCapture', { categories: 'reverse',
+      mode: 'ignition-precise', tier: 'ignition',
       valueObservation: { scriptPattern: 'r6-synthetic-vm',
         windows: [{ id: 0, start: 0, end: 4000000 }],
         maxTapsPerActivation: 2000, maxTapsPerWindow: 2000 } });
@@ -130,8 +131,8 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
     Array.isArray(m.instructions.pool_indices) &&
     (m.constants || []).some(c => c.s === 'op'));
   assert(meta, 'the dispatch instance (op constant + pool indices) present');
-  // find at least one tap on an instruction whose pool index resolves
-  // to that constant — per-event linkage live on chrome
+  // find taps on instructions whose pool index resolves to the `op`
+  // constant — per-event linkage live on chrome
   const offsets = meta.instructions.offsets;
   const pools = meta.instructions.pool_indices;
   let linkedTaps = 0;
@@ -145,16 +146,100 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
   }
   assert(linkedTaps > 0, 'no tap lands on a dispatch named-read offset');
 
+  // ---- S5 (RR6): PER-VALUE, PER-ORDER golden comparison ----------------
+  // The dispatch instance's Smi taps whose values belong to the virtual-
+  // opcode domain, IN EVENT ORDER, must CONTAIN the page truth's opcode
+  // stream as a strictly in-order subsequence, with the stream's FIRST
+  // and LAST observations pinned to the golden's first/last opcodes
+  // (switch-compare reloads emit repeated observations of one op —
+  // subsequence order-preservation plus boundary pinning gives a
+  // per-value, per-order link that reload noise cannot satisfy
+  // accidentally; the tamper negatives prove the matcher's teeth).
+  const dispatchInstance = `${meta.script_id}/${meta.bytecode_version}`;
+  const OPS_DOMAIN = new Set(truth.map(([, op]) => op));
+  const opcodeTaps = taps.filter(e =>
+      e.value_tap.instance === dispatchInstance &&
+      e.value_tap.value && e.value_tap.value.t === 'i' &&
+      OPS_DOMAIN.has(e.value_tap.value.v));
+  const collected = opcodeTaps.map(e => e.value_tap.value.v);
+  const golden = truth.map(([, op]) => op);
+
+  function matchGoldenStrict(stream, want) {
+    if (!stream.length || !want.length) return { ok: false, reason: 'empty' };
+    if (stream[0] !== want[0]) {
+      return { ok: false, reason: `head ${stream[0]} != ${want[0]}` };
+    }
+    if (stream[stream.length - 1] !== want[want.length - 1]) {
+      return { ok: false, reason: `tail ${stream[stream.length - 1]} != ${want[want.length - 1]}` };
+    }
+    let pos = -1;
+    const positions = [];
+    for (const w of want) {
+      let next = stream.indexOf(w, pos + 1);
+      if (next < 0) {
+        return { ok: false, reason: `missing ${w} after ${pos}` };
+      }
+      positions.push(next);
+      pos = next;
+    }
+    for (let i = 1; i < positions.length; i++) {
+      if (positions[i] <= positions[i - 1]) {
+        return { ok: false, reason: 'order violation' };
+      }
+    }
+    return { ok: true, positions };
+  }
+  const real = matchGoldenStrict(collected, golden);
+  assert(real.ok, 'per-value golden mismatch: ' + real.reason +
+      ` (collected=${JSON.stringify(collected)})`);
+  assert(real.positions.length === golden.length, 'every golden step matched');
+
+  // ---- TAMPER NEGATIVES: the matcher must REJECT each corruption --
+  // (a) head tamper: first observation no longer the first golden op
+  {
+    const t = collected.slice(); t[0] = (t[0] === 10 ? 20 : 10);
+    const v = matchGoldenStrict(t, golden);
+    assert(!v.ok, 'head-tamper negative must be rejected');
+  }
+  // (b) tail tamper: last observation no longer the last golden op
+  {
+    const t = collected.slice(); t[t.length - 1] = 10;
+    const v = matchGoldenStrict(t, golden);
+    assert(!v.ok, 'tail-tamper negative must be rejected');
+  }
+  // (c) foreign step injected into the golden (an opcode the VM never
+  // dispatched in the 12-step window — op 50 is HALT, never reached)
+  {
+    const g = golden.slice(); g.splice(6, 0, 50);
+    const v = matchGoldenStrict(collected, g);
+    assert(!v.ok, 'foreign-step negative must be rejected');
+  }
+  // (d) cross-instance: a FOREIGN instance's stream must not satisfy
+  // the golden (its boundary values differ from the dispatch stream's)
+  {
+    const foreign = taps.filter(e =>
+        e.value_tap.instance !== dispatchInstance &&
+        e.value_tap.value && e.value_tap.value.t === 'i' &&
+        OPS_DOMAIN.has(e.value_tap.value.v))
+      .map(e => e.value_tap.value.v);
+    const v = matchGoldenStrict(foreign, golden);
+    assert(!v.ok, 'cross-instance negative must be rejected ' +
+        `(foreign had ${foreign.length} domain values)`);
+  }
+
   const out = {
     terminal: report.terminal,
     ignitionEvents: ign.length,
     taps: taps.length,
     linkedDispatchTaps: linkedTaps,
     truthSteps: report.page.steps,
+    goldenOpcodeStream: golden,
+    collectedOpcodeStream: collected,
+    tamperNegatives: ['head-tamper', 'tail-tamper', 'foreign-step', 'cross-instance'],
     verdict: 'pass',
   };
   fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(out, null, 2));
   console.log(JSON.stringify(out));
-  console.log('P55-R6a SYNTHETIC-INTERPRETER EVIDENCE: PASS');
+  console.log('P55-R6a SYNTHETIC-INTERPRETER EVIDENCE: PASS (per-value golden + tamper negatives)');
   console.log('evidence: ' + runDir);
 })().catch(e => { console.error('P55-R6a SYNTHETIC-INTERPRETER EVIDENCE: FAIL —', e.message); try { server.kill(); } catch (_) {} process.exit(1); });

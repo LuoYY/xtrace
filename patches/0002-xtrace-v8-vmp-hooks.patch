@@ -9152,7 +9152,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..677be578 100644
+index fc6d62e2..14045d9e 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9163,7 +9163,7 @@ index fc6d62e2..677be578 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,89 @@
+@@ -40,6 +41,126 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9209,27 +9209,56 @@ index fc6d62e2..677be578 100644
 +  fclose(f);
 +}
 +std::atomic<uint64_t> g_tap_events{0};
++// S5 (RR6): taps/observations are COUNTED, never printed per event —
++// per-event printf polluted every benchmark. The verbose stream stays
++// available behind an explicit opt-in flag (used by the value-fidelity
++// counterexamples, never by benchmarks).
++std::atomic<uint64_t> g_tap_hits{0};
++std::atomic<uint64_t> g_tap_skips{0};
++std::map<uint32_t, uint32_t>& PerScriptTapHits() {
++  // Leaked on purpose: the exit-time report runs after static
++  // destruction of function-locals — an owning static died there once.
++  static auto* hits = new std::map<uint32_t, uint32_t>();
++  return *hits;
++}
++bool TapVerbose() {
++  static const bool verbose = i::v8_flags.xtrace_d8_verbose_taps;
++  return verbose;
++}
 +void D8TapCallback(v8::Isolate*, uint32_t script_id,
 +                   uint32_t bytecode_version, uint32_t bytecode_offset,
 +                   uint32_t window_id, uint64_t object_token,
 +                   const char* value_json, size_t value_len) {
 +  g_tap_events.fetch_add(1, std::memory_order_relaxed);
-+  printf("TAP script=%u version=%u offset=%u window=%u token=%llu "
-+         "value=%.*s\n",
-+         script_id, bytecode_version, bytecode_offset, window_id,
-+         static_cast<unsigned long long>(object_token),
-+         static_cast<int>(value_len), value_json);
++  const bool skip =
++      value_len >= 14 && memcmp(value_json, "{\"budget_skip\"", 14) == 0;
++  if (skip) {
++    g_tap_skips.fetch_add(1, std::memory_order_relaxed);
++  } else {
++    g_tap_hits.fetch_add(1, std::memory_order_relaxed);
++    std::lock_guard<std::mutex> lock(g_pairs_mutex);
++    ++PerScriptTapHits()[script_id];
++  }
++  if (TapVerbose()) {
++    printf("TAP script=%u version=%u offset=%u window=%u token=%llu "
++           "value=%.*s\n",
++           script_id, bytecode_version, bytecode_offset, window_id,
++           static_cast<unsigned long long>(object_token),
++           static_cast<int>(value_len), value_json);
++  }
 +}
 +void D8ObserverCallback(v8::Isolate*, uint32_t script_id,
 +                        uint32_t bytecode_version, uint32_t bytecode_offset,
 +                        uint32_t opcode, const char* script_url) {
 +  g_d8_observer_events.fetch_add(1, std::memory_order_relaxed);
-+  // F4: the PER-EVENT stream (offset + opcode, in execution order) is the
-+  // coverage oracle — totals are only a quick metric.
-+  printf("OBS script=%u version=%u offset=%u opcode=%s url=%s\n", script_id,
-+         bytecode_version, bytecode_offset,
-+         v8::internal::xtrace::IgnitionOpcodeName(opcode),
-+         script_url ? script_url : "-");
++  if (TapVerbose()) {
++    // F4: the PER-EVENT stream (offset + opcode, in execution order) is
++    // the coverage oracle — verbose opt-in only, never in benchmarks.
++    printf("OBS script=%u version=%u offset=%u opcode=%s url=%s\n",
++           script_id, bytecode_version, bytecode_offset,
++           v8::internal::xtrace::IgnitionOpcodeName(opcode),
++           script_url ? script_url : "-");
++  }
 +  // Warm-profile evidence: distinct (script, bytecode_version) pairs.
 +  std::lock_guard<std::mutex> lock(g_pairs_mutex);
 +  g_version_pairs.emplace(script_id, bytecode_version);
@@ -9237,8 +9266,16 @@ index fc6d62e2..677be578 100644
 +      v8::internal::xtrace::IgnitionOpcodeName(opcode));
 +}
 +void D8ObserverReportAtExit() {
-+  printf("XTRACE-P55 d8 tap events=%llu\n",
-+         static_cast<unsigned long long>(g_tap_events.load()));
++  printf("XTRACE-P55 d8 tap events=%llu hits=%llu skips=%llu\n",
++         static_cast<unsigned long long>(g_tap_events.load()),
++         static_cast<unsigned long long>(g_tap_hits.load()),
++         static_cast<unsigned long long>(g_tap_skips.load()));
++  {
++    std::lock_guard<std::mutex> lock(g_pairs_mutex);
++    for (const auto& [script, hits] : PerScriptTapHits()) {
++      printf("XTRACE-P55 d8 taps script=%u hits=%u\n", script, hits);
++    }
++  }
 +  printf("XTRACE-P4 d8 observer events=%llu\n",
 +         static_cast<unsigned long long>(g_d8_observer_events.load()));
 +  std::lock_guard<std::mutex> lock(g_pairs_mutex);
@@ -9253,7 +9290,7 @@ index fc6d62e2..677be578 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -1047,6 +1131,12 @@ bool Shell::ExecuteSource(Isolate* isolate, const Source& source,
+@@ -1047,6 +1168,12 @@ bool Shell::ExecuteSource(Isolate* isolate, const Source& source,
                            Global<Value>* out_result) {
    i::Isolate* i_isolate = reinterpret_cast<i::Isolate*>(isolate);
    if (i_isolate->is_execution_terminating()) return true;
@@ -9266,7 +9303,7 @@ index fc6d62e2..677be578 100644
  
    Local<String> source_str;
    if (i::v8_flags.parse_only ||
-@@ -4602,6 +4692,76 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4602,6 +4729,76 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                         FunctionTemplate::New(isolate, Version));
  
    global_template->Set(isolate, "print", FunctionTemplate::New(isolate, Print));
@@ -9343,7 +9380,7 @@ index fc6d62e2..677be578 100644
    global_template->Set(isolate, "printErr",
                         FunctionTemplate::New(isolate, PrintErr));
    global_template->Set(isolate, "write",
-@@ -7037,6 +7197,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7234,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9356,7 +9393,7 @@ index fc6d62e2..677be578 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +8067,25 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +8104,25 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9628,16 +9665,20 @@ index 9a3a6de3..c092e2ba 100644
    if (IsErrorStackData(*lookup.error_stack)) {
      auto error_stack_data = Cast<ErrorStackData>(lookup.error_stack);
 diff --git a/src/flags/flag-definitions.h b/src/flags/flag-definitions.h
-index bf210a58..17e00b18 100644
+index bf210a58..a89830c0 100644
 --- a/src/flags/flag-definitions.h
 +++ b/src/flags/flag-definitions.h
-@@ -252,6 +252,15 @@
+@@ -252,6 +252,19 @@
  //
  #define FLAG FLAG_FULL
  
 +// XTRACE_TEST_SCAFFOLDING (P4-E2 d8 loop): open the ignition observer
 +// gate in d8 with a counting callback (browser path uses its own switch).
 +DEFINE_BOOL(xtrace_observer_smoke, false, "open the XTrace ignition observer gate")
++// S5 (RR6): verbose per-event tap/observer prints — counterexample
++// fidelity evidence ONLY, never benchmarks.
++DEFINE_BOOL(xtrace_d8_verbose_taps, false,
++            "print per-event TAP/OBS lines (fidelity fixtures only)")
 +// P5.5 D1: directory receiving one JSON metadata file per compilation
 +// instance (d8-first verification; never the P0 baseline outputs).
 +DEFINE_STRING(xtrace_metadata_dir, "", "write D1 bytecode-metadata assets to this directory")
@@ -9647,7 +9688,7 @@ index bf210a58..17e00b18 100644
  // Experimental features: Features that are still considered experimental and
  // which are not ready for fuzz testing should be defined using this macro. The
  // feature will then imply --experimental, which will indicate to the user that
-@@ -1301,6 +1310,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
+@@ -1301,6 +1314,8 @@ DEFINE_DEVELOPER_FLAG(trace_generalization, "trace map generalization")
  #undef FLAG
  #if V8_ENABLE_SPARKPLUG
  #define FLAG FLAG_FULL
@@ -9656,7 +9697,7 @@ index bf210a58..17e00b18 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -1350,6 +1361,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
+@@ -1350,6 +1365,8 @@ DEFINE_WEAK_IMPLICATION(trace_baseline, trace_baseline_batch_compilation)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9665,7 +9706,7 @@ index bf210a58..17e00b18 100644
  // Internalize into a shared string table in the shared isolate
  DEFINE_BOOL(shared_strings, false, "allow sharing of strings")
  DEFINE_IMPLICATION(shared_strings, shared_heap)
-@@ -3899,6 +3912,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
+@@ -3899,6 +3916,8 @@ DEFINE_BOOL(multi_mapped_mock_allocator, false,
  #undef FLAG
  #ifdef ENABLE_GDB_JIT_INTERFACE
  #define FLAG FLAG_FULL
@@ -9674,7 +9715,7 @@ index bf210a58..17e00b18 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3928,6 +3943,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
+@@ -3928,6 +3947,8 @@ DEFINE_NEG_IMPLICATION(gdbjit, compact_code_space)
  #undef FLAG
  #ifdef DEBUG
  #define FLAG FLAG_FULL
@@ -9683,7 +9724,7 @@ index bf210a58..17e00b18 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -3989,6 +4006,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
+@@ -3989,6 +4010,8 @@ DEFINE_DEVELOPER_FLAG(print_break_location,
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9692,7 +9733,7 @@ index bf210a58..17e00b18 100644
  // log.cc
  DEFINE_STRING(logfile, "v8.log",
                "Specify the name of the log file, use '-' for console, '+' for "
-@@ -4158,6 +4177,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
+@@ -4158,6 +4181,8 @@ DEFINE_BOOL(print_builtin_size, false, "print code size for builtins")
  #undef FLAG
  #ifdef ENABLE_DISASSEMBLER
  #define FLAG FLAG_FULL
@@ -9701,7 +9742,7 @@ index bf210a58..17e00b18 100644
  #else
  #define FLAG FLAG_READONLY
  #endif
-@@ -4191,6 +4212,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
+@@ -4191,6 +4216,8 @@ DEFINE_IMPLICATION(print_all_code, print_regexp_code)
  #undef FLAG
  #define FLAG FLAG_FULL
  
@@ -9710,7 +9751,7 @@ index bf210a58..17e00b18 100644
  //
  // Predictable mode related flags.
  //
-@@ -4441,6 +4464,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
+@@ -4441,6 +4468,8 @@ DEFINE_IMPLICATION(run_as_sandbox_security_poc, sandbox_testing)
  
  #ifdef VERIFY_PREDICTABLE
  #define FLAG FLAG_FULL
