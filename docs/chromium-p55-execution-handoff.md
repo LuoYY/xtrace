@@ -509,3 +509,34 @@ T7已删site答案字典并正确处理空trace，但合成普通100000条执行
 ### 13.4 状态
 
 progress JSON `p55` = `changes-required-rr1-rr6`。S0–S6 完成并经总审反例复验、我核对本节门槛后，方可 accepted-p55；在此之前 P6/报告/Agent 不得引用 P5.5 任何结论为已验证事实。
+
+---
+
+## 14. S0 执行记录：本轮反例固化（2026-09-26）
+
+按 §12.4-1 / §13.2-7 冻结本轮全部反例为**受跟踪红测试**。六项 RR 发现先经源码级独立复核确认（handler:550 收下 executionContextId 后从未使用、bridge:549-562 栈局部捕获+TimedWait、controller:1123 旧等式、observer 字典 accessor 分支无 Tick/字节预留 + :593 get_scalar 先于 hole 判定 + :620 length-tracking 视图读存储字段、p55_t3_t7.py:123/136 二元 join 键、synvm 驱动仅按 offset 相等计数），再逐项落为可重跑驱动。红测试表达的是**期望契约**（§12/§13 裁定），在缺陷树上必须红、在对应 S1–S5 修复后必须转绿。
+
+### 14.1 驱动与结果（2026-09-26 亲跑，全部按预期红）
+
+| 驱动 | 案例 | 红因（实测） | 对应阻塞/整改 |
+| --- | --- | --- | --- |
+| `scripts/p55-s0-red-tests.py` | s0.dump-accessor-byte-budget | 180 个 accessor×120 中文字键 → **135505 字节**、partial=false（64KiB 上限被转义膨胀击穿） | RR4 → S3 |
+| 同上 | s0.dump-rab-length-tracking | length-tracking 视图 byte_length=**0**、hex 为空（读存储字段非当前合法长度） | RR4 → S3 |
+| 同上 | s0.dump-double-hole | `[1.5,,Infinity,NaN,-0]` → **exit=-5**（FixedDoubleArray get_scalar DCHECK） | RR4 → S3 |
+| 同上 | s0.tap-budget-per-activation | max_taps=5：激活 1 真 tap=10（f 与顶层脚本各一实例各 5），**激活 2 真 tap=0**（实例预算跨激活复用；budget_skip 不计 tap） | RR3 → S2 |
+| 同上 | s0.d8-no-per-event-print | 10 次循环小探针 → **123 条 TAP + 123 条 OBS** 逐事件 printf；退出计数器存在 | RR6 → S5 |
+| 同上 | s0.t3-cross-producer | 合成双 producer 同 (script_id=1,version=1)：捕获 A 的读取被判 **foreignB/proven-read**（loader 字典覆盖） | RR5 → S4 |
+| 同上 | s0.t7-ordinary-bundle | 100001 条普通事件 + webpack 内容哈希 bundle → **jsvmp-challenge/observed** | RR5 → S4 |
+| 同上 | s0.no-timedwait-stack-capture | bridge 源码 **TimedWait×1、WaitableEvent×4**（源级冻结：模式本身必须删除） | RR2 → S1 |
+| `scripts/p55-s0-browser-red.cjs` | s0.dump-no-user-code（4 不变量） | 不存在 contextId=999999 → accepted=**true**；stop 后 → accepted=**true**；getter 哨兵 **0→2**；微任务哨兵 **0→2**（表达式求值+微任务排空均为用户代码执行） | RR1 → S1 |
+| 同上 | s0.controller-sampled-terminal | sampled_out=12925、validator exit=0、model-2 等式成立 → 终态仍判 **incomplete**（controller 旧等式） | RR3 → S2 |
+
+证据目录（独立、不覆写）：`chromium/src/out/XTraceP55D8/validation/p55-s0-20260926-002803/`（d8+合成 8 案例与 summary.json）、`chromium/src/out/XTraceIntegration/validation/p55-s0-*/`（浏览器两案例 report.json）。
+
+### 14.2 边界与后续
+
+- 驱动对**通道**的依赖是阶段性的：S1 更换 dump 请求参数形态（表达式 → 登记根定位器）时浏览器驱动同步换载荷，但哨兵不变量（零 getter/零微任务/错 context 拒绝/stop 后拒绝）保持冻结；S5 关闭逐事件打印后 per-activation 案例的计数通道换为计数器汇总，激活预算不变量保持冻结。
+- `s0.dump-no-user-code` 案例中 terminal="complete" 是空 scope 捕获的现实现状，非断言对象；断言对象仅四条哨兵不变量。
+- 每 S 阶段完成后重跑本套驱动：对应案例转绿且**其余案例保持红**（防止修复间回归），全绿才进 S6。
+
+progress JSON `p55` = `s0-counterexamples-frozen`（下一阶段 S1：dump 请求所有权与根定位重做）。
