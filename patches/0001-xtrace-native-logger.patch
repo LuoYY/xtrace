@@ -1215,10 +1215,10 @@ index 0000000000..8c64ed56b5
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..679c9d9b75
+index 0000000000..e7001c0a81
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1390 @@
+@@ -0,0 +1,1388 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2483,36 +2483,7 @@ index 0000000000..679c9d9b75
 +  json.append(",\"accounting_model\":\"2\"");
 +  json.append(",\"observation_coverage\":\"" + coverage + "\"");
 +  json.append(",\"overflow_intervals\":[]");
-+  // P3-E5 identity crosswalk (manifest-only; event rows stay light).
-+  // P5.5 E5: the nav_chain successions ride the SAME section (event rows
-+  // gain no fields — the crosswalk-in-manifest decision).
-+  json.append(",\"nav_chain\":[");
-+  {
-+    bool first = true;
-+    for (const auto& row : succession_rows_) {
-+      if (!first) json.append(",");
-+      first = false;
-+      json.append("{\"nav_chain_id\":");
-+      json.append(base::GetQuotedJSONString(row.nav_chain_id));
-+      json.append(",\"frame_tree_node_id\":");
-+      json.append(base::GetQuotedJSONString(row.frame_tree_node_id));
-+      json.append(",\"from_document\":");
-+      json.append(base::GetQuotedJSONString(row.from_document));
-+      json.append(",\"to_document\":");
-+      json.append(base::GetQuotedJSONString(row.to_document));
-+      json.append(",\"from_url\":");
-+      json.append(base::GetQuotedJSONString(row.from_url));
-+      json.append(",\"to_url\":");
-+      json.append(base::GetQuotedJSONString(row.to_url));
-+      json.append(",\"cause\":");
-+      json.append(base::GetQuotedJSONString(row.cause));
-+      json.append(",\"wall_us\":");
-+      json.append(base::GetQuotedJSONString(row.wall_us));
-+      json.append("}");
-+    }
-+    json.append("]");
-+  }
-+  json.append(",\"identity\":[");
++  json.append(",\"identity\":{\"frames\":[");
 +  {
 +    {
 +      bool first_row = true;
@@ -2538,7 +2509,34 @@ index 0000000000..679c9d9b75
 +      }
 +    }
 +  }
-+  json.append("]");
++  json.append("],\"nav_chain\":[");
++  {
++    bool first = true;
++    for (const auto& row : succession_rows_) {
++      if (!first) json.append(",");
++      first = false;
++      json.append("{\"nav_chain_id\":");
++      json.append(base::GetQuotedJSONString(row.nav_chain_id));
++      json.append(",\"frame_tree_node_id\":");
++      json.append(base::GetQuotedJSONString(row.frame_tree_node_id));
++      json.append(",\"from_document\":");
++      json.append(base::GetQuotedJSONString(row.from_document));
++      json.append(",\"to_document\":");
++      json.append(base::GetQuotedJSONString(row.to_document));
++      json.append(",\"from_url\":");
++      json.append(base::GetQuotedJSONString(row.from_url));
++      json.append(",\"to_url\":");
++      json.append(base::GetQuotedJSONString(row.to_url));
++      json.append(",\"cause\":");
++      json.append(base::GetQuotedJSONString(row.cause));
++      json.append(",\"wall_us\":");
++      json.append(base::GetQuotedJSONString(row.wall_us));
++      json.append("}");
++    }
++  }
++  // close nav_chain array + identity object (ONE object brace — the root
++  // continues after this key).
++  json.append("]}");
 +  json.append(",\"terminal\":{\"state\":" +
 +              base::GetQuotedJSONString(terminal_state) + ",\"reason\":" +
 +              (reason.empty() ? std::string("null")

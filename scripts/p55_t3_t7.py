@@ -103,8 +103,11 @@ def load_metadata_assets(trace: pathlib.Path):
                     continue
                 # Content files land with the shared .js extension (the
                 # asset channel names files after the sha1, not the kind).
-                content_path = manifest.parent / str(row.get("content_path", ""))
-                if not content_path.exists():
+                raw_content = row.get("content_path")
+                content_path = (manifest.parent / str(raw_content)
+                                if raw_content else None)
+                if content_path is None or not content_path.exists() or \
+                        not content_path.is_file():
                     stem = "sha1_" + row["asset_id"].split("sha1:")[-1]
                     content_path = next(
                         (manifest.parent / f"{stem}{ext}" for ext in (".js", ".json")
@@ -138,7 +141,11 @@ def t3(trace: pathlib.Path) -> dict:
         elif opcode in KEYED_OPCODES:
             inst["keyed"] += 1
 
-    proven, unproven_keyed, unproven_no_meta = [], Counter(), Counter()
+    # R5 (chief review F5): CANDIDATES are not READS. Until D1 carries
+    # per-instruction operand indices (R4), pool strings on an instance
+    # that executes GetNamedProperty are CANDIDATES — never proven reads
+    # — and every entry says so. Keyed reads stay explicitly unresolved.
+    candidates, unproven_keyed, unproven_no_meta = [], Counter(), Counter()
     with_meta = without_meta = 0
     for (script, version), inst in per_instance.items():
         if inst["named"] == 0 and inst["keyed"] == 0:
@@ -149,26 +156,25 @@ def t3(trace: pathlib.Path) -> dict:
             unproven_no_meta["<instance-without-metadata>"] += inst["named"]
             continue
         with_meta += 1
-        # Instance-scoped proof: GetNamedProperty present in the decoded
-        # instruction table + string constants in the pool.
-        opcodes = blob["instructions"]["opcodes"]
-        reads_named = inst["named"] > 0
-        if reads_named:
+        if inst["named"] > 0:
             for const in blob.get("constants", []):
                 if "s" in const:
-                    proven.append({
+                    candidates.append({
                         "key": const["s"],
                         "script_id": int(script),
                         "bytecode_version": int(version),
-                        "named_reads": inst["named"],
+                        "named_reads_on_instance": inst["named"],
                         "classification": classify_key(const["s"]),
-                        "scope": "instance-pool-candidates",
                     })
         if inst["keyed"]:
             unproven_keyed[f"<keyed:{script}/{version}>"] += inst["keyed"]
 
-    read_list = ([{**e, "grade": "proven-pool"} for e in
-                  sorted(proven, key=lambda e: (-e["named_reads"], e["key"]))] +
+    read_list = ([{**e, "grade": "candidate-pool",
+                   "note": "pool membership on a reading instance; "
+                           "per-event key resolution needs D1 operand "
+                           "indices (R4)"}
+                  for e in sorted(candidates,
+                                  key=lambda e: -e["named_reads_on_instance"])] +
                  [{"key": k, "reads": v, "grade": "unproven-keyed",
                    "classification": "runtime-value"}
                   for k, v in unproven_keyed.most_common()] +
@@ -190,6 +196,7 @@ def t3(trace: pathlib.Path) -> dict:
 
 
 def t7(trace: pathlib.Path, site_name: str, corpus_manifest) -> dict:
+    recorded = {}
     status_codes = []
     ignition = 0
     script_urls = Counter()
@@ -208,57 +215,80 @@ def t7(trace: pathlib.Path, site_name: str, corpus_manifest) -> dict:
             m = re.search(r"([A-Za-z0-9_]{6,})=", text)
             if m:
                 cookie_events[m.group(1)] += 1
-        ign = event.get("ignition")
-        if ign and event.get("api") == "Ignition.execute":
-            pass  # url not per-event; script shapes come from metadata
+        elif api == "BrowserNetwork.request":
+            args = event.get("args") or [{}]
+            if isinstance(args[0], dict):
+                url = args[0].get("url") or ""
+                if url:
+                    script_urls[url] += 1
 
-    # Site-recorded facts (corpus README/manifest) — DERIVED grade, with
-    # the source named; never presented as observations of this capture.
-    recorded = {}
-    if corpus_manifest:
-        for row in corpus_manifest:
-            if row.get("name") == site_name:
-                recorded = row
-                break
-    site_facts = {
-        "xj1": {"mode": "412-interstitial-two-stage", "stages": 2,
-                "cookie": "CyFIZHvBqps2O",
-                "note": "stage-1 bundle captured; stage-2 blob unavailable"},
-        "sc": {"mode": "200-inline", "stages": 1,
-               "cookie": "cookie_persist", "note": ""},
-        "jibei": {"mode": "200-inline", "stages": 1,
-                  "cookie": None,
-                  "note": "transport-layer threshold marked; original 200 "
-                          "blob missing, paired xj-family blob"},
-    }.get(site_name, {})
 
-    verdict = {
-        "tool": "p55-t7",
-        "family": {"value": "jsvmp-challenge", "grade": "observed",
-                   "evidence": f"ignition density {ignition} events"},
-        "mode": {"value": site_facts.get("mode"), "grade": "derived",
-                 "evidence": "site-recorded corpus fact (README/manifest); "
-                             "local replay cannot re-observe interstitial "
-                             "status codes"},
-        "stages": {"value": site_facts.get("stages"), "grade": "derived",
-                   "evidence": "corpus record (stage-2 blob availability)"},
-        "cookie": {"value": site_facts.get("cookie")
-                   or (cookie_events.most_common(1)[0][0]
-                       if cookie_events else None),
-                   "grade": "derived",
-                   "evidence": "corpus-recorded cookie name"
-                   if site_facts.get("cookie") else
-                   "Document.cookie events" if cookie_events else "absent"},
-        "observed_in_capture": {
-            "ignition_events": ignition,
-            "status_codes": sorted(set(status_codes)),
-            "cookie_event_names": dict(cookie_events),
-            "capture_context": "local replay (dead-proxy guard, no origin)",
-        },
-        "bundle": recorded.get("js"),
-        "note": site_facts.get("note"),
+    # R5 (chief review F5): NO site-name dictionary. Classification is
+    # rule-based over THIS capture's evidence; missing/conflicting
+    # evidence yields unresolved/hypothesis — never a confident label.
+    evidence = {
+        "ignition_events": ignition,
+        "status_codes": sorted(set(status_codes)),
+        "cookie_event_names": dict(cookie_events),
+        "script_urls": dict(script_urls),
+        "capture_context": "local replay (dead-proxy guard, no origin)",
     }
-    return verdict
+    # family: a JSVMP challenge claim needs BOTH heavy interpreter
+    # activity AND a distinctive script shape (random-path bundle) —
+    # density alone proves nothing (any hot page has ignition events).
+    dense_vm = ignition >= 100000
+    random_path_bundle = any(
+        re.search(r"/[A-Za-z0-9]{8,}\.[0-9a-f]{6}\.(js)$", url)
+        for url in script_urls)
+    if ignition == 0:
+        family = {"value": "unresolved", "grade": "unresolved",
+                  "evidence": "empty trace: no ignition events"}
+    elif dense_vm and random_path_bundle:
+        family = {"value": "jsvmp-challenge", "grade": "observed",
+                  "evidence": f"ignition density {ignition} + "
+                              "random-path versioned bundle URL"}
+    elif dense_vm:
+        family = {"value": "jsvmp-challenge", "grade": "hypothesis",
+                  "evidence": f"ignition density {ignition}; no "
+                              "random-path bundle URL observed — "
+                              "script shape unconfirmed"}
+    else:
+        family = {"value": "unresolved", "grade": "unresolved",
+                  "evidence": f"ignition density {ignition} below "
+                              "challenge threshold; ordinary script "
+                              "activity"}
+    # mode: only observable when the capture actually SAW the statuses.
+    if status_codes:
+        if 412 in status_codes:
+            mode = {"value": "412-interstitial", "grade": "observed",
+                    "evidence": f"status codes {sorted(set(status_codes))}"}
+        elif 200 in status_codes:
+            mode = {"value": "200-inline-or-post", "grade": "observed",
+                    "evidence": f"status codes {sorted(set(status_codes))}; "
+                                "two-stage vs inline not distinguishable "
+                                "without the first-response record"}
+        else:
+            mode = {"value": "unresolved", "grade": "unresolved",
+                    "evidence": f"status codes {sorted(set(status_codes))}"}
+    else:
+        mode = {"value": "unresolved", "grade": "unresolved",
+                "evidence": "no response statuses in this capture"}
+    # stages/cookie: unresolved unless the capture itself shows them.
+    stages = {"value": None, "grade": "unresolved",
+              "evidence": "stage count needs the nav_chain record (E5) "
+                          "or multi-stage script observation"}
+    if cookie_events:
+        top, _ = cookie_events.most_common(1)[0]
+        cookie = {"value": top, "grade": "observed",
+                  "evidence": f"Document.cookie events naming {top!r}"}
+    else:
+        cookie = {"value": None, "grade": "unresolved",
+                  "evidence": "no Document.cookie events in this capture"}
+    return {
+        "tool": "p55-t7", "site_name": site_name,
+        "family": family, "mode": mode, "stages": stages, "cookie": cookie,
+        "observed_in_capture": evidence, "bundle": recorded.get("js"),
+    }
 
 
 def main(argv=None) -> int:

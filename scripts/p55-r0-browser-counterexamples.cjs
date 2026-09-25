@@ -116,13 +116,27 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
   // --- global sampled_out == producer sum (from the E7 evidence dir) ------
   {
     const base = path.join(root, 'chromium/src/out/XTraceIntegration/validation');
+    const appBin = path.join(root,
+      'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
+    const binMs = fs.statSync(appBin).mtimeMs;
     const dirs = fs.readdirSync(base)
       .filter(d => d.startsWith('p55-e7-'))
-      .filter(d => fs.existsSync(path.join(base, d, 'trace.manifest.json')));
+      .filter(d => fs.existsSync(path.join(base, d, 'trace.manifest.json')))
+      // only manifests written by the CURRENT binary — torn artifacts
+      // from rebuild windows are stale, not current defects
+      .filter(d => fs.statSync(path.join(base, d, 'trace.manifest.json'))
+        .mtimeMs >= binMs);
     let mismatches = [], anyProducers = false;
     for (const d of dirs) {
-      const m = JSON.parse(fs.readFileSync(path.join(base, d,
-        'trace.manifest.json'), 'utf8'));
+      let m;
+      try {
+        m = JSON.parse(fs.readFileSync(path.join(base, d,
+          'trace.manifest.json'), 'utf8'));
+      } catch (e) {
+        // torn/stale manifest from a rebuild window — report, don't die
+        mismatches.push(`${d}: unparseable (${e.message.slice(0, 40)})`);
+        continue;
+      }
       // Post-R2 captures declare accounting_model 2 — only those carry
       // the current implementation's contract. Pre-R2 dirs are frozen
       // history (the review's original 891-vs-0 evidence), not current

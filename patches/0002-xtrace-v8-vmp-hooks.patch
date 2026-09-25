@@ -9795,10 +9795,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..57cfec86
+index 00000000..1eaa390c
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1346 @@
+@@ -0,0 +1,1402 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9983,6 +9983,31 @@ index 00000000..57cfec86
 +}
 +}  // namespace
 +
++
++// R3 (chief review F4/F5 encoding findings): EXACT bounded string
++// reading. Never ToCString (it replaces embedded NULs and mangles
++// Latin-1 as if UTF-8); never flatten a rope before the length check.
++// One-byte chars map U+00..U+FF (Latin-1 semantics); two-byte chars map
++// their UTF-16 code units; everything outside the JSON-safe ASCII range
++// becomes \uXXXX — byte-exact, no information lost or invented.
++void AppendStringCharsEscaped(std::string* out, Tagged<String> str,
++                              size_t take) {
++  const size_t len = static_cast<size_t>(str->length());
++  const size_t n = std::min(take, len);
++  for (size_t i = 0; i < n; i++) {
++    const uint16_t c = str->Get(static_cast<uint32_t>(i));
++    if (c == '"' || c == '\\') {
++      out->push_back('\\'); out->push_back(static_cast<char>(c));
++    } else if (c >= 0x20 && c < 0x7F) {
++      out->push_back(static_cast<char>(c));
++    } else {
++      char esc[8];
++      snprintf(esc, sizeof(esc), "\\u%04x", c);
++      out->append(esc);
++    }
++  }
++}
++
 +std::string EncodeTapValue(Tagged<Object> value) {
 +  // Minimal layer-1 encoding (contract §4): scalars verbatim, strings
 +  // bounded, objects kind-tagged ONLY. Every entry carries an explicit
@@ -10016,18 +10041,8 @@ index 00000000..57cfec86
 +    const Tagged<String> str = Cast<String>(value);
 +    if (str->length() <= 64) {
 +      std::string out = "{\"t\":\"s\",\"state\":\"captured\",\"v\":";
-+      const std::string cstr = str->ToCString().get();
-+      // JSON-escape (the observer's AppendJsonString semantics).
 +      out.push_back('"');
-+      for (const char ch : cstr) {
-+        const unsigned char c = static_cast<unsigned char>(ch);
-+        if (c == '"' || c == '\\') { out.push_back('\\'); out.push_back(ch); }
-+        else if (c < 0x20) {
-+          char esc[8];
-+          snprintf(esc, sizeof(esc), "\\u%04x", c);
-+          out.append(esc);
-+        } else { out.push_back(ch); }
-+      }
++      AppendStringCharsEscaped(&out, str, 64);
 +      out.push_back('"');
 +      out.push_back('}');
 +      return out;
@@ -10061,6 +10076,7 @@ index 00000000..57cfec86
 +  size_t bytes_read = 0;
 +  size_t work = 0;
 +  bool exhausted = false;
++  bool truncated = false;  // R3: width/key/value truncation — partial too
 +  static constexpr size_t kMaxNodes = 1024;
 +  static constexpr size_t kMaxBytesRead = 1 << 20;
 +  static constexpr size_t kMaxWork = 200000;
@@ -10082,9 +10098,22 @@ index 00000000..57cfec86
 +  out->push_back('"');
 +}
 +
-+void DumpAppendKeyName(std::string* out, Tagged<Name> key) {
-+  const std::string c = Cast<String>(key)->ToCString().get();
-+  DumpAppendEscaped(out, c.data(), c.size());
++void DumpAppendKeyName(std::string* out, Tagged<Name> key,
++                       DumpBudget* budget) {
++  // R3: keys are read EXACTLY (no ToCString) and enter the READ budget;
++  // a key longer than 128 chars is truncated to its length record.
++  Tagged<String> str = Cast<String>(key);
++  const size_t len = static_cast<size_t>(str->length());
++  const size_t take = std::min<size_t>(len, 128);
++  budget->bytes_read += take;
++  if (take == len) {
++    out->push_back('"');
++    AppendStringCharsEscaped(out, str, take);
++    out->push_back('"');
++  } else {
++    budget->truncated = true;
++    out->append("{\"klen\":").append(std::to_string(len)).append("}");
++  }
 +}
 +
 +class DumpWalker {
@@ -10145,57 +10174,52 @@ index 00000000..57cfec86
 +  }
 +
 +  void String_(Tagged<HeapObject> raw) {
++    // R3: length is O(1) — checked BEFORE any flatten; only short
++    // strings flatten, and reading is EXACT per-char (Latin-1/UTF-16
++    // escaped as \uXXXX — byte-faithful, never ToCString).
 +    const Tagged<String> str = Cast<String>(raw);
 +    const size_t len = static_cast<size_t>(str->length());
 +    const size_t take = len < 64 ? len : 64;
 +    budget_->bytes_read += take;
-+    DirectHandle<String> h(str, isolate_);
-+    const DirectHandle<String> flat = String::Flatten(isolate_, h);
 +    if (take == len) {
-+      out_->append("{\"t\":\"s\",\"state\":\"captured\",\"v\":");
-+      {
-+        DisallowGarbageCollection no_gc;
-+        const String::FlatContent content = flat->GetFlatContent(no_gc);
-+        if (content.IsOneByte()) {
-+          DumpAppendEscaped(out_, reinterpret_cast<const char*>(
-+                                     content.ToOneByteVector().begin()), take);
-+        } else {
-+          // two-byte: keep ASCII printable, escape the rest.
-+          const base::Vector<const base::uc16> view = content.ToUC16Vector();
-+          std::string buf;
-+          for (size_t i = 0; i < take; i++) {
-+            const base::uc16 c = view[static_cast<int>(i)];
-+            if (c >= 0x20 && c < 0x7F) buf.push_back(static_cast<char>(c));
-+            else { char esc[8]; snprintf(esc, sizeof(esc), "\\u%04x", c); buf.append(esc); }
-+          }
-+          DumpAppendEscaped(out_, buf.data(), buf.size());
-+        }
-+      }
-+      out_->append("}");
++      out_->append("{\"t\":\"s\",\"state\":\"captured\",\"v\":\"");
++      AppendStringCharsEscaped(out_, str, take);
++      out_->append("\"}");
 +    } else {
++      budget_->truncated = true;  // R3: value truncation => partial
 +      out_->append("{\"t\":\"s\",\"state\":\"truncated\",\"len\":")
 +          .append(std::to_string(len)).append("}");
 +    }
 +  }
 +
 +  void BigInt_(Tagged<HeapObject> raw) {
-+    DirectHandle<BigInt> h(Cast<BigInt>(raw), isolate_);
-+    // Engine-only decimal rendering (no user code); bounded.
-+    Handle<String> dec_handle;
-+    if (!BigInt::ToString(isolate_, h).ToHandle(&dec_handle)) {
-+      out_->append("{\"t\":\"bigint\",\"state\":\"unavailable\",\"reason\":\"tostring-failed\"}");
-+      return;
-+    }
-+    DirectHandle<String> dec(dec_handle);
-+    const size_t len = static_cast<size_t>(dec->length());
-+    if (len <= 128) {
-+      budget_->bytes_read += len;
-+      out_->append("{\"t\":\"bigint\",\"state\":\"captured\",\"v\":");
-+      DumpAppendEscaped(out_, dec->ToCString().get(), len);
-+      out_->append("}");
++    // R3: estimate the decimal size from the digit count BEFORE any
++    // conversion; only small values render (engine-only conversion,
++    // bounded). Each 64-bit digit contributes at most 20 decimals.
++    const Tagged<BigInt> big = Cast<BigInt>(raw);
++    const size_t digits = static_cast<size_t>(big->length());
++    if (digits == 0 || digits * 20 <= 128) {
++      DirectHandle<BigInt> h(big, isolate_);
++      Handle<String> dec_handle;
++      if (!BigInt::ToString(isolate_, h).ToHandle(&dec_handle)) {
++        out_->append("{\"t\":\"bigint\",\"state\":\"unavailable\",\"reason\":\"tostring-failed\"}");
++        return;
++      }
++      const size_t len = static_cast<size_t>((*dec_handle)->length());
++      budget_->bytes_read += std::min<size_t>(len, 128);
++      if (len <= 128) {
++        out_->append("{\"t\":\"bigint\",\"state\":\"captured\",\"v\":\"");
++        AppendStringCharsEscaped(out_, *dec_handle, 128);
++        out_->append("\"}");
++      } else {
++        budget_->truncated = true;
++        out_->append("{\"t\":\"bigint\",\"state\":\"truncated\",\"len\":")
++            .append(std::to_string(len)).append("}");
++      }
 +    } else {
-+      out_->append("{\"t\":\"bigint\",\"state\":\"truncated\",\"len\":")
-+          .append(std::to_string(len)).append("}");
++      budget_->truncated = true;
++      out_->append("{\"t\":\"bigint\",\"state\":\"truncated\",\"digits\":")
++          .append(std::to_string(digits)).append("}");
 +    }
 +  }
 +
@@ -10254,8 +10278,9 @@ index 00000000..57cfec86
 +          if (!Tick()) break;
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
++          written++;  // R3: the width cap only works if counted
 +          out_->append("{\"k\":");
-+          DumpAppendKeyName(out_, key);
++          DumpAppendKeyName(out_, key, budget_);
 +          out_->append(",\"v\":");
 +          DirectHandle<Object> vh(
 +              obj->RawFastPropertyAt(FieldIndex::ForDetails(obj->map(), details)),
@@ -10265,10 +10290,14 @@ index 00000000..57cfec86
 +        } else {
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
++          skipped++;  // R3: accessor skips count toward the width cap
 +          out_->append("{\"k\":");
-+          DumpAppendKeyName(out_, key);
++          DumpAppendKeyName(out_, key, budget_);
 +          out_->append(",\"reason\":\"accessor\"}");
 +        }
++      }
++      if (written + skipped < nparent) {
++        budget_->truncated = true;  // R3: width cap cut entries
 +      }
 +      out_->append("]}");
 +    } else {
@@ -10285,29 +10314,38 @@ index 00000000..57cfec86
 +        if (IsAccessorPair(val)) {
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
++          skipped++;  // R3: dictionary accessor skips count
 +          out_->append("{\"k\":");
-+          DumpAppendKeyName(out_, Cast<Name>(key));
++          DumpAppendKeyName(out_, Cast<Name>(key), budget_);
 +          out_->append(",\"reason\":\"accessor\"}");
 +        } else if (!IsTheHole(val)) {
 +          if (!Tick()) break;
 +          if (!first_entry) out_->push_back(',');
 +          first_entry = false;
++          written++;  // R3: dictionary data props count too
 +          out_->append("{\"k\":");
-+          DumpAppendKeyName(out_, Cast<Name>(key));
++          DumpAppendKeyName(out_, Cast<Name>(key), budget_);
 +          out_->append(",\"v\":");
 +          DirectHandle<Object> vh(val, isolate_);
 +          Value(vh, depth + 1);
 +          out_->append("}");
 +        }
 +      }
-+      out_->append("]}");
++            // R3: hitting the width cap in dictionary mode is truncation.
++      if (written + skipped >= static_cast<int>(kDumpWidth)) {
++        budget_->truncated = true;
++      }
++out_->append("]}");
 +    }
 +  }
 +
 +  void Array(Tagged<JSArray> arr, int id, int depth) {
 +    out_->append("{\"t\":\"array\",\"id\":").append(std::to_string(id));
-+    out_->append(",\"length\":").append(std::to_string(static_cast<size_t>(
-+        Object::NumberValue(Cast<Number>(Tagged<Object>(arr->length()))))));
++    // R3: the LOGICAL length is the JS-visible truth; the backing store
++    // capacity is NEVER reported as the element count.
++    const size_t logical = static_cast<size_t>(Object::NumberValue(
++        Cast<Number>(Tagged<Object>(arr->length()))));
++    out_->append(",\"length\":").append(std::to_string(logical));
 +    Tagged<FixedArrayBase> elems = arr->elements();
 +    // Order matters: NumberDictionary IS a FixedArray subtype — check it
 +    // FIRST or the dense branch would emit raw dictionary internals.
@@ -10340,8 +10378,14 @@ index 00000000..57cfec86
 +      return;
 +    }
 +    if (IsFixedArray(elems) || IsFixedDoubleArray(elems)) {
-+      const int n = static_cast<int>(
-+          std::min<size_t>(static_cast<size_t>(*elems->length()), kDumpWidth));
++      // R3: dense entries are capped by the LOGICAL length (never the
++      // backing capacity) and the width budget.
++      const int n = static_cast<int>(std::min(
++          std::min<size_t>(static_cast<size_t>(*elems->length()), logical),
++          kDumpWidth));
++      if (static_cast<size_t>(n) < logical) {
++        budget_->truncated = true;  // R3: element cut => partial
++      }
 +      out_->append(",\"dense\":[");
 +      for (int i = 0; i < n; i++) {
 +        if (!Tick()) break;
@@ -10368,6 +10412,12 @@ index 00000000..57cfec86
 +      out_->append(",\"detached\":true}");
 +      return;
 +    }
++    // R3: SharedArrayBuffer-backed views are EXPLICITLY unavailable
++    // (contract §4: no consistency guarantees without locking pages).
++    if (ta->buffer()->is_shared()) {
++      out_->append(",\"state\":\"unavailable\",\"reason\":\"shared-no-consistency\"}");
++      return;
++    }
 +    const size_t bytes = static_cast<size_t>(ta->byte_length());
 +    out_->append(",\"byte_length\":").append(std::to_string(bytes));
 +    // Bounded hex of the first bytes (engine-internal read only; the
@@ -10388,6 +10438,11 @@ index 00000000..57cfec86
 +  void ArrayBuffer(Tagged<JSArrayBuffer> ab, int id) {
 +    out_->append("{\"t\":\"arraybuffer\",\"id\":").append(std::to_string(id));
 +    if (ab->was_detached()) { out_->append(",\"detached\":true}"); return; }
++    // R3: shared backing stores are explicitly unavailable.
++    if (ab->is_shared()) {
++      out_->append(",\"state\":\"unavailable\",\"reason\":\"shared-no-consistency\"}");
++      return;
++    }
 +    const size_t bytes = static_cast<size_t>(ab->byte_length());
 +    out_->append(",\"byte_length\":").append(std::to_string(bytes));
 +    const size_t take = std::min<size_t>(bytes, kDumpPerValueMax / 2);
@@ -11042,7 +11097,8 @@ index 00000000..57cfec86
 +  out.append(",\"bytes_read\":").append(std::to_string(budget.bytes_read));
 +  out.append(",\"max_bytes_read\":").append(std::to_string(DumpBudget::kMaxBytesRead));
 +  out.append(",\"work\":").append(std::to_string(budget.work));
-+  out.append(",\"partial\":").append(budget.exhausted ? "true" : "false");
++  out.append(",\"partial\":").append(
++      (budget.exhausted || budget.truncated) ? "true" : "false");
 +  out.append("}}");
 +  dcb(reinterpret_cast<v8::Isolate*>(isolate), anchor_label, window_id,
 +      out.data(), out.size());

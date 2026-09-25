@@ -2620,9 +2620,36 @@ def validate_v3_identity(manifest: dict) -> None:
     identity = manifest.get("identity")
     if identity is None:
         return
+    # R5 (schema v1.3): identity became an OBJECT carrying frames[] and
+    # nav_chain[]; legacy captures keep the bare array form.
+    if isinstance(identity, dict):
+        frames = identity.get("frames")
+        if frames is not None:
+            _validate_v3_identity_rows(frames)
+        chains = identity.get("nav_chain")
+        if chains is not None:
+            if not isinstance(chains, list):
+                raise TraceValidationError(
+                    "identity.nav_chain must be an array")
+            for i, row in enumerate(chains):
+                for field in ("nav_chain_id", "frame_tree_node_id",
+                              "from_document", "to_document", "cause",
+                              "wall_us"):
+                    if not isinstance(row.get(field), str) or not row[field]:
+                        raise TraceValidationError(
+                            f"identity.nav_chain[{i}]: missing {field}")
+                if row["from_document"] == row["to_document"]:
+                    raise TraceValidationError(
+                        f"identity.nav_chain[{i}]: successor documents "
+                        "must differ")
+        return
     if not isinstance(identity, list):
         raise TraceValidationError("manifest.identity must be an array")
-    for i, row in enumerate(identity):
+    _validate_v3_identity_rows(identity)
+
+
+def _validate_v3_identity_rows(rows: list) -> None:
+    for i, row in enumerate(rows):
         if row.get("status") not in ("resolved", "unresolved"):
             raise TraceValidationError(f"identity[{i}]: bad status")
         if row.get("status") == "resolved":

@@ -57,7 +57,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
 
   const lines = fs.readFileSync(trace, 'utf8').trim().split('\n').map(l => JSON.parse(l));
   const manifest = JSON.parse(fs.readFileSync(path.join(runDir, 'trace.manifest.json'), 'utf8'));
-  const chains = manifest.nav_chain || [];
+  const chains = (manifest.identity || {}).nav_chain || [];
   // Same-frame succession to the stage-2 document (navigation, not
   // reload — the stage switch is a same-frame href change).
   const succ = chains.filter(ch => ch.to_url.includes('stage=2'));
