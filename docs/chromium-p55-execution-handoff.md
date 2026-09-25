@@ -221,6 +221,12 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 
 补丁栈重生成（chromium 126/3/1/3 + V8 137），verify pass。**R1+R2 部分完成 typed-mojom 计划与 isolate 线程原子发布的功能等价物（严格校验+代数+同 scope）；跨线程发布改造并入 R4 批次的 chrome dump 触发一起做（同批触碰同文件）。**
 
+### 8.5 R3+R5-a 执行记录（2026-09-25，工程师）
+
+**R3（安全有界编码）**——d8 反例 5/5 转绿：宽度计数双分支真实递增 + 截断显式 partial；dense 数组报告 JS 逻辑长度（绝不报 backing 容量）；Shared 显式 unavailable/shared-no-consistency；全部 ToCString 路径替换为逐字符精确读（Latin-1/UTF-16 语义、\\uXXXX 转义、NUL/CJK/é 保真）；rope/大串先 O(1) 长度检查；BigInt 先位数估算（digits×20>128 直接 truncated）；键读入 bytes_read、>128 字符键截断记录。**GC 压力门 PASS**（12 轮 MarkCompact 包夹 dump、300 轮 GC 下 tap 哨兵计数与基线逐位相等）。开发中自伤两处均被驱动当场抓住并修复（tap 字符串开引号丢失；重编窗口撕裂 manifest）。
+
+**R5-a（T3/T7 + nav_chain）**——反例 2/2 转绿：proven-pool 等级删除（池成员=candidate-pool，逐条注明待 R4 operand 索引）；T7 站点字典删除（family 需密度+随机路径 bundle URL 才 observed，仅密度 hypothesis，空 trace/普通负载 unresolved；mode 只认本 capture 状态码；cookie 只从本 capture 事件观察；语料 manifest 仅作 bundle 出处）；nav_chain 迁入 manifest.identity（对象形 frames[]+nav_chain[]），validator 对象形校验（后继相异+字段，legacy 兼容）；E5/E7 迁移后重跑 PASS（并当场抓到 manifest 括号数错误）。
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计
