@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..062198089a
+index 0000000000..7815988726
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,717 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -193,6 +193,11 @@ index 0000000000..062198089a
 +
 +#include "base/base_paths.h"
 +#include "base/path_service.h"
++#include "base/strings/stringprintf.h"
++#include <map>
++#include <utility>
++#include <vector>
++
 +#include "base/command_line.h"
 +#include "base/files/file_util.h"
 +#include "base/json/json_reader.h"
@@ -603,8 +608,76 @@ index 0000000000..062198089a
 +  // UpdateConfig push — same generation discipline, no second state
 +  // machine. The renderer side treats malformed JSON as taps-off.
 +  if (in_valueObservation) {
++    // R1 (chief review F2): STRICT structural validation — negative ids
++    // and budgets rejected, window count and values under hard caps,
++    // duplicate ids rejected; overlapping windows are rejected (the
++    // frozen overlap policy: NONE until a ruling says otherwise — the
++    // runtime predicate binary-searches disjoint intervals only).
++    static constexpr int kMaxWindows = 64;
++    static constexpr int64_t kMaxPerActivation = 100000;
++    static constexpr int64_t kMaxPerWindow = 64000;
++    static constexpr int64_t kMaxOffset = 1 << 30;
++    const int64_t max_taps = in_valueObservation->GetMaxTapsPerActivation(2000);
++    const int64_t max_window = in_valueObservation->GetMaxTapsPerWindow(512);
++    if (max_taps <= 0 || max_taps > kMaxPerActivation ||
++        max_window <= 0 || max_window > kMaxPerWindow) {
++      callback->sendFailure(Response::InvalidRequest(
++          base::StringPrintf(
++              "valueObservation budgets out of range (0, %lld]: "
++              "perActivation=%lld perWindow=%lld",
++              static_cast<long long>(kMaxPerActivation),
++              static_cast<long long>(max_taps),
++              static_cast<long long>(max_window))));
++      return;
++    }
++    std::map<int, std::pair<int64_t, int64_t>> by_id;
++    const auto* windows = in_valueObservation->GetWindows();
++    if (windows) {
++      if (windows->size() > kMaxWindows) {
++        callback->sendFailure(Response::InvalidRequest(
++            base::StringPrintf("valueObservation windows exceed %d",
++                               kMaxWindows)));
++        return;
++      }
++      for (const auto& w : *windows) {
++        const int64_t id = w->GetId();
++        const int64_t start = w->GetStart();
++        const int64_t end = w->GetEnd();
++        if (id < 0) {
++          callback->sendFailure(Response::InvalidRequest(
++              "valueObservation window id must be >= 0"));
++          return;
++        }
++        if (start < 0 || end < start || end > kMaxOffset) {
++          callback->sendFailure(Response::InvalidRequest(
++              base::StringPrintf(
++                  "valueObservation window bounds invalid (id %lld)",
++                  static_cast<long long>(id))));
++          return;
++        }
++        if (!by_id.emplace(static_cast<int>(id),
++                           std::make_pair(start, end)).second) {
++          callback->sendFailure(Response::InvalidRequest(
++              base::StringPrintf("valueObservation duplicate window id %lld",
++                                 static_cast<long long>(id))));
++          return;
++        }
++      }
++      // Overlap policy NONE: sort by start and reject any overlap.
++      std::vector<std::pair<int64_t, int64_t>> spans;
++      for (const auto& [id, se] : by_id) spans.push_back(se);
++      std::sort(spans.begin(), spans.end());
++      for (size_t i = 1; i < spans.size(); ++i) {
++        if (spans[i].first <= spans[i - 1].second) {
++          callback->sendFailure(Response::InvalidRequest(
++              "valueObservation windows overlap (policy: none allowed)"));
++          return;
++        }
++      }
++    }
++    // Serialize the validated plan; the per-plan generation is allocated
++    // by the controller so two different plans never share one.
 +    std::string pattern = in_valueObservation->GetScriptPattern();
-+    // JSON-quote via the same helper the controller manifest uses.
 +    std::string json = "{\"script_pattern\":";
 +    {
 +      std::string quoted = "\"";
@@ -620,45 +693,37 @@ index 0000000000..062198089a
 +      json += quoted;
 +    }
 +    json += ",\"windows\":[";
-+    const auto* windows = in_valueObservation->GetWindows();
 +    bool first = true;
 +    if (windows) {
 +      for (const auto& w : *windows) {
-+        const int id = w->GetId();
-+        const int start = w->GetStart();
-+        const int end = w->GetEnd();
-+        if (start < 0 || end < start) {
-+          callback->sendFailure(Response::InvalidRequest(
-+              "valueObservation window bounds invalid (id " +
-+              base::NumberToString(id) + ")"));
-+          return;
-+        }
 +        if (!first) json += ",";
 +        first = false;
-+        json += "{\"id\":" + base::NumberToString(id);
-+        json += ",\"start\":" + base::NumberToString(start);
-+        json += ",\"end\":" + base::NumberToString(end) + "}";
++        json += "{\"id\":" + base::NumberToString(w->GetId());
++        json += ",\"start\":" + base::NumberToString(w->GetStart());
++        json += ",\"end\":" + base::NumberToString(w->GetEnd()) + "}";
 +      }
 +    }
 +    json += "]";
-+    const int max_taps = in_valueObservation->GetMaxTapsPerActivation(2000);
-+    const int max_window = in_valueObservation->GetMaxTapsPerWindow(512);
 +    json += ",\"max_taps\":" + base::NumberToString(max_taps);
 +    json += ",\"max_window\":" + base::NumberToString(max_window);
++    json += ",\"plan_serial\":" +
++            base::NumberToString(controller->DomainNextTapPlanSerial());
 +    json += "}";
-+    if (controller->DomainSetTapWindows(json).empty() &&
-+        controller->DomainStateName() != "complete") {
-+      // Accepted unless the capture is already settling; the renderer
-+      // backfill path delivers it with the next UpdateConfig push.
++    if (controller->DomainSetTapWindows(json).empty()) {
++      callback->sendFailure(Response::InvalidRequest(
++          "invalid state: capture stopping or settled"));
++      return;
 +    }
 +  }
 +  // The P2 contract ties capture setup to launch-time configuration;
-+  // startCapture reports the running capture's identity.
++  // startCapture reports the running capture's identity. R1: the tap
++  // plan serial is reported so distinct plans are distinguishable.
 +  callback->sendSuccess(
 +      String(controller->capture_id()),
 +      String(controller->current_generation()),
 +      String(controller->DomainStateName()),
-+      std::move(effective));
++      std::move(effective),
++      static_cast<int>(controller->DomainTapPlanSerial()));
 +}
 +
 +void XTraceHandler::UpdateCapture(
@@ -997,10 +1062,10 @@ index db280b0576..cea936ae91 100644
  
 diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
 new file mode 100644
-index 0000000000..91c1ada5e0
+index 0000000000..8c64ed56b5
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace.pdl
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,147 @@
 +# Copyright 2026 The XTrace Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in Chromium's LICENSE file.
@@ -1113,6 +1178,9 @@ index 0000000000..91c1ada5e0
 +      # The ACTUALLY effective configuration — machine-readable V14
 +      # lesson (flag names are not tier truth).
 +      object effectiveConfig
++      # P55-R1: serial of the value-observation plan this call installed
++      # (0 when none); distinct plans never share a serial.
++      integer tapPlanSerial
 +
 +  # Runtime filter update; serially allocated generation from "1".
 +  # Confirmation evidence is each event's config_generation field; a
@@ -1147,10 +1215,10 @@ index 0000000000..91c1ada5e0
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..2f2d3d8875
+index 0000000000..679c9d9b75
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1347 @@
+@@ -0,0 +1,1390 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2080,6 +2148,19 @@ index 0000000000..2f2d3d8875
 +  return command_line->HasSwitch("xtrace-ignition-observer");
 +}
 +
++uint64_t XTraceCaptureController::DomainTapPlanSerial() {
++  base::AutoLock lock(writer_lock_);
++  return tap_plan_serial_;
++}
++
++uint64_t XTraceCaptureController::DomainNextTapPlanSerial() {
++  // R2: allocate the serial BEFORE serialization so the JSON and the
++  // DomainTapPlanSerial() report agree; DomainSetTapWindows sees the
++  // same (now current) serial and does not double-increment.
++  base::AutoLock lock(writer_lock_);
++  return tap_plan_serial_ + 1;
++}
++
 +std::string XTraceCaptureController::DomainSetTapWindows(
 +    const std::string& tap_windows_json) {
 +  // P5.5 E7: store, then ACTIVELY push to every registered renderer —
@@ -2092,6 +2173,23 @@ index 0000000000..2f2d3d8875
 +    base::AutoLock lock(writer_lock_);
 +    if (stopping_ || finalized_.load(std::memory_order_acquire)) {
 +      return std::string();
++    }
++    // The serialized plan carries its pre-allocated serial (see
++    // DomainNextTapPlanSerial); advance to match it when distinct.
++    uint64_t parsed_serial = 0;
++    {
++      const std::string needle = "\"plan_serial\":";
++      const size_t pos = tap_windows_json.find(needle);
++      if (pos != std::string::npos) {
++        parsed_serial = strtoull(
++            tap_windows_json.c_str() + pos + needle.size(), nullptr, 10);
++      }
++    }
++    // R1 (F2): every DISTINCT plan carries its own serial (starting at
++    // the capture generation) — two plans never share one identity.
++    if (status_tap_windows_json_ != tap_windows_json &&
++        parsed_serial == tap_plan_serial_ + 1) {
++      tap_plan_serial_ = parsed_serial;
 +    }
 +    status_tap_windows_json_ = tap_windows_json;
 +  }
@@ -2350,13 +2448,17 @@ index 0000000000..2f2d3d8875
 +  // Global counts: producer-side sums cover CONFIRMED producers only
 +  // (unknown values are not zero-filled); writer-side sums cover all.
 +  // The visible equation gap under loss is itself the evidence (§7).
++  // R2 (accounting model 2): sampled_out sums like every other producer
++  // counter — the era of the hardcoded 0 is over.
 +  uint64_t total_eligible = 0, total_enqueued = 0, total_dropped = 0,
-+           total_accepted = 0, total_written = 0, total_failed = 0;
++           total_sampled = 0, total_accepted = 0, total_written = 0,
++           total_failed = 0;
 +  for (const auto& [id, state] : producers_) {
 +    if (state->watermark_received) {
 +      total_eligible += state->eligible;
 +      total_enqueued += state->enqueued;
 +      total_dropped += state->dropped;
++      total_sampled += state->sampled_out;
 +    }
 +    total_accepted += state->accepted;
 +    total_written += state->written;
@@ -2370,7 +2472,16 @@ index 0000000000..2f2d3d8875
 +              base::NumberToString(total_accepted) + "\",\"written\":\"" +
 +              base::NumberToString(total_written) + "\",\"failed\":\"" +
 +              base::NumberToString(total_failed) +
-+              "\",\"sampled_out\":\"0\"}");
++              // R2: real global sum (was a hardcoded "0").
++              "\",\"sampled_out\":\"" +
++              base::NumberToString(total_sampled) + "\"}");
++  // R2 (accounting model 2 + coverage axis): the manifest declares its
++  // accounting semantics and the observation completeness INDEPENDENTLY
++  // of the transport terminal. Any budget refusal leaves coverage
++  // partial even when every written event landed (green != complete).
++  const std::string coverage = (total_sampled > 0) ? "partial" : "full";
++  json.append(",\"accounting_model\":\"2\"");
++  json.append(",\"observation_coverage\":\"" + coverage + "\"");
 +  json.append(",\"overflow_intervals\":[]");
 +  // P3-E5 identity crosswalk (manifest-only; event rows stay light).
 +  // P5.5 E5: the nav_chain successions ride the SAME section (event rows
@@ -2500,10 +2611,10 @@ index 0000000000..2f2d3d8875
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..225668b324
+index 0000000000..65c837a70a
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,307 @@
+@@ -0,0 +1,310 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2630,6 +2741,8 @@ index 0000000000..225668b324
 +  };
 +  // P5.5 E7: valueObservation sub-config — serialized tap-window JSON
 +  // carried by every UpdateConfig push (generation-disciplined).
++  uint64_t DomainTapPlanSerial();
++  uint64_t DomainNextTapPlanSerial();
 +  std::string DomainSetTapWindows(const std::string& tap_windows_json);
 +
 +  std::string DomainUpdateCapture(const std::string& categories,
@@ -2683,6 +2796,7 @@ index 0000000000..225668b324
 +  ObserverScope status_observer_scope_;  // N3-part2 selector (backfill)
 +  // P5.5 E7: valueObservation sub-config (serialized tap-window JSON).
 +  std::string status_tap_windows_json_ GUARDED_BY(writer_lock_);
++  uint64_t tap_plan_serial_ GUARDED_BY(writer_lock_) = 0;
 +
 +  // DP5 shutdown evidence: synchronous, idempotent finalization as
 +  // incomplete/browser-shutdown using only data already at the writer (no
@@ -15479,10 +15593,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..b3c74980ad
+index 0000000000..61a214e5a0
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,394 @@
+@@ -0,0 +1,434 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -15491,6 +15605,8 @@ index 0000000000..b3c74980ad
 +
 +#include <atomic>
 +#include <cstring>
++#include <map>
++#include <utility>
 +#include <optional>
 +#include <set>
 +#include <string_view>
@@ -15657,7 +15773,7 @@ index 0000000000..b3c74980ad
 +                     uint32_t bytecode_version, uint32_t bytecode_offset,
 +                     uint32_t opcode, const char* script_url);
 +void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
-+                        uint32_t bytecode_version,
++                        uint32_t bytecode_version, const char* script_url,
 +                        const char* metadata_json, size_t metadata_len);
 +void OnIgnitionTap(v8::Isolate* isolate, uint32_t script_id,
 +                   uint32_t bytecode_version, uint32_t bytecode_offset,
@@ -15697,6 +15813,22 @@ index 0000000000..b3c74980ad
 +  return scope;
 +}
 +
++// R1: per-instance source URL cache so tap/metadata callbacks can apply
++// the SAME script scope as the event path (the tap/metadata signatures
++// do not carry the URL). Keyed (script_id, version); written on the
++// isolate thread from OnIgnitionEvent, read on the same thread from the
++// sibling callbacks — single-threaded per isolate by construction.
++std::string LookupInstanceUrl(uint32_t script_id, uint32_t version);
++std::map<std::pair<uint32_t, uint32_t>, std::string>& InstanceUrlMap() {
++  static std::map<std::pair<uint32_t, uint32_t>, std::string> map;
++  return map;
++}
++std::string LookupInstanceUrl(uint32_t script_id, uint32_t version) {
++  const auto& map = InstanceUrlMap();
++  auto it = map.find({script_id, version});
++  return it == map.end() ? std::string() : it->second;
++}
++
 +std::atomic<uint64_t> g_tap_events_observed{0};
 +// Config-time cache (last applied JSON) so scopes installed AFTER a
 +// config push still get their tables compiled (F1/B7 backfill parity).
@@ -15708,19 +15840,29 @@ index 0000000000..b3c74980ad
 +                   uint32_t window_id, const char* value_json,
 +                   size_t value_len) {
 +  g_tap_events_observed.fetch_add(1, std::memory_order_relaxed);
-+  // §6 budget accounting first: the V8-side marker means the probe-plan
-+  // budget was spent — count sampled_out, emit NOTHING.
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->Stopped() || scope->stack.empty() ||
++      !scope->stack.back().selected) {
++    return;  // second line: scope state beyond the generated-code gate
++  }
++  // R1 (chief review F1): taps honor the SAME script scope as events —
++  // the URL comes from the per-instance registry via the metadata
++  // callback's cached scope, looked up by (script_id, version).
++  const std::string url = LookupInstanceUrl(script_id, bytecode_version);
++  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
++  if (!ScriptSelected(snapshot->observer_scope,
++                      url.empty() ? nullptr : url.c_str())) {
++    return;  // out of scope: no event, NO budget accounting either
++  }
++  // §6 budget accounting: only for in-scope, admitted observation. The
++  // V8-side marker means the probe-plan budget was spent — count
++  // sampled_out, emit NOTHING.
 +  if (value_len >= 14 && memcmp(value_json, "{\"budget_skip\"", 14) == 0) {
 +    if (XTraceThreadProducer* producer =
 +            XTraceThreadProducer::CurrentIfExists()) {
 +      producer->RecordSampledOut();
 +    }
 +    return;
-+  }
-+  IgnitionScope* scope = ScopeFor(isolate);
-+  if (!scope || scope->Stopped() || scope->stack.empty() ||
-+      !scope->stack.back().selected) {
-+    return;  // second line: scope state beyond the generated-code gate
 +  }
 +  // Facts only (contract §4): slot/timepoint/instance/window + the
 +  // V8-side bounded value encoding; value_role stays "unclassified" —
@@ -15730,13 +15872,21 @@ index 0000000000..b3c74980ad
 +}
 +
 +void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
-+                        uint32_t bytecode_version,
++                        uint32_t bytecode_version, const char* script_url,
 +                        const char* metadata_json, size_t metadata_len) {
 +  // Contract §3: exactly-once per compilation instance; scope state gets
 +  // a second line beyond the generated-code gate like every event path.
 +  IgnitionScope* scope = ScopeFor(isolate);
 +  if (!scope || scope->Stopped() || scope->stack.empty() ||
 +      !scope->stack.back().selected) {
++    return;
++  }
++  // R1 (chief review F1): metadata honors the SAME script scope as
++  // events — the registry-owned URL rides the callback signature so the
++  // check runs at registration time (the first dispatch), not only
++  // after the event path caches it.
++  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
++  if (!ScriptSelected(snapshot->observer_scope, script_url)) {
 +    return;
 +  }
 +  if (!metadata_json || metadata_len == 0) {
@@ -15774,7 +15924,11 @@ index 0000000000..b3c74980ad
 +    return;  // second line: scope state beyond the generated-code gate
 +  }
 +  // SCRIPT selection (design §1): the registry-cached source URL against
-+  // the selector from the CURRENT snapshot.
++  // the selector from the CURRENT snapshot. R1: cache the URL per
++  // (script_id, version) FIRST — even out-of-scope scripts register, so
++  // a scope CHANGE that re-includes the script keeps the URL known.
++  InstanceUrlMap()[{script_id, bytecode_version}] =
++      script_url ? script_url : "";
 +  auto snapshot = xtrace::XTraceProducerHub::Get()->SnapshotConfig();
 +  if (!ScriptSelected(snapshot->observer_scope, script_url)) {
 +    return;
@@ -16986,10 +17140,10 @@ index 0000000000..af4b8c92c2
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_producer.h b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
 new file mode 100644
-index 0000000000..10a690e685
+index 0000000000..aab389833e
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_producer.h
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,282 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -17212,9 +17366,14 @@ index 0000000000..10a690e685
 +  // P5-R2a/R5: marks dropped for lack of an attributable scope.
 +  void RecordScopeOverflow() { ++scope_overflow_; }
 +
-+  // P5.5 §6: budget-skipped taps (probe-plan accounting; equation
-+  // extension eligible = enqueued + dropped + sampled_out).
-+  void RecordSampledOut() { ++sampled_out_; }
++  // P5.5 §6 / R2 (accounting model 2): a budget-skipped tap is an
++  // ELIGIBLE observation opportunity refused by the probe budget — it
++  // increments eligible AND sampled_out, so the frozen equation
++  // eligible = enqueued + dropped + sampled_out holds per producer.
++  void RecordSampledOut() {
++    ++sampled_out_;
++    ++eligible_;
++  }
 +  uint64_t sampled_out() const {
 +    return sampled_out_.load(std::memory_order_relaxed);
 +  }

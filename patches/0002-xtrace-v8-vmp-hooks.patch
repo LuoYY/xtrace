@@ -35,10 +35,10 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-generator.cc",
 diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
 new file mode 100644
-index 00000000..3a0de6e3
+index 00000000..3bca248b
 --- /dev/null
 +++ b/include/xtrace_observer_boundary.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,121 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -90,6 +90,7 @@ index 00000000..3a0de6e3
 +using IgnitionMetadataCallback = void (*)(v8::Isolate* isolate,
 +                                          uint32_t script_id,
 +                                          uint32_t bytecode_version,
++                                          const char* script_url,
 +                                          const char* metadata_json,
 +                                          size_t metadata_len);
 +
@@ -9131,7 +9132,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..c802db46 100644
+index fc6d62e2..02e2db38 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9157,8 +9158,8 @@ index fc6d62e2..c802db46 100644
 +// --xtrace-metadata-dir (NEVER overwrites the P0 baseline outputs).
 +std::string g_metadata_dir;
 +void D8MetadataCallback(v8::Isolate*, uint32_t script_id,
-+                        uint32_t bytecode_version, const char* metadata_json,
-+                        size_t metadata_len) {
++                        uint32_t bytecode_version, const char* script_url,
++                        const char* metadata_json, size_t metadata_len) {
 +  printf("META script=%u version=%u len=%zu\n", script_id, bytecode_version,
 +         metadata_len);
 +  if (g_metadata_dir.empty()) return;
@@ -9794,10 +9795,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..27f5fb4a
+index 00000000..57cfec86
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1335 @@
+@@ -0,0 +1,1346 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9892,7 +9893,7 @@ index 00000000..27f5fb4a
 +namespace {
 +bool ParseTapWindowsJson(const std::string& json, std::string* pattern,
 +                         std::vector<IgnitionTapWindow>* windows,
-+                         TapBudget* budget) {
++                         TapBudget* budget, uint32_t* plan_serial_out) {
 +  // Expected shape (built by tooling, not user-typed):
 +  // {"script_pattern":"x","windows":[{"id":0,"start":1,"end":2},...]}
 +  auto fail = []() { return false; };
@@ -9940,6 +9941,8 @@ index 00000000..27f5fb4a
 +      if (!parse_uint(&budget->max_taps)) return fail();
 +    } else if (key == "max_window") {
 +      if (!parse_uint(&budget->max_window)) return fail();
++    } else if (key == "plan_serial") {
++      if (!parse_uint(plan_serial_out)) return fail();
 +    } else if (key == "windows") {
 +      if (!expect('[')) return fail();
 +      skip_ws();
@@ -10771,8 +10774,12 @@ index 00000000..27f5fb4a
 +      return;  // script-pattern discovery filter (url is a filter, not a key)
 +    }
 +    entry->tap_windows = tap_windows_config;
-+    // Fresh interval tables reset per-window budget accounting.
++    // R2: a NEW plan resets BOTH the per-window counters and the
++    // per-activation total (generation boundary = activation boundary;
++    // the per-instance cumulative stays as the documented secondary
++    // cap only when the plan is unchanged).
 +    for (auto& w : entry->tap_windows) w.recorded = 0;
++    entry->tap_budget_total.store(0, std::memory_order_relaxed);
 +    std::sort(entry->tap_windows.begin(), entry->tap_windows.end(),
 +              [](const IgnitionTapWindow& a, const IgnitionTapWindow& b) {
 +                return a.start < b.start;
@@ -10991,9 +10998,12 @@ index 00000000..27f5fb4a
 +  std::string pattern;
 +  std::vector<IgnitionTapWindow> windows;
 +  TapBudget budget;
-+  if (!ParseTapWindowsJson(windows_json, &pattern, &windows, &budget)) {
++  uint32_t parsed_plan_serial = 0;
++  if (!ParseTapWindowsJson(windows_json, &pattern, &windows, &budget,
++                           &parsed_plan_serial)) {
 +    return;  // malformed config: taps off (fail-visible at the embedder)
 +  }
++  tap_plan_serial_ = parsed_plan_serial;
 +  registry_->ApplyTapConfig(pattern, windows, budget);
 +}
 +
@@ -11087,7 +11097,9 @@ index 00000000..27f5fb4a
 +            isolate_, Handle<BytecodeArray>(array, isolate_), script_id,
 +            entry->version, Handle<Script>(*script, isolate_), function_name);
 +        mcb(reinterpret_cast<v8::Isolate*>(isolate_), script_id,
-+            entry->version, blob.data(), blob.size());
++            entry->version,
++            entry->source_url.empty() ? nullptr : entry->source_url.c_str(),
++            blob.data(), blob.size());
 +      }
 +    }
 +  }
@@ -11135,10 +11147,10 @@ index 00000000..27f5fb4a
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..5d947b90
+index 00000000..d05444dc
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,161 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -11232,6 +11244,7 @@ index 00000000..5d947b90
 +  // Config time (allocation allowed); rebuilds every entry's interval
 +  // table from the parsed pattern + windows. Empty config = taps off.
 +  void SetTapConfig(const std::string& windows_json);
++  uint32_t tap_plan_serial() const { return tap_plan_serial_; }
 +
 +  enum class TapResult : uint8_t {
 +    kMiss = 0,          // outside every window (nothing to report)
@@ -11283,6 +11296,7 @@ index 00000000..5d947b90
 + private:
 +  Isolate* isolate_;
 +  Registry* registry_ = nullptr;
++  uint32_t tap_plan_serial_ = 0;  // config-time; rides the plan JSON
 +};
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER

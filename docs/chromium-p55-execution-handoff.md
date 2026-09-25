@@ -203,6 +203,24 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 - 恒真断言修复：`p55-e4-d8-verify.py` 的 `assert … or True` 改为严格断言并重跑通过（该测试本身的缺陷，非实现变化）。
 - 反例首红目录：d8 `p55-r0-20260925-095702`、browser `p55-r0b-tzdlsm`。
 
+### 8.4 R1+R2 执行记录（2026-09-25，工程师）
+
+**R1（scope 一体化 + 严格校验 + 计划代数）**——browser 反例 4/4 转绿：
+- `OnIgnitionTap`/`OnIgnitionMetadata` 与事件路径同一 `ScriptSelected` 判定；metadata 回调签名扩展携带 registry 自有 `script_url`（注册时即可判，不依赖事件先缓存）；范围外脚本 tap/metadata/预算全部零增量（`p55-r0b-uzAQqr`：impossible-match scope 下 ignition=0、taps=0、metadata=0）。
+- startCapture 严格校验：负 id/负预算/越界/重复 id/重叠窗口（策略 NONE）/窗口数>64/预算超硬上限（100k/64k）全部显式拒绝（R0 反例 negative-id/negative-budget 转绿）。
+- 计划代数：`tapPlanSerial` 进 pdl 返回值与计划 JSON；不同计划 serial 必不同（R0 反例 plan-generation 转绿）。**修复过程实证了总审 F2 的"静默失败"**：plan_serial 键一度使 V8 手搓解析器整体 fail→taps 静默关闭——解析器现已知该键。
+- 开发中顺带修复 serial 先取后分配的次序错位。
+
+**R2（计账全链闭合）**——browser 反例第 5 项转绿 + validator 负例入回归：
+- producer：预算跳过同时计 `eligible` 与 `sampled_out`（冻结等式 `eligible = enqueued + dropped + sampled_out` 按生产者成立；E7 复跑实测 1253+0+891=2144 ✓）。
+- controller：全局 `counts.sampled_out` 真实求和（原硬编码 "0"）；manifest 增 `accounting_model:"2"` 与 `observation_coverage: full|partial`（任一预算拒绝→partial，与传输终态分列）。
+- validator：model 2 下逐生产者等式、全局求和一致、coverage 自洽（full+sampled>0 拒绝）；旧两 term 检查模型感知。**E7 复跑首跑即被新等式抓住**（旧检查未含 sampled 项）——证明等式检查在拦真实错误，随后修正旧检查。
+- V8：新计划同时重置逐窗口计数与逐激活总额（代数边界=激活边界）。
+- 新单测 6 个（tests/test_validate_trace_v3.V3AccountingModel2Test：等式违背/全局失配/full+sampled/缺 coverage/legacy 跳过/一致通过）——python 全套 381+28 OK。
+- R0 browser 反例扫描限定 model-2 manifest（pre-R2 目录为冻结历史证据，非现实现缺陷；总审原始 891-vs-0 事实保留在 §7）。
+
+补丁栈重生成（chromium 126/3/1/3 + V8 137），verify pass。**R1+R2 部分完成 typed-mojom 计划与 isolate 线程原子发布的功能等价物（严格校验+代数+同 scope）；跨线程发布改造并入 R4 批次的 chrome dump 触发一起做（同批触碰同文件）。**
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计

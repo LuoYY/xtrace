@@ -2451,6 +2451,51 @@ def load_v3_manifest(trace_path) -> dict:
     return json.loads(candidate.read_text(encoding="utf-8"))
 
 
+def validate_v3_accounting_model_2(manifest: dict) -> None:
+    """R2 (accounting model 2): sampled_out sums, the frozen equation
+    eligible = enqueued + dropped + sampled_out per confirmed producer,
+    and the coverage axis separate from the transport terminal."""
+    if str(manifest.get("accounting_model", "1")) != "2":
+        return  # legacy capture: old equation checked in the manifest walk
+    counts = manifest.get("counts") or {}
+    producers = manifest.get("producers") or []
+    total_sampled = 0
+    for producer in producers:
+        if not producer.get("confirmed", False):
+            continue  # unconfirmed counters are null — not zero-filled
+        def dec(field: str) -> int:
+            value = producer.get(field)
+            if value is None:
+                raise TraceValidationError(
+                    f"accounting_model=2 producer {producer.get('producer_id')}"
+                    f" missing {field} while confirmed")
+            return int(value)
+        eligible = dec("eligible")
+        enqueued = dec("enqueued")
+        dropped = dec("dropped")
+        sampled = dec("sampled_out")
+        if eligible != enqueued + dropped + sampled:
+            raise TraceValidationError(
+                f"accounting_model=2 equation violated for producer "
+                f"{producer.get('producer_id')}: eligible={eligible} != "
+                f"{enqueued}+{dropped}+{sampled}")
+        total_sampled += sampled
+    global_sampled = counts.get("sampled_out")
+    if global_sampled is None or int(global_sampled) != total_sampled:
+        raise TraceValidationError(
+            f"counts.sampled_out ({global_sampled}) != producer sum "
+            f"({total_sampled}) under accounting_model=2")
+    coverage = manifest.get("observation_coverage")
+    if coverage not in ("full", "partial", "unknown"):
+        raise TraceValidationError(
+            f"accounting_model=2 requires an observation_coverage axis, "
+            f"got {coverage!r}")
+    if coverage == "full" and total_sampled > 0:
+        raise TraceValidationError(
+            "observation_coverage=full while producers report "
+            f"sampled_out={total_sampled} (must be partial)")
+
+
 def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
     if manifest.get("schema_version") != 3 or manifest.get("manifest_version") != 3:
         raise TraceValidationError("manifest schema/manifest_version must be 3")
@@ -2491,7 +2536,17 @@ def validate_v3_manifest(manifest: dict, per_producer: dict) -> None:
         assets_out = int(producer.get("assets_out", "0"))
         assets_written = int(producer.get("assets_written", "0"))
         assets_failed = int(producer.get("assets_failed", "0"))
-        if eligible != enqueued + dropped:
+        # R2: the equation is ACCOUNTING-MODEL aware — model 2 adds the
+        # sampled_out term (budget-refused eligible opportunities); legacy
+        # captures keep the two-term form.
+        sampled_out = int(producer.get("sampled_out", "0") or 0)
+        if str(manifest.get("accounting_model", "1")) == "2":
+            if eligible != enqueued + dropped + sampled_out:
+                raise TraceValidationError(
+                    f"{pid}: eligible {eligible} != enqueued {enqueued} + "
+                    f"dropped {dropped} + sampled_out {sampled_out}"
+                )
+        elif eligible != enqueued + dropped:
             raise TraceValidationError(
                 f"{pid}: eligible {eligible} != enqueued {enqueued} + dropped {dropped}"
             )
@@ -3988,6 +4043,7 @@ def validate_trace(
                 events, "drop-newest")
             validate_v3_capture_identity(events, manifest)
             validate_v3_manifest(manifest, per_producer)
+            validate_v3_accounting_model_2(manifest)
             validate_v3_ignition_causality(events)
             # P5-R5: terminal-state awareness — unpaired entries are a
             # hard error only in a COMPLETE capture; legally interrupted

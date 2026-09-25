@@ -438,3 +438,70 @@ class V3WebidlPairingContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V3AccountingModel2Test(unittest.TestCase):
+    """R2: accounting_model=2 — sampled_out term, global sums, and the
+    coverage axis separate from the transport terminal."""
+
+    def _manifest(self, sampled="0", coverage="full", model="2",
+                  eligible="10", enqueued="10", dropped="0"):
+        return {
+            "schema_version": 3, "manifest_version": 3,
+            "capture_id": "c-r2-0001",
+            "accounting_model": model,
+            "observation_coverage": coverage,
+            "producers": [{
+                "producer_id": "renderer-r1", "watermark": {"received": True},
+                "eligible": eligible, "enqueued": enqueued,
+                "dropped": dropped, "sampled_out": sampled,
+                "accepted": enqueued, "written": enqueued, "failed": "0",
+                "assets_out": "0", "assets_written": "0",
+                "assets_failed": "0", "final_producer_seq": "10",
+                "confirmed": True,
+            }],
+            "counts": {"eligible": eligible, "enqueued": enqueued,
+                       "dropped": dropped, "accepted": enqueued,
+                       "written": enqueued, "failed": "0",
+                       "sampled_out": sampled},
+            "terminal": {"state": "complete", "reason": None,
+                         "unconfirmed_producers": []},
+        }
+
+    def _check(self, manifest):
+        validator.validate_v3_accounting_model_2(manifest)
+
+    def test_consistent_model2_passes(self):
+        self._check(self._manifest(sampled="0"))
+        self._check(self._manifest(sampled="5", eligible="15",
+                                   enqueued="10", coverage="partial"))
+
+    def test_equation_violation_rejected(self):
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self._check(self._manifest(sampled="5"))  # 10 != 10+0+5
+        self.assertIn("equation", str(ctx.exception))
+
+    def test_global_sum_mismatch_rejected(self):
+        m = self._manifest(sampled="0")
+        m["counts"]["sampled_out"] = "999"
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self._check(m)
+        self.assertIn("sampled_out", str(ctx.exception))
+
+    def test_full_coverage_with_sampled_rejected(self):
+        with self.assertRaises(validator.TraceValidationError) as ctx:
+            self._check(self._manifest(sampled="3", eligible="13"))
+        self.assertIn("coverage", str(ctx.exception))
+
+    def test_missing_coverage_rejected(self):
+        m = self._manifest()
+        del m["observation_coverage"]
+        with self.assertRaises(validator.TraceValidationError):
+            self._check(m)
+
+    def test_legacy_model_skipped(self):
+        self._check(self._manifest(model="1"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -86,7 +86,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
     try {
       gen1 = (await c.send('XTrace.startCapture', { categories: 'reverse',
         valueObservation: { scriptPattern: 'x',
-          windows: [{ id: 0, start: 0, end: 10 }] } })).generation;
+          windows: [{ id: 0, start: 0, end: 10 }] } })).tapPlanSerial;
       try {
         await c.send('XTrace.startCapture', { categories: 'reverse',
           valueObservation: { scriptPattern: 'x',
@@ -101,7 +101,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
       } catch (e) { negBudget = 'rejected'; }
       gen2 = (await c.send('XTrace.startCapture', { categories: 'reverse',
         valueObservation: { scriptPattern: 'y',
-          windows: [{ id: 1, start: 20, end: 30 }] } })).generation;
+          windows: [{ id: 1, start: 20, end: 30 }] } })).tapPlanSerial;
       await c.send('XTrace.stopCapture');
       await c.send('Browser.close');
     } catch (e) { /* recorded above */ }
@@ -123,6 +123,11 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
     for (const d of dirs) {
       const m = JSON.parse(fs.readFileSync(path.join(base, d,
         'trace.manifest.json'), 'utf8'));
+      // Post-R2 captures declare accounting_model 2 — only those carry
+      // the current implementation's contract. Pre-R2 dirs are frozen
+      // history (the review's original 891-vs-0 evidence), not current
+      // defects; the fresh p55-e7-ELENlF-style dirs are the live check.
+      if (String(m.accounting_model || '1') !== '2') continue;
       const producerSum = (m.producers || []).reduce(
         (a, p) => a + Number(p.sampled_out || 0), 0);
       const global = Number((m.counts || {}).sampled_out || 0);
@@ -131,7 +136,7 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore','pipe',
     }
     check('r0.global-sampled-out-consistent',
       anyProducers && mismatches.length === 0,
-      mismatches.join('; ') || 'no sampled_out evidence at all');
+      mismatches.join('; ') || 'no model-2 sampled_out evidence (run the E7 driver first)');
   }
 
   server.kill();
