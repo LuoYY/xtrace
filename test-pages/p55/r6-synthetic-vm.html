@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>synthetic interpreter fixture</title></head>
+<body><pre id="result"></pre>
+<script>
+// P55-R6a synthetic interpreter: a KNOWN virtual program whose true
+// execution trace (vPC sequence + opcode stream) the test asserts
+// event-by-event against the tap stream. Design mirrors the corpus
+// shape: a register VM with a dispatch loop whose accumulator, at the
+// loop head, holds the virtual opcode just fetched — the exact tap
+// anchor the value-observation design targets.
+//
+// Virtual ISA: instructions are [op, arg] pairs in `prog`. PC and OP
+// are distinct numbers (chief-review requirement: a value that is both
+// pc and opcode must never be claimed as either). The dispatch reads
+// the CURRENT virtual instruction through a property read (named) or
+// index read (keyed) per instruction kind.
+(function () {
+  var prog = [
+    { op: 10, arg: 1 },   // 0: ADD imm
+    { op: 20, arg: 2 },   // 1: MUL imm
+    { op: 10, arg: 3 },   // 2: ADD imm (repeat op 10 — same opcode twice)
+    { op: 40, arg: 6 },   // 3: BRANCH-if-acc>100 → 6 (fall through → 4)
+    { op: 10, arg: 1 },   // 4: ADD imm (variable-length loop body)
+    { op: 30, arg: 1 },   // 5: JMP back to 1 (loop-back edge)
+    { op: 50, arg: 0 },   // 6: HALT
+  ];
+  var regs = { acc: 0 };
+  var pc = 0;
+  var steps = 0;
+  var trace = [];           // ground truth: [pc, op] per dispatch
+  while (steps < 12) {
+    var insn = prog[pc];    // NAMED read: the tap anchor
+    var op = insn.op;       // NAMED read of the virtual opcode
+    var arg = insn.arg;
+    trace.push([pc, op]);
+    switch (op) {
+      case 10: regs.acc = (regs.acc + arg) & 0xffff; pc = pc + 1; break;
+      case 20: regs.acc = (regs.acc * arg) & 0xffff; pc = pc + 1; break;
+      case 30: pc = arg; break;                       // JMP back
+      case 40: pc = (regs.acc > 100) ? 6 : (pc + 1); break; // branch
+      case 50: steps = 999; break;                    // halt
+    }
+    steps++;
+  }
+  window.__vmTrace = trace;
+  window.__vmAcc = regs.acc;
+  document.getElementById('result').textContent =
+    JSON.stringify({ steps: trace.length, acc: regs.acc });
+})();
+</script>
+</body></html>

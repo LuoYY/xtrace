@@ -236,6 +236,12 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 
 **R5-b（echo 主 oracle）**：E5 驱动改为**三级验证**——renderer cookie.set 值 == **echo 服务实际收到的 Cookie 头**（自有 SimpleHTTPRequestHandler 记录，独立于任何引擎钩点）== 二阶段 cookie.get 值，三者经 nav_chain 同链；fixture 移除 stage-1 读回（set→get 降级为辅助通道，不再充当请求锚点）。PASS（echo_match: true）。
 
+### 8.7 R6 执行记录（2026-09-25，工程师）
+
+**R6-a 合成解释器 fixture**（`test-pages/p55/r6-synthetic-vm.html` + `scripts/p55-r6-synvm-evidence.cjs` PASS）：已知虚拟程序（7 指令、PC 与 opcode 为不同数字、含 JMP 回跳边、重复 opcode、分支 fall-through、变长体）；12 步 ground truth 由页面自记，tap 流 563 条全为 unclassified 事实（契约：引擎永不命名虚拟语义）；**12 条 tap 精确落在派发器 named-read 指令且其 pool_indices 解析到 `"op"` 常量**——D1 元数据 + tap + 逐事件键解析三层在 chrome 现场闭环；tier 断言：全部 Ignition 事件 tier=ignition（--max-opt=0 全程，非假设而是逐事件验证）。
+
+**R6-b 固定 tier 分项基准**（`scripts/p55-r6-perfbench.py` PASS）：同一 2M 迭代派发负载、--max-opt=0 全程 Ignition（tier 由 R6a 同二进制同旗标断言）、无 printf 于被测环。**谓词**隔离测量：预算 0 模式（窗口全匹配、预算 0——每次命中为 budget skip：谓词+标记跨边界、零编码零写入）；**编码+写入**：全预算模式与谓词模式的差。结果（5 次取中位）：off 47.4s / predicate-only 54.0s（+6.6s，≈**131 ns/命中**，50M 次命中）/ full 57.4s（编码+写入再 +3.5s）。全量开销 ≈21%（2M 迭代派发循环、50M 字节码事件——每 Ignition 事件全开 tap 的极端上界；实际探针按窗口预算截断）。tier 逃逸问题不复存在（对比 E7 时代 10/11ms 默认分层基准）。
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计
