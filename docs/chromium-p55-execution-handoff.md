@@ -319,3 +319,25 @@ R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调
 1. R0 先迁反例（总审 7 组 + 本文确认的恒真断言/假阳性脚本），**旧实现必红**、独立输出目录、不覆写既有证据。
 2. 每项修复按"反例先红 → 修复 → 反例转绿 → 正向矩阵复跑"四段留证；门禁表恢复 controller/producer 全目标并沿用自动化脚本。
 3. 本块结束前，`trace-schema-v3` 的 v1.3 文本与实现对齐（sampled_out 等式、nav_chain 位置、accounting_model、coverage 轴），validator 与负例同批。
+
+---
+
+## 11. R0–R7 整改终审提交（2026-09-25，执行层提交，待总架构师终审）
+
+**全部整改序列执行完毕，按 §10.4 四段留证（反例先红 → 修复 → 反例转绿 → 正向矩阵复跑）。** 提交链：d0752fb（R0）→ 7a13798（R1+R2）→ bb9e452（R3+R5a）→ ab58824（R4+R5b）→ 6a79466（R6）→ 7cf9d93（R7a）。
+
+| 反例 | 首红 | 转绿提交 |
+| --- | --- | --- |
+| d8 width/large-key/shared/array-len/NUL+CJK/decoy/empty（7 项） | p55-r0-20260925-095702 | bb9e452 + 7cf9d93（E6 对齐） |
+| browser scope-bypass/neg-id/neg-budget/plan-gen/global-sum（5 项） | p55-r0b-tzdlsm | 7a13798（+R2 后 model-2 证据链补齐） |
+
+**终态门禁**（同一最终二进制亲跑）：R0 反例 d8 7/7 + browser 5/5 GREEN；E1（d8 8 实例）、E2（区间命中/窗外静默）、E3（837 taps base==tapped）、E4（8-dump 矩阵）、E5（echo 主 oracle 三级验证）、E6（三站语料 + 新鲜复采 proven-read/candidate 分列）、E7（四态 + 逐实例预算 + sampled_out=891）、R3 GC 压力、R6a 合成解释器（12 truth-linked taps）、R6b 固定 tier 分项基准——全部 PASS；python 381+28 OK；契约 21/21；矩阵 12/12 off + 12/12 observer；故障注入；observer smoke；测试目标门禁（controller 9/9 + producer 9/9，先重建后运行）；bindings 57/57；`verify_patches.py` verdict=pass（chromium 126/3/1/3 + V8 137，双 HEAD 钉扎不变）。
+
+**诚实边界清单（终审输入）**：
+1. Cookie 头锚点：bnet 钩点早于 Cookie 附加（项目架构师已裁：echo 服务为主 oracle——已落地；引擎观测点前移为独立设计轮）。
+2. typed-mojom 计划结构 vs 当前严格 JSON：功能等价物已交付（严格校验/计划 serial/原子发布/错误显式拒绝）；完整 typed 结构迁移列为后续。
+3. T7 的 stages/cookie 在本地复放下 by-design unresolved；站点实录形态保持外部研究输入。
+4. D1 实例键的 isolate_epoch：现用 script_id + bytecode_version + producer 身份；完整命名空间为 R4 后续。
+5. 跨线程发布现为投递-等待式；并行 Worker + 配置交错的完全异步契约测试为后续。
+
+progress JSON p55 = `r0-r7-remediation-submitted`。**申请：按工单 §4 一次终审；accepted-p55 由架构师在终审后标记。**
