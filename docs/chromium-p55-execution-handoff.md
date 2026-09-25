@@ -722,3 +722,49 @@ progress JSON `p55` = `s4-identity-analysis-landed`（下一阶段 S5：合成 V
 - chrome 二进制未随 S5 重建（变更仅 d8.cc/flag-definitions.h，chrome 无行为依赖）；S6 统一重建并全量重放补丁。
 
 progress JSON `p55` = `s5-golden-perf-landed`（下一阶段 S6：最终验收包）。
+
+---
+
+## 20. S6 最终验收包（2026-09-26，工程师提交）
+
+按 §12.4-7 / §13.2-7 收口：chrome 全量重建（含 S5 的 V8 侧 flag/d8 变更）、受影响测试目标先重建后跑、全门禁矩阵在**同一最终二进制**亲跑、补丁栈重放与组件绑定。
+
+### 20.1 构建
+
+- `chrome` 全量重建 NINJA-EXIT=0（V8 wave 1123 目标 + 框架拷贝）；d8 同步重建。
+- `blink_platform_unittests` + `content_unittests` 重建后运行 XTrace 子集：**producer 9/9、controller 9/9**（`run_test_target_gates.sh` PASS——先重建后跑纪律）。
+
+### 20.2 全门禁矩阵（同一最终二进制，全部亲跑 exit 0）
+
+| 门禁 | 结果 |
+| --- | --- |
+| **S0 冻结反例套件** | python **8/8 GREEN**（accessor 预算/RAB/double-hole/per-activation/零逐事件打印/T3 错连/T7 假阳性/TimedWait 审计全部转绿）；浏览器驱动全不变量绿（dump 哨兵 0/0、正向闭环 saved+locator、unknown/stopped 拒绝、**sampled capture complete+coverage partial+generations[]**） |
+| R0 反例套件（7 案例，含 decoy 语义断言升级） | GREEN 7/7 |
+| S1/S2/S3/S5 门禁 | d8 token 矩阵 10/10；编码器矩阵 8/8；perf 基准 GREEN（零逐事件行、72M 事件一致、364.65+2.78ns 分项）；浏览器 S1（Worker 路由+并发 dump）/S2（4 Worker×3 分代交错）GREEN |
+| 合成解释器 | **逐值 golden PASS**（12 步 opcode 流保序子序列+首尾钉死；head/tail/注入/跨实例四篡改负例全拒） |
+| E5/E6/E7 | echo oracle PASS；T3/T7（五元身份+digest 验证+逐读取证据+hypothesis 语义）PASS；值观测四态 PASS |
+| d8 验证器 | D1/E2/E3/E4/GC-stress 全绿（E2/E3 已迁 verbose 旗标通道） |
+| P4/P5 回归 | 故障注入、契约 21/21、observer smoke、P5 反例门 12/12、P5 outcome、NADC partial 全 PASS |
+| python/launcher | `run_tests.sh` 全绿（含 28 launcher） |
+| 矩阵 | **12/12 off + 12/12 observer** |
+| bindings | **57/57**（隔离 Python 3.11） |
+| 测试目标 | controller 9/9 + producer 9/9（先重建后跑） |
+| 补丁栈 | `verify_patches.py` **pass**（133 chromium/137 V8、0 不符、0 漂移、双 HEAD pin、6 组件 dylib 绑定）——证据 `validation/p55-s6-patch-verify.json` |
+
+### 20.3 S0–S6 缺陷闭合对照（§13.1 复核项 → 修复轮次）
+
+| RR | 核验事实 | 修复 | 反例转绿 |
+| --- | --- | --- | --- |
+| RR1 | 表达式求值执行用户代码/广播竞答 | S1：表达式路径删除，token 弱根+own-data 路径+定点路由+堆拥有请求 | 浏览器 dump 不变量（哨兵 0/0、staged/unknown 拒绝） |
+| RR2 | 栈捕获+TimedWait 生命周期错误 | S1：模式删除（共享所有权+恰好一次）；S2：全局 Anchor 删除、URL map 加锁 | s0.no-timedwait-stack-capture |
+| RR3 | 旧等式判死 sampled capture；实例预算复用 | S2：model-2 等式+coverage 三因子+激活边界重置+plan_serial/generations+semantic 拒绝 | s0.controller-sampled-terminal、s0.tap-budget-per-activation |
+| RR4 | accessor 无预留/RAB 长度/double-hole 崩溃 | S3：编码字节上限+记录预算+GetByteLength+hole 先测+特殊值区分+句柄重取 | S0 编码三反例 |
+| RR5 | (script,version) 二元 join 错连；T7 假阳性 | S4：五元命名空间+digest 边界+逐读取证据+facts/hypothesis 分离 | s0.t3-cross-producer、s0.t7-ordinary-bundle |
+| RR6 | synvm 仅 offset 计数；printf 污染基准 | S5：逐值 golden+四负例；计数化（verbose 显式旗标） | s0.d8-no-per-event-print |
+
+### 20.4 诚实边界（汇总）
+
+- S1 §15.3：假 runner 单测以真实线程浏览器证据替代（偏差记录）；frame-slot 根类别不可寻址；S2 §16.3：嵌套激活重置语义、分代矩阵深度、mid-capture 计划通道；S3 §17.3：Room 松弛上界、EncodeTapValue 未触碰；S4 §18.3：事件行无 isolate_epoch（歧义报告制）、语料 412 属 README 级；S5 §19.3：匹配器中段单点篡改不敏感、相位成本标注、S6 前未重建项已由本��重建补齐。
+- E6 重采集夹具 terminal=incomplete（未确认 producer，旧夹具序列）——S0/S2 门禁拥有 terminal 证据，如实保留。
+
+progress JSON `p55` = `s0-s6-final-package-submitted`。**申请：按工单 §12.4-7 一次终审；accepted-p55 由架构师在终审后标记。** 在此之前 P6/报告/Agent 不引用 P5.5 结论为已验证事实（§13.4 约束维持）。

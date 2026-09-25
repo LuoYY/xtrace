@@ -45,7 +45,7 @@ hot(3);
     cfg = ('{"script_pattern":"e2-tap-fixture",'
            '"windows":[{"id":0,"start":0,"end":40},{"id":1,"start":60,"end":80}]}')
     proc = subprocess.run(
-        [str(D8), "--xtrace-observer-smoke",
+        [str(D8), "--xtrace-observer-smoke", "--xtrace-d8-verbose-taps",
          f"--xtrace-tap-windows={cfg}", str(FIXTURE)],
         capture_output=True, text=True, timeout=120)
     (run / "tap-run.log").write_text(proc.stdout + proc.stderr)
@@ -56,7 +56,7 @@ hot(3);
     seen_ids, value_tags = set(), set()
     for line in taps:
         m = re.match(
-            r"TAP script=(\d+) version=(\d+) offset=(\d+) window=(\d+) "
+            r"TAP script=(\d+) version=(\d+) offset=(\d+) window=(\d+) token=(\d+) "
             r"value=(\{.*\})", line)
         assert m, f"malformed TAP line: {line}"
         offset, window = int(m.group(3)), int(m.group(4))
@@ -64,7 +64,7 @@ hot(3);
         seen_ids.add(window)
         in_range = (0 <= offset <= 40) if window == 0 else (60 <= offset <= 80)
         assert in_range, f"tap outside its window: {line}"
-        value = json.loads(m.group(5))
+        value = json.loads(m.group(6))
         assert "t" in value
         value_tags.add(value["t"])
         if value["t"] == "s":
@@ -77,7 +77,7 @@ hot(3);
     miss = ('{"script_pattern":"e2-tap-fixture",'
             '"windows":[{"id":9,"start":99998,"end":99999}]}')
     proc2 = subprocess.run(
-        [str(D8), "--xtrace-observer-smoke",
+        [str(D8), "--xtrace-observer-smoke", "--xtrace-d8-verbose-taps",
          f"--xtrace-tap-windows={miss}", str(FIXTURE)],
         capture_output=True, text=True, timeout=120)
     (run / "miss-run.log").write_text(proc2.stdout + proc2.stderr)
@@ -97,7 +97,7 @@ var t0=Date.now();hot(3000000);print("WALL "+(Date.now()-t0));
         walls = []
         for _ in range(3):
             p = subprocess.run(
-                [str(D8), "--xtrace-observer-smoke",
+                [str(D8), "--xtrace-observer-smoke", "--xtrace-d8-verbose-taps",
                  f"--xtrace-tap-windows={cfgm}", str(bench)],
                 capture_output=True, text=True, timeout=180)
             wall = int(re.search(r"WALL (\d+)", p.stdout).group(1))

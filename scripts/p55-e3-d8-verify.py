@@ -59,7 +59,7 @@ def main() -> int:
     outs = {}
     for mode, extra in (("base", []), ("tapped", [f"--xtrace-tap-windows={cfg}"])):
         proc = subprocess.run(
-            [str(D8), "--xtrace-observer-smoke", *extra, str(FIXTURE)],
+            [str(D8), "--xtrace-observer-smoke", "--xtrace-d8-verbose-taps", *extra, str(FIXTURE)],
             capture_output=True, text=True, timeout=120)
         (run / f"{mode}.log").write_text(proc.stdout + proc.stderr)
         assert proc.returncode == 0, mode
