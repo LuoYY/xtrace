@@ -540,3 +540,40 @@ progress JSON `p55` = `changes-required-rr1-rr6`。S0–S6 完成并经总审反
 - 每 S 阶段完成后重跑本套驱动：对应案例转绿且**其余案例保持红**（防止修复间回归），全绿才进 S6。
 
 progress JSON `p55` = `s0-counterexamples-frozen`（下一阶段 S1：dump 请求所有权与根定位重做）。
+
+---
+
+## 15. S1 执行记录：dump 请求所有权与根定位重做（2026-09-26）
+
+按 §12.4-2 / §13.2-1/2 执行。**表达式求值路径整体删除**（RR1 根因），代之以 tap 登记 token 弱根 + 显式 own-data 路径；**TimedWait/栈捕获模式删除**（RR2 根因），代之以堆拥有请求 + 恰好一次结算 + 共享所有权超时。
+
+### 15.1 实现（四层）
+
+| 层 | 改动 |
+| --- | --- |
+| V8（patch 0002） | `Registry` 新增 tap-token 注册表：receiver 值 tap 时登记**弱两阶段全局句柄**（复用 bytecode entry 的 canonical 两段式：首段 Destroy 句柄+置死标记，串号保留可报告），进程级串号（(producer, serial) 每 capture 唯一），容量 4096 LRU；`IgnitionObserverRequestDumpToken`（boundary 导出）：token 查活 → **dump 期间强钉根**（查活与钉根间零分配）→ `LookupIterator(OWN_SKIP_INTERCEPTOR)` 逐路径步降（accessor/Proxy/miss/标量终点均带理由拒绝，绝不调用用户代码）→ 复用同一 walker（envelope 记录 `anchor.type=token`+`token`+`path`）；tap 回调签名扩展 `object_token`；`EncodeTapValue` 对象值携带 token（事实性 ref-only+串号，非解引用）；d8 新增 `xtraceTokenDump`/`xtraceTokenOf` 测试面 |
+| blink（patch 0001/0003） | mojom `DumpAnchor` 删除 → `DumpToken(token, path[], label) => (saved, status, reason, asset_locator, request_id)`；bridge 删除 `RequestDumpFromExpression` 及全部 TimedWait/栈捕获代码，新增：**token→(isolate, owning-runner) 路由表**（tap 回调在所属线程登记，8192 LRU）+ **堆拥有请求**（`shared_ptr<TokenDumpRequest>`，锁下恰好一次结算，回复投递回调用序列，无任何阻塞等待）+ 所属线程前置 stop/scope 校验（先于任何读取）+ `OnIgnitionDump` 经 thread-local 待决上下文挂接**真实资产定位符**（`v8-materialized-dump://<label>#<request_id>`，可在 asset manifest 唯一定位）与 LogAssetEvent **准入回传**（saved≠walker 跑过，saved=跑过且资产事件被接纳）；logger `LogValueTap` 增 `object_token` 事件字段（字符串型，schema 惯例） |
+| browser（patch 0004） | pdl `requestDump(token, producerId, path?, label?) => {status, reason, assetLocator?, requestId?}`（状态枚举与 V8/ducted mojom 镜像）；handler 严格参数校验（token>0、producerId 必填、路径 ≤16 步×≤128 字符、无引号/反斜杠）；controller **扇出整体删除** → 按 `producers_[producerId].process_epoch` **定点路由**到唯一控制端点；浏览器侧 10s 超时与 renderer 回复**共享所有权竞速、锁下单次结算**（迟到方结构性 no-op——RR2 教训直接应用于浏览器侧自身） |
+
+### 15.2 证据（2026-09-26 亲跑，全部在 S1 二进制上）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `scripts/p55-s1-d8-verify.py`（新） | **10/10 GREEN**：root dump（envelope token anchor）、path dump（own-data 步降+元素编码）、unknown-token=1、**collected=2**（唯一强引用置空+GC 后弱句柄如期退役，双对象复验；注：解释器帧寄存器驻留会让闭包形态对象合法存活——token 注册表本身是弱的，collected 案例因此用函数帧死亡形态独立进程验证）、accessor=4 且 getter 哨兵 0 次、Proxy 步=4 且 trap 0 次、miss/scalar-path=4、bad-json=3 |
+| `scripts/p55-s0-browser-red.cjs` 案例一（冻结不变量，载荷已换 token API） | **全绿**：unknown-token 拒绝、unknown-producer 拒绝、**正向闭环 saved+assetLocator**（tap→object_token 事件→requestDump→`v8-materialized-dump://s0-positive#2`）、stop 后=stopped、**getter 哨兵 0/0、微任务哨兵 0/0**（RR1 冻结不变量达成） |
+| `scripts/p55-s1-browser-evidence.cjs`（新） | **GREEN**：Worker 线程 tap 的 token 经路由表**跨线程定点投递**并 saved；**两并发 requestDump 各自 saved、资产定位符/requestId 互异、资产在 asset manifest 落盘且 envelope 带 token anchor**；错误 producer=unknown-producer；stop 后=stopped；无崩溃 |
+| S0 python 套件回归 | `s0.no-timedwait-stack-capture` **转绿**（TimedWait/WaitableEvent 在 bridge 中为 0 处）；其余 7 项保持红（分属 S2–S5，符合"修一项绿一项"纪律） |
+| `p55-e7-valueobs-evidence.cjs` | PASS（tap 通路/预算/validator 无回归；terminal=incomplete 为 RR3 未修，如实） |
+| 补丁栈 | 重生成 chromium **133**/V8 **137** 文件，`verify_patches.py` **pass**（0 mismatch、0 清单外漂移��双 HEAD pin）——证据 `validation/p55-s1-patch-verify.json` |
+
+证据目录：`chromium/src/out/XTraceP55D8/validation/p55-s1-20260926-014858/`（d8 矩阵）、`chromium/src/out/XTraceIntegration/validation/p55-s1-strF2E/`（浏览器并发/Worker）、`p55-s0-*/`（浏览器反例）。
+
+### 15.3 诚实边界
+
+- **假 runner/线程单测**未以 blink unittest 形式落地：所有权契约（恰好一次结算、迟到 no-op、并发不重复执行、跨线程定点投递）由上述**真实线程**浏览器证据覆盖（并发双请求 + Worker 跨线程 + 浏览器侧超时共享所有权）。与裁定"先假 runner 单测"的顺序有偏差，如实记录；如终审仍要求单测形态，可补 `xtrace_producer_unittest` 侧用例。
+- **根类别 (b)（frame/register slot）** 本期不可寻址：API 形态只暴露 token+own-data 路径；无受控暂停/锚点集成，需求未出现。后续需要时按裁定另立，不以只读 dump 名义扩面。
+- `object_token` 事件字段暂为 validator 可选字段；随 S4 五元命名空间与 schema 修订正式化。
+- 全局可变 Anchor/InstanceUrlMap 清理与配置快照所属线程化归 **S2**（本轮 bridge 侧 Anchor 仅不再被 dump 路径使用）。
+- S0 冻结反例中 RR3/RR4/RR5/RR6 对应案例仍红（S2–S5 范畴），S1 未触碰其缺陷面。
+
+progress JSON `p55` = `s1-dump-ownership-landed`（下一阶段 S2：配置状态统一 + 每激活预算 + controller 新等式/coverage）。

@@ -2,17 +2,14 @@
 // frozen as red tests. Each assertion expresses the DESIRED contract
 // from handoff §12/§13; RED on the defect-carrying tree (71a69c1):
 //
-//   dump-no-user-code (RR1) - requestDump must NEVER execute user code:
-//       a getter sentinel (which also schedules a microtask) fires on
-//       every dump request today, even with a nonexistent
-//       executionContextId, a scope that excludes all scripts, and
-//       after stopCapture. accepted=true is a false success: the
-//       expression is compiled+run in the page (MicrotasksScope even
-//       drains page microtasks).
-//       NOTE: S1 replaces the expression API with registered-token
-//       roots; this driver then switches its request payload while the
-//       invariant (zero getter/microtask sentinel deltas, no accept
-//       outside a live matching scope) stays frozen.
+//   dump-no-user-code (RR1) - requestDump must NEVER execute user code.
+//       RED on 71a69c1 (expression path: getter fired 2x, microtasks
+//       drained 2x, accepted=true on a nonexistent contextId and after
+//       stop). S1 deleted the expression API: the frozen invariants
+//       (zero getter/microtask sentinel deltas, refusals outside a live
+//       matching capture) now run against the token API, plus the
+//       positive loop (tap -> object_token -> requestDump -> saved
+//       asset locator) that proves the feature itself works.
 //
 //   controller-sampled-terminal (RR3) - a capture with real budget
 //       skips (sampled_out > 0) satisfies the model-2 equation
@@ -58,6 +55,12 @@ async function launch(tag, trace) {
   const want = (cond, msg) => { if (!cond) failures.push(msg); };
 
   // --- case 1: dump must not execute user code (RR1) -------------------
+  // S1 update: the expression API is DELETED — requestDump(token,
+  // producerId, path?, label?) routes point-to-point. The FROZEN
+  // invariants stay: no getter sentinel runs, no microtask is drained,
+  // targets outside a live matching capture are refused, and a REAL
+  // token dump completes the positive loop (tap -> token -> dump ->
+  // asset) without any user code execution.
   {
     const trace = path.join(runDir, 'dump-control.ndjson');
     const s = await launch('dump', trace);
@@ -74,26 +77,49 @@ async function launch(tag, trace) {
       const start = await s.c.send('XTrace.startCapture', {
         categories: 'reverse',
         valueObservation: {
-          scriptPattern: 'no-such-script',  // scope excludes ALL scripts
+          scriptPattern: 'causality-smoke',  // in scope: taps DO flow
           windows: [{ id: 0, start: 0, end: 1000000 }],
-          maxTapsPerActivation: 100, maxTapsPerWindow: 100,
+          maxTapsPerActivation: 2000, maxTapsPerWindow: 2000,
         },
       });
       r.captureState = start.state;
+      const LOOP = `(()=>{const s=document.createElement('script');
+        s.textContent='window.__s0d=(function(){function f(n){var acc=0;for(var i=0;i<n;i++){acc=(acc+i*7)%4096;}return acc;}var r={acc:f(20),wrap:{inner:f(20)}};return r;})();';
+        document.documentElement.appendChild(s);
+        return window.__s0d;})()`;
+      const page = await s.c.send('Runtime.evaluate', { expression: LOOP, returnByValue: true }, sessionId);
+      r.pageOk = page.result?.value?.acc !== undefined;
+      // wait for the taps to land in the live trace
+      await new Promise(res => setTimeout(res, 1500));
+      const lines = fs.readFileSync(trace, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+      const objTaps = lines.filter(e => e.value_tap && e.value_tap.object_token && e.value_tap.object_token !== '0');
+      r.objectTaps = objTaps.length;
+      r.producers = [...new Set(lines.filter(e => e.producer_id).map(e => e.producer_id))];
+      // The dump target is the producer that OWNS the taps (a renderer
+      // process with a control endpoint) — not just any producer.
+      const producerId = objTaps.length
+        ? objTaps[objTaps.length - 1].producer_id : '';
+      const token = objTaps.length ? Number(objTaps[objTaps.length - 1].value_tap.object_token) : 0;
+      // NEGATIVE 1: unknown token on the real producer
       const d1 = await s.c.send('XTrace.requestDump', {
-        anchorExpression: 'reviewBox',
-        executionContextId: '999999',  // nonexistent context
-        anchorLabel: 's0-wrong-context',
-      });
-      r.wrongContext = { accepted: d1.accepted, reason: d1.reason };
+        token: 99999999, producerId, label: 's0-unknown-token' });
+      r.unknownToken = d1;
+      // NEGATIVE 2: unknown producer
+      const d2 = await s.c.send('XTrace.requestDump', {
+        token: 1, producerId: 'no-such-producer', label: 's0-unknown-producer' });
+      r.unknownProducer = d2;
+      // POSITIVE: real token, own-data path
+      if (token) {
+        const d3 = await s.c.send('XTrace.requestDump', {
+          token, producerId, label: 's0-positive' });
+        r.positive = d3;
+      }
       const stop = await s.c.send('XTrace.stopCapture');
       r.terminal = stop.state;
-      const d2 = await s.c.send('XTrace.requestDump', {
-        anchorExpression: 'reviewBox',
-        executionContextId: '999999',
-        anchorLabel: 's0-after-stop',
-      });
-      r.afterStop = { accepted: d2.accepted, reason: d2.reason };
+      // NEGATIVE 3: after stop
+      const d4 = await s.c.send('XTrace.requestDump', {
+        token: token || 1, producerId, label: 's0-after-stop' });
+      r.afterStop = d4;
       const sentinel = await s.c.send('Runtime.evaluate', {
         expression: '({reads:window.reviewReads,microtasks:window.microtaskRuns})',
         returnByValue: true }, sessionId);
@@ -105,13 +131,18 @@ async function launch(tag, trace) {
     r.crashed = s.events.some(e => e.method === 'Inspector.targetCrashed');
     report.dumpControl = r;
     console.log('dump-control: ' + JSON.stringify(r));
-    // DESIRED (frozen): no user code execution, no false accepts.
+    // DESIRED (frozen invariants, updated to the S1 API):
     want(!r.error, 'case error: ' + r.error);
     want(!r.crashed, 'renderer crashed');
-    want(r.wrongContext && r.wrongContext.accepted === false,
-      'dump with nonexistent executionContextId must be rejected, got ' + JSON.stringify(r.wrongContext));
-    want(r.afterStop && r.afterStop.accepted === false,
-      'dump after stopCapture must be rejected, got ' + JSON.stringify(r.afterStop));
+    want(r.objectTaps > 0, 'no receiver taps with object_token');
+    want(r.unknownToken && r.unknownToken.status === 'unknown-token',
+      'unknown token must reject with unknown-token, got ' + JSON.stringify(r.unknownToken));
+    want(r.unknownProducer && r.unknownProducer.status === 'unknown-producer',
+      'unknown producer must reject, got ' + JSON.stringify(r.unknownProducer));
+    want(r.positive && r.positive.status === 'saved' && r.positive.assetLocator,
+      'real token dump must save and report the asset locator, got ' + JSON.stringify(r.positive));
+    want(r.afterStop && r.afterStop.status === 'stopped',
+      'dump after stopCapture must reject with stopped, got ' + JSON.stringify(r.afterStop));
     want(r.sentinel && r.sentinel.reads === 0,
       'dump requests executed the getter sentinel ' + (r.sentinel ? r.sentinel.reads : '?') + 'x');
     want(r.sentinel && r.sentinel.microtasks === 0,

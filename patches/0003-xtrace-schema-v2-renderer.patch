@@ -307,10 +307,10 @@ index ecb68ce4e2..e28e8b1b32 100644
  void V8ScriptRunner::ReportException(v8::Isolate* isolate,
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
 new file mode 100644
-index 0000000000..87aafea7a7
+index 0000000000..10da12acdb
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.cc
-@@ -0,0 +1,1085 @@
+@@ -0,0 +1,1091 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1152,6 +1152,7 @@ index 0000000000..87aafea7a7
 +                                uint32_t bytecode_version,
 +                                uint32_t bytecode_offset,
 +                                uint32_t window_id,
++                                uint32_t object_token,
 +                                const char* value_json,
 +                                size_t value_len) {
 +  const XTraceConfig& config = GetCachedConfig();
@@ -1178,6 +1179,8 @@ index 0000000000..87aafea7a7
 +  extra.append(base::NumberToString(bytecode_offset));
 +  extra.append("\",\"window_id\":\"");
 +  extra.append(base::NumberToString(window_id));
++  extra.append("\",\"object_token\":\"");
++  extra.append(base::NumberToString(object_token));
 +  extra.append("\",\"value\":");
 +  if (value_json && value_len > 0) {
 +    extra.append(value_json, value_len);
@@ -1278,7 +1281,7 @@ index 0000000000..87aafea7a7
 +            snapshot->generation);
 +}
 +
-+void XTraceLogger::LogAssetEvent(const char* category,
++bool XTraceLogger::LogAssetEvent(const char* category,
 +                                 const char* phase,
 +                                 const char* api,
 +                                 const String& args_json,
@@ -1292,19 +1295,22 @@ index 0000000000..87aafea7a7
 +      // nothing — a fresh renderer never labels events with a stale
 +      // launch snapshot.
 +      !xtrace::XTraceProducerHub::Get()->ConfigReceived()) {
-+    return;
++    return false;
 +  }
 +  auto snapshot = EntrySnapshot();
 +  if (!CategoriesInclude(snapshot->categories, category)) {
-+    return;
++    return false;
 +  }
 +  if (IsInternalScriptUrl(url)) {
-+    return;
++    return false;
 +  }
 +  EmitEvent(config, category, phase, api, args_json,
 +            /*capture_stack=*/true, std::string_view(), std::string_view(),
 +            nullptr, kind, &url, &source, std::string_view(),
 +            snapshot->generation);
++  // S1: the per-thread admission report is the REAL save state — dump
++  // replies never fabricate success over a filtered asset.
++  return t_last_event_admitted;
 +}
 +
 +void XTraceLogger::LogEventWithOptionalAsset(const char* category,
@@ -1398,10 +1404,10 @@ index 0000000000..87aafea7a7
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_logger.h b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
 new file mode 100644
-index 0000000000..35eb960f17
+index 0000000000..f7351da5ac
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_logger.h
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,154 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -1483,6 +1489,7 @@ index 0000000000..35eb960f17
 +                          uint32_t bytecode_version,
 +                          uint32_t bytecode_offset,
 +                          uint32_t window_id,
++                          uint32_t object_token,
 +                          const char* value_json,
 +                          size_t value_len);
 +  static void LogGeneratedOutcome(uint64_t call_token,
@@ -1499,7 +1506,10 @@ index 0000000000..35eb960f17
 +                                         const String& args_json,
 +                                         const String& frame_url,
 +                                         const String& origin);
-+  static void LogAssetEvent(const char* category,
++  // Returns whether the asset event was ADMITTED (config/categories/
++  // internal-URL gates) — S1: dump replies report the real save state,
++  // never a fabricated success.
++  static bool LogAssetEvent(const char* category,
 +                            const char* phase,
 +                            const char* api,
 +                            const String& args_json,

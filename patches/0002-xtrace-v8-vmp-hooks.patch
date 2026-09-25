@@ -35,10 +35,10 @@ index 03938a26..daf455d9 100644
      "src/interpreter/bytecode-generator.cc",
 diff --git a/include/xtrace_observer_boundary.h b/include/xtrace_observer_boundary.h
 new file mode 100644
-index 00000000..3bca248b
+index 00000000..53a6b9a8
 --- /dev/null
 +++ b/include/xtrace_observer_boundary.h
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,138 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -118,11 +118,15 @@ index 00000000..3bca248b
 +// minimal layer-1 encoding (bounded JSON built V8-side; the embedder
 +// never re-enters V8 from the callback), value_role starts
 +// "unclassified" (facts only — interpretation is the analysis layer's).
++// S1 (re-review RR1): receiver-valued taps also carry a registered dump
++// token (weak two-phase handle; 0 = none) — tokens are the ONLY
++// embedder-side dump root; expression evaluation is deleted.
 +using IgnitionTapCallback = void (*)(v8::Isolate* isolate,
 +                                     uint32_t script_id,
 +                                     uint32_t bytecode_version,
 +                                     uint32_t bytecode_offset,
 +                                     uint32_t window_id,
++                                     uint64_t object_token,
 +                                     const char* value_json,
 +                                     size_t value_len);
 +V8_EXPORT void IgnitionObserverSetTapCallback(v8::Isolate* isolate,
@@ -152,6 +156,19 @@ index 00000000..3bca248b
 +                                           class v8::Local<v8::Value> object,
 +                                           const char* anchor_label,
 +                                           uint32_t window_id);
++// S1 (re-review RR1): token-rooted dump — the ONLY embedder-side root.
++// `token` comes from a prior tap's object_token; `path_json` is an
++// optional flat array of own-data property steps ('["a","0"]', <=16
++// steps, each 1..128 ASCII-ish chars) walked WITHOUT calling user code
++// (accessor/Proxy/miss steps reject). Status codes: 0 saved, 1
++// unknown-token, 2 token-collected, 3 bad-path, 4 rejected-root, 5
++// no-dump-callback. `detail` (may be null) receives the precise reason.
++V8_EXPORT int32_t IgnitionObserverRequestDumpToken(
++    v8::Isolate* isolate, uint64_t token, const char* path_json,
++    const char* anchor_label, uint32_t window_id, const char** detail);
++// S1 test-support: the token registered for this exact object (0=none).
++V8_EXPORT uint64_t IgnitionObserverTokenOf(
++    v8::Isolate* isolate, class v8::Local<v8::Value> object);
 +V8_EXPORT void IgnitionObserverSetGate(v8::Isolate* isolate,
 +                                        uint32_t open);
 +
@@ -9132,7 +9149,7 @@ index e9387c6d..f2651837 100644
    V(isolate_root, "Isolate::isolate_root()")                                   \
    V(allocation_sites_list_address, "Heap::allocation_sites_list_address()")    \
 diff --git a/src/d8/d8.cc b/src/d8/d8.cc
-index fc6d62e2..02e2db38 100644
+index fc6d62e2..23680190 100644
 --- a/src/d8/d8.cc
 +++ b/src/d8/d8.cc
 @@ -15,6 +15,7 @@
@@ -9143,7 +9160,7 @@ index fc6d62e2..02e2db38 100644
  #include <string>
  #include <string_view>
  #include <tuple>
-@@ -40,6 +41,87 @@
+@@ -40,6 +41,89 @@
  #include "include/v8-profiler.h"
  #include "include/v8-wasm.h"
  #include "src/api/api-inl.h"
@@ -9191,11 +9208,13 @@ index fc6d62e2..02e2db38 100644
 +std::atomic<uint64_t> g_tap_events{0};
 +void D8TapCallback(v8::Isolate*, uint32_t script_id,
 +                   uint32_t bytecode_version, uint32_t bytecode_offset,
-+                   uint32_t window_id, const char* value_json,
-+                   size_t value_len) {
++                   uint32_t window_id, uint64_t object_token,
++                   const char* value_json, size_t value_len) {
 +  g_tap_events.fetch_add(1, std::memory_order_relaxed);
-+  printf("TAP script=%u version=%u offset=%u window=%u value=%.*s\n",
++  printf("TAP script=%u version=%u offset=%u window=%u token=%llu "
++         "value=%.*s\n",
 +         script_id, bytecode_version, bytecode_offset, window_id,
++         static_cast<unsigned long long>(object_token),
 +         static_cast<int>(value_len), value_json);
 +}
 +void D8ObserverCallback(v8::Isolate*, uint32_t script_id,
@@ -9231,7 +9250,7 @@ index fc6d62e2..02e2db38 100644
  #include "src/base/cpu/cpu.h"
  #include "src/base/fpu.h"
  #include "src/base/hashing.h"
-@@ -4602,6 +4684,31 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
+@@ -4602,6 +4686,76 @@ Local<ObjectTemplate> Shell::CreateGlobalTemplate(Isolate* isolate) {
                         FunctionTemplate::New(isolate, Version));
  
    global_template->Set(isolate, "print", FunctionTemplate::New(isolate, Print));
@@ -9259,11 +9278,56 @@ index fc6d62e2..02e2db38 100644
 +                info.GetIsolate(), info[0], label_c, window_id);
 +            info.GetReturnValue().Set(ok);
 +          }));
++  // S1 test-support: the token registered for this exact object.
++  global_template->Set(
++      isolate, "xtraceTokenOf",
++      FunctionTemplate::New(
++          isolate,
++          [](const v8::FunctionCallbackInfo<v8::Value>& info) {
++            if (info.Length() < 1) return;
++            info.GetReturnValue().Set(static_cast<double>(
++                v8::internal::xtrace::IgnitionObserverTokenOf(
++                    info.GetIsolate(), info[0])));
++          }));
++  // S1: token-rooted dump (the embedder contract root). xtraceTokenDump(
++  // token[, pathJson][, label]) — rejects unknown/collected tokens and
++  // accessor/Proxy path steps; the reason prints so tests assert it.
++  global_template->Set(
++      isolate, "xtraceTokenDump",
++      FunctionTemplate::New(
++          isolate,
++          [](const v8::FunctionCallbackInfo<v8::Value>& info) {
++            if (info.Length() < 1 || !info[0]->IsNumber()) return;
++            const uint64_t token =
++                static_cast<uint64_t>(info[0].As<v8::Number>()->Value());
++            std::string path_storage;
++            const char* path_c = nullptr;
++            if (info.Length() >= 2 && info[1]->IsString()) {
++              path_storage = *v8::String::Utf8Value{
++                  info.GetIsolate(), info[1].As<v8::String>()};
++              path_c = path_storage.c_str();
++            }
++            const char* label_c = "unlabeled";
++            std::string label_storage;
++            if (info.Length() >= 3 && info[2]->IsString()) {
++              label_storage = *v8::String::Utf8Value{
++                  info.GetIsolate(), info[2].As<v8::String>()};
++              label_c = label_storage.c_str();
++            }
++            const char* detail = nullptr;
++            const int32_t rc =
++                v8::internal::xtrace::IgnitionObserverRequestDumpToken(
++                    info.GetIsolate(), token, path_c, label_c, 0, &detail);
++            printf("TOKENDUMP token=%llu rc=%d detail=%s\n",
++                   static_cast<unsigned long long>(token), rc,
++                   detail ? detail : "-");
++            info.GetReturnValue().Set(rc);
++          }));
 +#endif
    global_template->Set(isolate, "printErr",
                         FunctionTemplate::New(isolate, PrintErr));
    global_template->Set(isolate, "write",
-@@ -7037,6 +7144,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
+@@ -7037,6 +7191,12 @@ bool Shell::SetOptions(int argc, char* argv[]) {
                                    strlen(kStandaloneD8ShellFlag));
    i::FlagList::SetFlagsFromCommandLine(&argc, argv, true,
                                         HelpOptions(HelpOptions::kExit, usage));
@@ -9276,7 +9340,7 @@ index fc6d62e2..02e2db38 100644
    i::FlagList::ResolveContradictionsWhenFuzzing();
  
    options.mock_arraybuffer_allocator = i::v8_flags.mock_arraybuffer_allocator;
-@@ -7901,6 +8014,25 @@ int Shell::Main(int argc, char* argv[]) {
+@@ -7901,6 +8061,25 @@ int Shell::Main(int argc, char* argv[]) {
    }
  
    Isolate* isolate = Isolate::New(create_params);
@@ -9795,10 +9859,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..3aad6c8e
+index 00000000..63354622
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1418 @@
+@@ -0,0 +1,1735 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -9806,6 +9870,7 @@ index 00000000..3aad6c8e
 +#include "src/interpreter/xtrace-ignition-observer.h"
 +
 +#include <algorithm>
++#include <map>
 +#include <memory>
 +#include <unordered_map>
 +#include <vector>
@@ -9827,6 +9892,8 @@ index 00000000..3aad6c8e
 +#include "src/objects/dictionary-inl.h"
 +#include "src/objects/js-array-buffer-inl.h"
 +#include "src/objects/js-objects-inl.h"
++#include "src/objects/lookup.h"
++#include "src/objects/lookup-inl.h"
 +#include "src/objects/objects-inl.h"
 +#include "src/objects/bytecode-array.h"
 +#include "src/objects/objects.h"
@@ -9838,6 +9905,10 @@ index 00000000..3aad6c8e
 +namespace v8 {
 +namespace internal {
 +namespace xtrace {
++
++// S1: process-global tap-object token serials — (serial) unique per
++// process; (producer id, serial) unique per capture (see Registry).
++std::atomic<uint32_t> g_tap_token_serial{1};
 +
 +// ---- Always-compiled embedder boundary (F2) ----------------------------
 +// Return-value truth (review B2-4), primitive-only signatures (review
@@ -10008,7 +10079,7 @@ index 00000000..3aad6c8e
 +  }
 +}
 +
-+std::string EncodeTapValue(Tagged<Object> value) {
++std::string EncodeTapValue(Tagged<Object> value, uint32_t object_token) {
 +  // Minimal layer-1 encoding (contract §4): scalars verbatim, strings
 +  // bounded, objects kind-tagged ONLY. Every entry carries an explicit
 +  // value_state: captured | truncated | unavailable | ref-only — a
@@ -10054,9 +10125,16 @@ index 00000000..3aad6c8e
 +    return "{\"t\":\"bigint\",\"state\":\"unavailable\",\"reason\":\"bigint-decoding-post-E3\"}";
 +  }
 +  // Objects/arrays/etc: kind tag only — never expanded, never called.
++  // S1: receivers carry their registered dump token (0 = none) so the
++  // operator can request a token-rooted dump; the token is a FACT (a
++  // weak registry entry), not a dereference.
 +  if (IsJSReceiver(value)) {
-+    if (IsJSArray(value)) return "{\"t\":\"array\",\"state\":\"ref-only\"}";
-+    return "{\"t\":\"object\",\"state\":\"ref-only\"}";
++    if (IsJSArray(value)) {
++      return "{\"t\":\"array\",\"state\":\"ref-only\",\"token\":" +
++             std::to_string(object_token) + "}";
++    }
++    return "{\"t\":\"object\",\"state\":\"ref-only\",\"token\":" +
++           std::to_string(object_token) + "}";
 +  }
 +  return "{\"t\":\"other\",\"state\":\"unavailable\",\"reason\":\"non-scalar-slot\"}";
 +}
@@ -10488,6 +10566,37 @@ index 00000000..3aad6c8e
 +  return reinterpret_cast<Isolate*>(v8_isolate)
 +      ->xtrace_ignition_observer()
 +      ->RequestDump(object, anchor_label, window_id);
++}
++
++uint64_t IgnitionObserverTokenOf(v8::Isolate* v8_isolate,
++                                  v8::Local<v8::Value> object) {
++  if (object.IsEmpty()) return 0;
++  return reinterpret_cast<Isolate*>(v8_isolate)
++      ->xtrace_ignition_observer()
++      ->NoteTapObjectOf(*v8::Utils::OpenHandle(*object));
++}
++
++int32_t IgnitionObserverRequestDumpToken(v8::Isolate* v8_isolate,
++                                         uint64_t token,
++                                         const char* path_json,
++                                         const char* anchor_label,
++                                         uint32_t window_id,
++                                         const char** detail) {
++  // Primitive-only boundary (B5): the reason string lives in a
++  // thread-local char buffer (no exit-time destructor) stable until the
++  // next call on this thread.
++  static thread_local char t_detail[256];
++  std::string d;
++  const int32_t rc =
++      reinterpret_cast<Isolate*>(v8_isolate)
++          ->xtrace_ignition_observer()
++          ->RequestDumpToken(static_cast<uint32_t>(token), path_json,
++                             anchor_label, window_id, &d);
++  snprintf(t_detail, sizeof(t_detail), "%s", d.c_str());
++  if (detail != nullptr) {
++    *detail = t_detail;
++  }
++  return rc;
 +}
 +
 +// ---- P5.5 D1: one-time compilation-instance metadata asset -------------
@@ -10937,6 +11046,98 @@ index 00000000..3aad6c8e
 +    return nullptr;
 +  }
 +
++  // ---- S1 (re-review RR1): registered tap-object tokens ----------------
++  //
++  // A token names ONE heap object observed by a value tap, for later
++  // token-rooted dumps — the ONLY embedder-side dump root (expression
++  // evaluation is deleted). Handles are weak with the SAME canonical
++  // two-pass contract as bytecode entries; collection marks the serial
++  // dead (a later dump reports "collected", never fabricates). All
++  // access is on the OWNING isolate thread (registration at dispatch,
++  // collection during GC, dumps and teardown on the same thread), so
++  // the map needs no lock. The serial space is PROCESS-GLOBAL: (serial)
++  // alone is unique per process; with the producer id from the event
++  // row it is unique per capture.
++  struct TapToken {
++    Address* handle_slot = nullptr;  // null = collected marker
++    uint64_t stamp = 0;              // LRU eviction order
++  };
++  static constexpr size_t kMaxTapTokens = 4096;
++
++  static void TapTokenCollected(const v8::WeakCallbackInfo<void>& data) {
++    TapToken* token = reinterpret_cast<TapToken*>(data.GetParameter());
++    // First pass MUST free the global handle (V8 pins that contract);
++    // the map node itself survives (std::map nodes are stable) and the
++    // null slot is the dead marker — the serial stays reportable.
++    GlobalHandles::Destroy(token->handle_slot);
++    token->handle_slot = nullptr;
++  }
++
++  uint32_t RegisterTapObject(Isolate* isolate, Tagged<Object> value) {
++    if (!IsJSReceiver(value)) return 0;
++    while (tap_tokens_.size() >= kMaxTapTokens) {
++      if (!EvictOldestTapToken()) break;
++    }
++    Handle<Object> handle = isolate->global_handles()->Create(value);
++    const uint32_t serial =
++        g_tap_token_serial.fetch_add(1, std::memory_order_relaxed);
++    TapToken& token = tap_tokens_[serial];
++    token.handle_slot = handle.location();
++    token.stamp = ++tap_token_clock_;
++    GlobalHandles::MakeWeak(handle.location(), &token,
++                            &Registry::TapTokenCollected,
++                            v8::WeakCallbackType::kParameter);
++    return serial;
++  }
++
++  TapToken* FindTapToken(uint32_t serial) {
++    auto it = tap_tokens_.find(serial);
++    return it == tap_tokens_.end() ? nullptr : &it->second;
++  }
++
++  // Test-support identity query: the token registered for THIS object
++  // (0 when none). Runs on the owning thread; the weak slots hold the
++  // CURRENT tagged pointers (relocations update them in place), so a
++  // direct address compare is exact here.
++  uint32_t FindTapTokenOf(Tagged<Object> value) {
++    if (!IsHeapObject(value)) return 0;
++    const Address target = value.ptr();
++    for (const auto& [serial, token] : tap_tokens_) {
++      if (token.handle_slot != nullptr && *token.handle_slot == target) {
++        return serial;
++      }
++    }
++    return 0;
++  }
++
++  bool EvictOldestTapToken() {
++    uint32_t oldest = 0;
++    uint64_t best = UINT64_MAX;
++    for (const auto& [serial, token] : tap_tokens_) {
++      if (token.stamp < best) {
++        best = token.stamp;
++        oldest = serial;
++      }
++    }
++    if (oldest == 0) return false;
++    auto it = tap_tokens_.find(oldest);
++    if (it->second.handle_slot != nullptr) {
++      GlobalHandles::Destroy(it->second.handle_slot);
++    }
++    tap_tokens_.erase(it);
++    return true;
++  }
++
++  void DestroyTapTokens() {
++    for (auto& [serial, token] : tap_tokens_) {
++      if (token.handle_slot != nullptr) {
++        GlobalHandles::Destroy(token.handle_slot);
++        token.handle_slot = nullptr;
++      }
++    }
++    tap_tokens_.clear();
++  }
++
 +  Entry* EnsureRegistered(Isolate* isolate, Tagged<BytecodeArray> array,
 +                          const char* script_url, bool* fresh) {
 +    auto hit = by_address_.find(array.address());
@@ -11025,6 +11226,7 @@ index 00000000..3aad6c8e
 +    }
 +    by_address_.clear();
 +    by_slot_.clear();
++    DestroyTapTokens();
 +  }
 +
 + private:
@@ -11040,6 +11242,9 @@ index 00000000..3aad6c8e
 +  std::unordered_map<Address, Entry*> by_slot_;
 +  std::unordered_map<Address, Entry*> by_address_;
 +  uint32_t next_version_ = 1;
++  // S1 tap-object tokens (owning isolate thread only; see TapToken).
++  std::map<uint32_t, TapToken> tap_tokens_;
++  uint64_t tap_token_clock_ = 0;
 +};
 +
 +// GC epilogue (isolate thread, data = the owning state).
@@ -11094,19 +11299,46 @@ index 00000000..3aad6c8e
 +  Isolate* isolate = isolate_;
 +  v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate));
 +  Handle<Object> obj = v8::Utils::OpenHandle(*object);
++  return RunDumpWalker(isolate, obj, anchor_label, window_id, dcb,
++                       /*root_type=*/"custom", /*token=*/0, /*path=*/nullptr);
++}
 +
++// Shared walker tail (S1): both the direct-object path (d8 harness) and
++// the token path produce the SAME envelope/budget framing; the anchor
++// block records the actual root locator (token + path when present).
++bool IgnitionObserverState::RunDumpWalker(Isolate* isolate,
++                                          Handle<Object> root,
++                                          const char* anchor_label,
++                                          uint32_t window_id,
++                                          IgnitionDumpCallback dcb,
++                                          const char* root_type,
++                                          uint32_t token,
++                                          const std::vector<std::string>* path) {
 +  DumpBudget budget;
 +  std::string out;
 +  out.reserve(2048);
 +  out.append("{\"kind\":\"v8.materialized-dump\",\"schema\":1");
-+  out.append(",\"anchor\":{\"type\":\"custom\",\"label\":");
-+  DumpAppendEscaped(&out, anchor_label ? anchor_label : "", 
++  out.append(",\"anchor\":{\"type\":");
++  DumpAppendEscaped(&out, root_type, strlen(root_type));
++  out.append(",\"label\":");
++  DumpAppendEscaped(&out, anchor_label ? anchor_label : "",
 +                    anchor_label ? strlen(anchor_label) : 0);
++  if (token != 0) {
++    out.append(",\"token\":").append(std::to_string(token));
++    if (path != nullptr && !path->empty()) {
++      out.append(",\"path\":[");
++      for (size_t i = 0; i < path->size(); i++) {
++        if (i) out.push_back(',');
++        DumpAppendEscaped(&out, (*path)[i].data(), (*path)[i].size());
++      }
++      out.push_back(']');
++    }
++  }
 +  out.append(",\"window_id\":").append(std::to_string(window_id)).append("}");
 +
 +  DumpWalker walker(isolate, &out, &budget);
 +  out.append(",\"root\":");
-+  walker.Walk(obj);
++  walker.Walk(root);
 +
 +  out.append(",\"budget\":{\"nodes\":").append(std::to_string(budget.nodes));
 +  out.append(",\"max_nodes\":").append(std::to_string(DumpBudget::kMaxNodes));
@@ -11119,6 +11351,144 @@ index 00000000..3aad6c8e
 +  dcb(reinterpret_cast<v8::Isolate*>(isolate), anchor_label, window_id,
 +      out.data(), out.size());
 +  return true;
++}
++
++// S1: parse the dump path JSON — a flat array of short ASCII-ish strings
++// (["a","0","nested"]). Bounded: <=16 steps, each <=128 chars. Strict:
++// anything else is a bad-path (fail-visible at the embedder).
++bool ParseTapPathJson(const char* path_json, std::vector<std::string>* out) {
++  out->clear();
++  if (path_json == nullptr) return true;  // no path: the token IS the root
++  std::string json(path_json);
++  size_t pos = 0;
++  auto skip_ws = [&pos, &json]() {
++    while (pos < json.size() && isspace(static_cast<unsigned char>(json[pos]))) pos++;
++  };
++  skip_ws();
++  if (pos >= json.size() || json[pos] != '[') return false;
++  pos++;
++  skip_ws();
++  if (pos < json.size() && json[pos] == ']') return true;
++  while (true) {
++    skip_ws();
++    if (pos >= json.size() || json[pos] != '"') return false;
++    pos++;
++    std::string step;
++    while (pos < json.size() && json[pos] != '"') {
++      if (json[pos] == '\\') return false;  // escapes rejected (strict)
++      step.push_back(json[pos++]);
++    }
++    if (pos >= json.size()) return false;
++    pos++;
++    if (step.empty() || step.size() > 128) return false;
++    out->push_back(std::move(step));
++    if (out->size() > 16) return false;
++    skip_ws();
++    if (pos < json.size() && json[pos] == ',') { pos++; continue; }
++    if (pos < json.size() && json[pos] == ']') { pos++; break; }
++    return false;
++  }
++  return true;
++}
++
++uint32_t IgnitionObserverState::NoteTapObject(Tagged<Object> value) {
++  return registry_->RegisterTapObject(isolate_, value);
++}
++
++uint32_t IgnitionObserverState::NoteTapObjectOf(Tagged<Object> value) {
++  return registry_->FindTapTokenOf(value);
++}
++
++int32_t IgnitionObserverState::RequestDumpToken(
++    uint32_t token, const char* path_json, const char* anchor_label,
++    uint32_t window_id, std::string* detail) {
++  *detail = "";
++  auto dcb = dump_callback.load(std::memory_order_acquire);
++  if (dcb == nullptr) {
++    *detail = "no-dump-callback";
++    return 5;
++  }
++  std::vector<std::string> steps;
++  if (!ParseTapPathJson(path_json, &steps)) {
++    *detail = "path must be a flat array of <=16 strings, each 1..128 chars";
++    return 3;
++  }
++  Registry::TapToken* entry = registry_->FindTapToken(token);
++  if (entry == nullptr) {
++    *detail = "token never registered in this isolate";
++    return 1;
++  }
++  if (entry->handle_slot == nullptr) {
++    *detail = "token object collected (weak handle dead)";
++    return 2;
++  }
++  Isolate* isolate = isolate_;
++  v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate));
++  // Pin the root STRONG for the dump duration (the token handle is
++  // weak; no allocation happens between the liveness check above and
++  // this pin, so the object cannot die in between on this thread).
++  Handle<Object> strong = isolate->global_handles()->Create(
++      *Handle<Object>(entry->handle_slot));
++  const auto reject = [&](const std::string& why) {
++    *detail = why;
++    isolate->global_handles()->Destroy(strong.location());
++    return 4;
++  };
++  // Own-data descent: LookupIterator in OWN_SKIP_INTERCEPTOR mode never
++  // crosses prototypes, never consults interceptors, never calls user
++  // code. Accessor/Proxy/miss/scalar steps are REJECTED with reasons —
++  // the dump never silently skips a path step it was told to take.
++  Handle<Object> current = strong;
++  for (const std::string& step : steps) {
++    if (!IsJSReceiver(*current)) {
++      return reject("path step '" + step + "' on a non-receiver");
++    }
++    Tagged<JSReceiver> recv = Cast<JSReceiver>(*current);
++    if (IsJSProxy(recv)) {
++      return reject("path step '" + step + "' crosses a Proxy");
++    }
++    // Canonical decimal index steps walk ELEMENTS ("0" on an array);
++    // anything else (including "01", "") is a NAME. No user code runs
++    // in either lookup mode.
++    const bool canonical_index =
++        !step.empty() && step.size() <= 9 &&
++        step.find_first_not_of("0123456789") == std::string::npos &&
++        (step == "0" || step[0] != '0');
++    PropertyKey key =
++        canonical_index
++            ? PropertyKey(isolate, static_cast<size_t>(
++                                      strtoul(step.c_str(), nullptr, 10)))
++            : PropertyKey(isolate, isolate->factory()->InternalizeString(
++                                      base::Vector<const char>(
++                                          step.data(),
++                                          static_cast<int>(step.size()))));
++    LookupIterator it(isolate, Cast<JSAny>(current), key,
++                      LookupIterator::OWN_SKIP_INTERCEPTOR);
++    if (!it.IsFound() || it.state() == LookupIterator::TYPED_ARRAY_INDEX_NOT_FOUND) {
++      return reject("path step '" + step + "' not an own property");
++    }
++    if (it.state() == LookupIterator::ACCESSOR) {
++      return reject("path step '" + step +
++                    "' is an accessor (never invoked)");
++    }
++    if (it.state() != LookupIterator::DATA) {
++      return reject("path step '" + step + "' unsupported state " +
++                    std::to_string(static_cast<int>(it.state())));
++    }
++    current = it.GetDataValue();
++  }
++  if (!IsJSReceiver(*current)) {
++    return reject("path ends at a scalar (scalars are tap-visible; dumps "
++                  "walk receivers)");
++  }
++  const int32_t status = RunDumpWalker(isolate, current, anchor_label,
++                                       window_id, dcb,
++                                       /*root_type=*/"token", token, &steps)
++                             ? 0
++                             : 5;
++  if (status != 0) *detail = "walker failed";
++  isolate->global_handles()->Destroy(strong.location());
++  return status;
 +}
 +
 +IgnitionObserverState::TapResult IgnitionObserverState::TapPredicate(
@@ -11211,6 +11581,17 @@ index 00000000..3aad6c8e
 +                                 const char*, uint32_t) {
 +  return false;
 +}
++int32_t IgnitionObserverRequestDumpToken(v8::Isolate*, uint64_t,
++                                         const char*, const char*, uint32_t,
++                                         const char** detail) {
++  if (detail != nullptr) {
++    *detail = "observer-not-compiled";
++  }
++  return 1;
++}
++uint64_t IgnitionObserverTokenOf(v8::Isolate*, v8::Local<v8::Value>) {
++  return 0;
++}
 +
 +#endif  // V8_XTRACE_IGNITION_OBSERVER
 +
@@ -11219,10 +11600,10 @@ index 00000000..3aad6c8e
 +}  // namespace v8
 diff --git a/src/interpreter/xtrace-ignition-observer.h b/src/interpreter/xtrace-ignition-observer.h
 new file mode 100644
-index 00000000..d05444dc
+index 00000000..502eaaf1
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.h
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,188 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -11232,6 +11613,7 @@ index 00000000..d05444dc
 +
 +#include <atomic>
 +#include <string>
++#include <vector>
 +#include <cstddef>
 +#include <cstdint>
 +
@@ -11247,6 +11629,8 @@ index 00000000..d05444dc
 +class Isolate;
 +class BytecodeArray;
 +class Script;
++template <typename T>
++class Handle;
 +template <typename T>
 +class DirectHandle;
 +
@@ -11336,6 +11720,29 @@ index 00000000..d05444dc
 +  bool RequestDump(v8::Local<v8::Value> object, const char* anchor_label,
 +                   uint32_t window_id);
 +
++  // S1 (re-review RR1): token-rooted dump. Expression evaluation is
++  // DELETED from the embedder path — the only roots are tokens
++  // registered here by value taps (weak, two-phase collection) plus an
++  // explicit own-data path walked WITHOUT calling user code (accessor
++  // or Proxy steps reject). Status codes (stable contract, mirrored in
++  // the mojom/pdl layers):
++  //   0 saved | 1 unknown-token | 2 token-collected | 3 bad-path
++  //   4 rejected-root (accessor/proxy/miss/scalar) | 5 no-dump-callback
++  // `detail` carries the precise rejection reason.
++  uint32_t NoteTapObject(Tagged<Object> value);  // 0 = not tokenable
++  // Test-support: the token registered for THIS object (0 = none).
++  uint32_t NoteTapObjectOf(Tagged<Object> value);
++  int32_t RequestDumpToken(uint32_t token, const char* path_json,
++                           const char* anchor_label, uint32_t window_id,
++                           std::string* detail);
++
++  // S1: shared dump-envelope/walker tail for both root paths.
++  bool RunDumpWalker(Isolate* isolate, Handle<Object> root,
++                     const char* anchor_label, uint32_t window_id,
++                     IgnitionDumpCallback dcb, const char* root_type,
++                     uint32_t token,
++                     const std::vector<std::string>* path);
++
 +  std::atomic<IgnitionDumpCallback> dump_callback{nullptr};
 +
 +  // Hot path (isolate thread only): metadata for the array at the given
@@ -11376,8 +11783,9 @@ index 00000000..d05444dc
 +// P5.5 E2/E3: bounded layer-1 value encoding for a tap hit. Runs ONLY
 +// on a window hit (not on the predicate path); never re-enters user
 +// code (no toString/valueOf), never dereferences objects — objects get
-+// a kind tag only. Values are facts; value_role starts unclassified.
-+std::string EncodeTapValue(Tagged<Object> value);
++// a kind tag plus their registered dump token (0 = none). Values are
++// facts; value_role starts unclassified.
++std::string EncodeTapValue(Tagged<Object> value, uint32_t object_token);
 +
 +}  // namespace xtrace
 +}  // namespace internal
@@ -12346,7 +12754,7 @@ index 86fafdb8..484c9eb9 100644
  }
  
 diff --git a/src/runtime/runtime-trace.cc b/src/runtime/runtime-trace.cc
-index 1e3f6ed3..bccaf8be 100644
+index 1e3f6ed3..b0d7ab7d 100644
 --- a/src/runtime/runtime-trace.cc
 +++ b/src/runtime/runtime-trace.cc
 @@ -2,6 +2,13 @@
@@ -12363,7 +12771,7 @@ index 1e3f6ed3..bccaf8be 100644
  #include <iomanip>
  
  #include "src/execution/arguments-inl.h"
-@@ -277,5 +284,100 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
+@@ -277,5 +284,106 @@ RUNTIME_FUNCTION(Runtime_DumpExecutionFrame) {
  
  #endif  //  V8_DUMPLING
  
@@ -12437,11 +12845,17 @@ index 1e3f6ed3..bccaf8be 100644
 +        metadata.bytecode_version, static_cast<uint32_t>(offset),
 +        &window_id)) {
 +      case xtrace::IgnitionObserverState::TapResult::kHit: {
-+        std::string value_json = xtrace::EncodeTapValue(*accumulator);
++        // S1: receivers get a registered dump token (the ONLY embedder
++        // dump root). Allocation happens here on the HIT path only —
++        // the predicate/miss path stays zero-allocation.
++        const uint32_t token =
++            isolate->xtrace_ignition_observer()->NoteTapObject(
++                *accumulator);
++        std::string value_json = xtrace::EncodeTapValue(*accumulator, token);
 +        tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
 +               static_cast<uint32_t>(script->id()), metadata.bytecode_version,
-+               static_cast<uint32_t>(offset), window_id, value_json.data(),
-+               value_json.size());
++               static_cast<uint32_t>(offset), window_id, token,
++               value_json.data(), value_json.size());
 +        break;
 +      }
 +      case xtrace::IgnitionObserverState::TapResult::kBudgetSkip: {
@@ -12450,7 +12864,7 @@ index 1e3f6ed3..bccaf8be 100644
 +        static const char kBudgetSkip[] = "{\"budget_skip\":1}";
 +        tap_cb(reinterpret_cast<v8::Isolate*>(isolate),
 +               static_cast<uint32_t>(script->id()), metadata.bytecode_version,
-+               static_cast<uint32_t>(offset), window_id, kBudgetSkip,
++               static_cast<uint32_t>(offset), window_id, 0, kBudgetSkip,
 +               sizeof(kBudgetSkip) - 1);
 +        break;
 +      }

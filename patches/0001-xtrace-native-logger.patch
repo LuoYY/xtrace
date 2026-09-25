@@ -175,10 +175,10 @@ index 948ed05866..aef39fda05 100644
  #endif
 diff --git a/content/browser/devtools/protocol/xtrace_handler.cc b/content/browser/devtools/protocol/xtrace_handler.cc
 new file mode 100644
-index 0000000000..b7d73cdd14
+index 0000000000..701f723bfb
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.cc
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,779 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -727,9 +727,10 @@ index 0000000000..b7d73cdd14
 +}
 +
 +void XTraceHandler::RequestDump(
-+    const String& in_anchorExpression,
-+    std::optional<String> in_executionContextId,
-+    std::optional<String> in_anchorLabel,
++    int in_token,
++    const String& in_producerId,
++    std::unique_ptr<protocol::Array<String>> in_path,
++    std::optional<String> in_label,
 +    std::unique_ptr<XTrace::Backend::RequestDumpCallback> callback) {
 +  XTraceCaptureController* controller = XTraceCaptureController::Get();
 +  if (!controller) {
@@ -737,17 +738,52 @@ index 0000000000..b7d73cdd14
 +        "capture disabled: no launch-time trace configuration"));
 +    return;
 +  }
-+  // P55-R4: forward to the renderers' control endpoints; the renderer
-+  // evaluates the anchor in its own page context (browser never touches
-+  // page objects) and invokes the bounded own-data walker. The FIRST
-+  // accepting endpoint wins; the dump asset lands on the trace's asset
-+  // channel with standard quadruple accounting.
-+  const std::string label = in_anchorLabel ? *in_anchorLabel : "unlabeled";
-+  controller->DomainRequestDump(in_anchorExpression, label,
++  // S1 (re-review RR1): strict parameter validation, then point-to-point
++  // routing. Tokens/paths are the only root locator — no expression is
++  // ever evaluated, so no dump request can execute user code.
++  if (in_token <= 0) {
++    callback->sendFailure(Response::InvalidRequest(
++        "token must be a positive tap-registered object token"));
++    return;
++  }
++  if (in_producerId.empty()) {
++    callback->sendFailure(
++        Response::InvalidRequest("producerId is required"));
++    return;
++  }
++  std::vector<std::string> path;
++  if (in_path) {
++    if (in_path->size() > 16) {
++      callback->sendFailure(
++          Response::InvalidRequest("path: at most 16 steps"));
++      return;
++    }
++    for (const String& step : *in_path) {
++      if (step.empty() || step.length() > 128 ||
++          step.find('"') != std::string::npos ||
++          step.find('\\') != std::string::npos) {
++        callback->sendFailure(Response::InvalidRequest(
++            "path steps must be 1..128 chars without quotes/backslashes"));
++        return;
++      }
++      path.emplace_back(step);
++    }
++  }
++  const std::string label = in_label ? *in_label : "unlabeled";
++  controller->DomainRequestDump(
++      static_cast<uint64_t>(in_token), std::string(in_producerId), path,
++      label,
 +      base::BindOnce(
 +          [](std::unique_ptr<XTrace::Backend::RequestDumpCallback> cb,
-+             bool accepted, const std::string& reason) {
-+            cb->sendSuccess(accepted, String(reason));
++             const std::string& status, const std::string& reason,
++             const std::string& asset_locator, const std::string& rid) {
++            cb->sendSuccess(
++                String(status), String(reason),
++                asset_locator.empty()
++                    ? std::optional<String>()
++                    : std::optional<String>(String(asset_locator)),
++                rid.empty() ? std::optional<String>()
++                            : std::optional<String>(String(rid)));
 +          },
 +          std::move(callback)));
 +}
@@ -924,10 +960,10 @@ index 0000000000..b7d73cdd14
 +}  // namespace content::protocol
 diff --git a/content/browser/devtools/protocol/xtrace_handler.h b/content/browser/devtools/protocol/xtrace_handler.h
 new file mode 100644
-index 0000000000..7a0f77d8ba
+index 0000000000..9e087e9e12
 --- /dev/null
 +++ b/content/browser/devtools/protocol/xtrace_handler.h
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,84 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -980,9 +1016,10 @@ index 0000000000..7a0f77d8ba
 +      std::unique_ptr<XTrace::Backend::StartCaptureCallback> callback)
 +      override;
 +  void RequestDump(
-+      const String& in_anchorExpression,
-+      std::optional<String> in_executionContextId,
-+      std::optional<String> in_anchorLabel,
++      int in_token,
++      const String& in_producerId,
++      std::unique_ptr<protocol::Array<String>> in_path,
++      std::optional<String> in_label,
 +      std::unique_ptr<XTrace::Backend::RequestDumpCallback> callback)
 +      override;
 +  void UpdateCapture(
@@ -1836,10 +1873,10 @@ index db280b0576..cea936ae91 100644
  
 diff --git a/content/browser/xtrace/xtrace.pdl b/content/browser/xtrace/xtrace.pdl
 new file mode 100644
-index 0000000000..3f6b84980e
+index 0000000000..0de4c65efb
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace.pdl
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,176 @@
 +# Copyright 2026 The XTrace Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in Chromium's LICENSE file.
@@ -1956,22 +1993,34 @@ index 0000000000..3f6b84980e
 +      # (0 when none); distinct plans never share a serial.
 +      integer tapPlanSerial
 +
-+  # P55-R4: chrome-side dump trigger. The browser picks the anchor
-+  # (an object reachable from the page), the engine walks own-data
-+  # slots only, bounded; the result flows through the asset channel
-+  # with the same quadruple accounting as every other asset. The
-+  # anchor expression is evaluated IN THE PAGE against the given
-+  # execution context (the browser never invents objects).
++  # S1 (re-review RR1): token-rooted dump — the ONLY dump root. A tap
++  # that observes a receiver registers a weak token (value_tap events
++  # carry it as object_token); requestDump resolves that token in its
++  # OWNING producer/isolate and walks own-data slots only, bounded; the
++  # result flows through the asset channel with the same quadruple
++  # accounting as every other asset. NOTHING in the path evaluates
++  # expressions, calls accessors, or drains microtasks.
 +  experimental command requestDump
 +    parameters
-+      # JavaScript expression resolving to the dump ROOT object.
-+      string anchorExpression
-+      # DevTools execution context; defaults to the top frame.
-+      optional string executionContextId
-+      optional string anchorLabel
++      # Tap-registered object token (from the value_tap event row).
++      integer token
++      # Producer that reported the token (same event row) — the request
++      # routes point-to-point to that producer's process; no broadcast.
++      string producerId
++      # Explicit own-data property path from the token root (max 16
++      # steps, each 1..128 chars). Accessor/Proxy steps reject with a
++      # reason instead of invoking them.
++      optional array of string path
++      optional string label
 +    returns
-+      boolean accepted
++      # saved | unknown-token | token-collected | bad-path |
++      # rejected-root | stopped | unknown-producer | timeout
++      string status
 +      string reason
++      # Manifest locator of the dump asset (present when produced).
++      optional string assetLocator
++      # End-to-end request identity (present once routed).
++      optional string requestId
 +
 +  # Runtime filter update; serially allocated generation from "1".
 +  # Confirmation evidence is each event's config_generation field; a
@@ -2006,10 +2055,10 @@ index 0000000000..3f6b84980e
 +      optional string manifestStream
 diff --git a/content/browser/xtrace/xtrace_capture_controller.cc b/content/browser/xtrace/xtrace_capture_controller.cc
 new file mode 100644
-index 0000000000..a9683f5ae8
+index 0000000000..a17e0ef2a9
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.cc
-@@ -0,0 +1,1477 @@
+@@ -0,0 +1,1505 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -2945,91 +2994,119 @@ index 0000000000..a9683f5ae8
 +}
 +
 +namespace {
-+// R4 fanout state: single-shot resolution across control endpoints
-+// (first answer wins — acceptance or refusal alike; the anchor lives
-+// in the renderer that ran page scripts, which is usually the LAST to
-+// answer, so a refusal-first policy would misreport).
-+struct DumpFanoutState {
-+  using DumpResult = XTraceCaptureController::DumpResult;
-+  DumpFanoutState(int endpoints, DumpResult cb)
-+      : remaining(endpoints), cb(std::move(cb)) {}
-+  // First acceptance resolves; the LAST refusal resolves. The callback
-+  // lives here and is consumed exactly once under the lock — a double
-+  // invocation is a structural no-op, never a null Run.
-+  void Resolve(bool accepted, const std::string& r) {
-+    DumpResult local;
++// S1 (re-review RR1): single-target dump request state. The request
++// routes POINT-TO-POINT to the producer that reported the token (no
++// broadcast, no first-acceptance race). Heap-owned via shared_ptr by
++// BOTH the renderer-reply callback and the browser-side timeout task:
++// whichever resolves first consumes the callback under the lock, the
++// late one no-ops, and the memory outlives both by construction — no
++// call-stack lifetime, no use-after-free window (the RR2 lesson).
++struct DumpRequestState {
++  using Reply = XTraceCaptureController::DumpResult;
++  explicit DumpRequestState(Reply cb) : cb(std::move(cb)) {}
++  void Resolve(const std::string& status, const std::string& reason,
++               const std::string& asset_locator, const std::string& rid) {
++    Reply local;
 +    {
 +      base::AutoLock lock(this->lock);
-+      if (resolved || !cb) {
-+        return;
++      if (resolved) {
++        return;  // exactly-once: the late resolution no-ops
 +      }
-+      if (accepted) {
-+        resolved = true;
-+      } else if (--remaining > 0) {
-+        return;  // still waiting for a possible acceptance
-+      } else {
-+        resolved = true;
-+      }
++      resolved = true;
 +      local = std::move(this->cb);
 +    }
 +    if (local) {
-+      std::move(local).Run(accepted, r);
++      std::move(local).Run(status, reason, asset_locator, rid);
 +    }
 +  }
 +  base::Lock lock;
 +  bool resolved = false;
-+  int remaining;  // refusals still expected
-+  DumpResult cb;
++  Reply cb;
 +};
 +}  // namespace
 +
 +void XTraceCaptureController::DomainRequestDump(
-+    const std::string& anchor_expression, const std::string& label,
++    uint64_t token, const std::string& producer_id,
++    const std::vector<std::string>& path, const std::string& label,
 +    DumpResult callback) {
-+  // P55-R4: distribution mirrors the config push discipline (writer
-+  // runner, mojo sequence). First accepted endpoint resolves the
-+  // callback; a spread of refusals reports the last reason.
++  // S1: the ONLY target is the producer whose event carried the token.
++  // Capture/stop state is validated on the writer sequence BEFORE any
++  // renderer entry; the renderer re-checks on the owning thread before
++  // any read (defense in depth — both gates precede every V8 entry).
 +  WriterRunner()->PostTask(
 +      FROM_HERE,
 +      base::BindOnce(
-+          [](base::WeakPtr<XTraceCaptureController> weak,
-+             const std::string expression, const std::string label,
++          [](base::WeakPtr<XTraceCaptureController> weak, uint64_t token,
++             const std::string producer_id,
++             const std::vector<std::string> path, const std::string label,
 +             DumpResult callback) {
++            auto state = std::make_shared<DumpRequestState>(
++                std::move(callback));
++            const auto reject = [&state](const char* status,
++                                         const std::string& reason) {
++              state->Resolve(status, reason, "", "");
++            };
 +            if (!weak) {
++              reject("stopped", "controller gone");
 +              return;
 +            }
 +            base::AutoLock lock(weak->writer_lock_);
-+            if (weak->control_remotes_by_epoch_.empty()) {
-+              std::move(callback).Run(false, "no-control-endpoints");
++            if (weak->finalized_.load(std::memory_order_acquire)) {
++              reject("stopped", "capture already settled");
 +              return;
 +            }
-+            // R4: fan out to EVERY control endpoint and take the first
-+            // ACCEPTANCE — the anchor lives in the renderer that ran
-+            // page scripts; other renderers answer no-activation-context
-+            // and must not shadow it.
-+            // First ACCEPTANCE resolves; only when every endpoint has
-+            // REFUSED does the failure report go out. Mutex-protected
-+            // result slot: no re-entrancy hazards, the callback runs
-+            // exactly once under the lock.
-+            auto* state = new DumpFanoutState(
-+                static_cast<int>(weak->control_remotes_by_epoch_.size()),
-+                std::move(callback));
-+            for (auto& [epoch, remote] : weak->control_remotes_by_epoch_) {
-+              remote->DumpAnchor(
-+                  expression, label, 0,
-+                  base::BindOnce(
-+                      [](base::WeakPtr<XTraceCaptureController> w,
-+                         DumpFanoutState* state,
-+                         bool accepted, const std::string& r) {
-+                        if (!w) {
-+                          return;
-+                        }
-+                        state->Resolve(accepted, r);
-+                      },
-+                      weak, base::Unretained(state)));
++            // Point-to-point: the token's producer names its process.
++            const auto producer = weak->producers_.find(producer_id);
++            if (producer == weak->producers_.end()) {
++              reject("unknown-producer",
++                     "producer " + producer_id + " never registered");
++              return;
 +            }
++            const auto endpoint = weak->control_remotes_by_epoch_.find(
++                producer->second->process_epoch);
++            if (endpoint == weak->control_remotes_by_epoch_.end()) {
++              reject("unknown-producer",
++                     "producer " + producer_id +
++                         " has no control endpoint");
++              return;
++            }
++            mojo::Remote<blink::mojom::XTraceControl>& remote =
++                endpoint->second;
++            // Browser-side timeout: resolves ONCE with status=timeout; a
++            // late renderer reply is dropped by the same single-shot
++            // state (shared ownership keeps it alive either way). This
++            // lambda already runs on the writer sequence.
++            base::SequencedTaskRunner::GetCurrentDefault()->PostDelayedTask(
++                FROM_HERE,
++                base::BindOnce(
++                    [](std::shared_ptr<DumpRequestState> s) {
++                      s->Resolve("timeout", "no renderer reply in 10s", "",
++                                 "");
++                    },
++                    state),
++                base::Seconds(10));
++            remote->DumpToken(
++                token, path, label,
++                base::BindOnce(
++                    [](std::shared_ptr<DumpRequestState> s, bool saved,
++                       int32_t status, const std::string& reason,
++                       const std::string& asset_locator,
++                       const std::string& request_id) {
++                      const char* status_name = "rejected-root";
++                      switch (status) {
++                        case 0: status_name = "saved"; break;
++                        case 1: status_name = "unknown-token"; break;
++                        case 2: status_name = "token-collected"; break;
++                        case 3: status_name = "bad-path"; break;
++                        case 4: status_name = "rejected-root"; break;
++                        default: status_name = "stopped"; break;
++                      }
++                      s->Resolve(saved ? "saved" : status_name, reason,
++                                 asset_locator, request_id);
++                    },
++                    std::move(state)));
 +          },
-+          weak_factory_.GetWeakPtr(), anchor_expression, label,
++          weak_factory_.GetWeakPtr(), token, producer_id, path, label,
 +          std::move(callback)));
 +}
 +
@@ -3489,10 +3566,10 @@ index 0000000000..a9683f5ae8
 +}  // namespace content
 diff --git a/content/browser/xtrace/xtrace_capture_controller.h b/content/browser/xtrace/xtrace_capture_controller.h
 new file mode 100644
-index 0000000000..f0cd691564
+index 0000000000..639297d38c
 --- /dev/null
 +++ b/content/browser/xtrace/xtrace_capture_controller.h
-@@ -0,0 +1,315 @@
+@@ -0,0 +1,321 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -3622,8 +3699,14 @@ index 0000000000..f0cd691564
 +  uint64_t DomainTapPlanSerial();
 +  // P55-R4: chrome dump trigger — fan out to renderers, first accepted
 +  // wins (callback on the calling sequence).
-+  using DumpResult = base::OnceCallback<void(bool, const std::string&)>;
-+  void DomainRequestDump(const std::string& anchor_expression,
++  // S1: token-rooted dump, routed point-to-point to the producer that
++  // reported the token. Reply: (status, reason, asset_locator, rid).
++  using DumpResult = base::OnceCallback<void(const std::string&,
++                                             const std::string&,
++                                             const std::string&,
++                                             const std::string&)>;
++  void DomainRequestDump(uint64_t token, const std::string& producer_id,
++                         const std::vector<std::string>& path,
 +                         const std::string& label, DumpResult callback);
 +  uint64_t DomainNextTapPlanSerial();
 +  std::string DomainSetTapWindows(const std::string& tap_windows_json);
@@ -4169,10 +4252,10 @@ index 71be079d2c..5d0bf99d0d 100644
    if (is_android) {
 diff --git a/third_party/blink/public/mojom/xtrace/xtrace.mojom b/third_party/blink/public/mojom/xtrace/xtrace.mojom
 new file mode 100644
-index 0000000000..191bf8ee99
+index 0000000000..78bac80c44
 --- /dev/null
 +++ b/third_party/blink/public/mojom/xtrace/xtrace.mojom
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,121 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -4268,13 +4351,19 @@ index 0000000000..191bf8ee99
 +  // delivery counts are not acknowledgements).
 +  StopCapture(string capture_id, uint32 deadline_ms) => (bool accepted);
 +
-+  // P55-R4: chrome-side dump trigger. The RENDERER evaluates the anchor
-+  // expression in the page context (in-process V8 eval — the browser
-+  // never touches page objects) and invokes the engine's bounded
-+  // own-data walker. `accepted` reports whether a dump callback was
-+  // installed and the expression produced an object.
-+  DumpAnchor(string anchor_expression, string anchor_label,
-+             uint32 window_id) => (bool accepted, string reason);
++  // S1 (re-review RR1): token-rooted dump — the ONLY dump root. The
++  // expression-evaluation path is DELETED (it executed user code and
++  // raced endpoints). The renderer resolves the token in its OWNING
++  // isolate (recorded by the tap that registered it) and walks
++  // own-data only; nothing in the path runs user code. `saved` reports
++  // the ACTUAL outcome (walker ran AND the asset event was admitted);
++  // status mirrors the V8 boundary: 0 saved | 1 unknown-token |
++  // 2 token-collected | 3 bad-path | 4 rejected-root | 5 stopped /
++  // unavailable. `asset_locator` names the manifest asset;
++  // `request_id` identifies THIS request end to end.
++  DumpToken(uint64 token, array<string> path, string label)
++      => (bool saved, int32 status, string reason, string asset_locator,
++          string request_id);
 +
 +  // Runtime filter update (P3-E4): applies the new generation to every
 +  // producer thread of this process. Confirmation evidence is each
@@ -16484,10 +16573,10 @@ index 0d3d4a3305..be7ed9c451 100644
      fetcher = base::MakeRefCounted<WebUIBundledCodeCacheFetcher>(
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
 new file mode 100644
-index 0000000000..da0c4c4b16
+index 0000000000..f85a297172
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.cc
-@@ -0,0 +1,632 @@
+@@ -0,0 +1,754 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -16509,7 +16598,6 @@ index 0000000000..da0c4c4b16
 +#include "base/no_destructor.h"
 +#include "base/strings/stringprintf.h"
 +#include "base/synchronization/lock.h"
-+#include "base/synchronization/waitable_event.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 +#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
@@ -16715,8 +16803,168 @@ index 0000000000..da0c4c4b16
 +                        const char* metadata_json, size_t metadata_len);
 +void OnIgnitionTap(v8::Isolate* isolate, uint32_t script_id,
 +                   uint32_t bytecode_version, uint32_t bytecode_offset,
-+                   uint32_t window_id, const char* value_json,
-+                   size_t value_len);
++                   uint32_t window_id, uint64_t object_token,
++                   const char* value_json, size_t value_len);
++namespace {
++
++// Pending-dump context: set by the owning-thread task for the duration
++// of the synchronous IgnitionObserverRequestDumpToken call so
++// OnIgnitionDump (same thread) can attach the real asset outcome.
++struct PendingTokenDump {
++  bool admitted = false;
++  std::string asset_locator;
++  std::string request_id;
++};
++thread_local PendingTokenDump* t_pending_token_dump = nullptr;
++
++// Token -> owning (isolate, runner), recorded by the tap callback while
++// executing ON that runner. Bounded LRU; guarded (taps and dumps may
++// arrive on different threads).
++struct TokenRoute {
++  raw_ptr<v8::Isolate> isolate;
++  scoped_refptr<base::SequencedTaskRunner> runner;
++  uint64_t stamp;
++};
++constexpr size_t kMaxTokenRoutes = 8192;
++base::Lock g_token_routes_lock;
++std::map<uint32_t, TokenRoute>& TokenRoutes() {
++  static base::NoDestructor<std::map<uint32_t, TokenRoute>> routes;
++  return *routes;
++}
++uint64_t g_token_route_clock = 0;
++
++void RecordTokenRoute(uint32_t token, v8::Isolate* isolate,
++                      scoped_refptr<base::SequencedTaskRunner> runner) {
++  base::AutoLock lock(g_token_routes_lock);
++  auto& routes = TokenRoutes();
++  if (routes.size() >= kMaxTokenRoutes && !routes.count(token)) {
++    // Evict the stalest entry (oldest stamp).
++    uint32_t oldest = 0;
++    uint64_t best = UINT64_MAX;
++    for (const auto& [serial, route] : routes) {
++      if (route.stamp < best) {
++        best = route.stamp;
++        oldest = serial;
++      }
++    }
++    if (oldest) {
++      routes.erase(oldest);
++    }
++  }
++  TokenRoute& route = routes[token];
++  route.isolate = isolate;
++  route.runner = std::move(runner);
++  route.stamp = ++g_token_route_clock;
++}
++
++// Heap-owned request state: everything the hop needs lives HERE, never
++// on the caller's stack. Resolved exactly once under its lock; a late
++// or duplicate resolution no-ops (RR2: no stack lifetime, no waiting).
++struct TokenDumpRequest {
++  base::Lock lock;
++  bool resolved = false;
++  IgnitionBridge::TokenDumpCallback reply;
++  scoped_refptr<base::SequencedTaskRunner> reply_runner;
++  const uint64_t request_id;
++  explicit TokenDumpRequest(uint64_t id) : request_id(id) {}
++};
++using TokenDumpResolveFn =
++    base::RepeatingCallback<void(std::shared_ptr<TokenDumpRequest>, bool,
++                                 int32_t, const std::string&,
++                                 const std::string&)>;
++
++void ResolveTokenDump(std::shared_ptr<TokenDumpRequest> req, bool saved,
++                      int32_t status, const std::string& reason,
++                      const std::string& asset_locator) {
++  IgnitionBridge::TokenDumpCallback local;
++  scoped_refptr<base::SequencedTaskRunner> runner;
++  {
++    base::AutoLock lock(req->lock);
++    if (req->resolved) {
++      return;  // exactly-once: late results are dropped, never re-run
++    }
++    req->resolved = true;
++    local = std::move(req->reply);
++    runner = req->reply_runner;
++  }
++  if (!local) {
++    return;
++  }
++  const std::string rid = std::to_string(req->request_id);
++  if (runner) {
++    runner->PostTask(
++        FROM_HERE,
++        base::BindOnce([](IgnitionBridge::TokenDumpCallback cb, bool saved,
++                          int32_t status, const std::string& reason,
++                          const std::string& asset_locator,
++                          const std::string& rid) {
++                         std::move(cb).Run(saved, status, reason,
++                                           asset_locator, rid);
++                       },
++                       std::move(local), saved, status, reason,
++                       asset_locator, rid));
++  } else {
++    std::move(local).Run(saved, status, reason, asset_locator, rid);
++  }
++}
++
++void RunTokenDumpOnOwningThread(std::shared_ptr<TokenDumpRequest> req,
++                                v8::Isolate* isolate, uint64_t token,
++                                const std::string& path_json,
++                                const std::string& label,
++                                const TokenDumpResolveFn& resolve) {
++  // OWNING isolate thread. Capture/stop validation runs BEFORE any
++  // read: no script execution, no microtask drain, no user code
++  // anywhere in this path.
++  IgnitionScope* scope = ScopeFor(isolate);
++  if (!scope || scope->Stopped()) {
++    resolve.Run(req, false, 5, "capture-stopped", "");
++    return;
++  }
++  PendingTokenDump pending;
++  pending.request_id = std::to_string(req->request_id);
++  t_pending_token_dump = &pending;
++  const char* detail = nullptr;
++  const int32_t status = v8::internal::xtrace::IgnitionObserverRequestDumpToken(
++      isolate, token, path_json == "[]" ? nullptr : path_json.c_str(),
++      label.c_str(), /*window_id=*/0, &detail);
++  t_pending_token_dump = nullptr;
++  const bool saved = status == 0 && pending.admitted;
++  resolve.Run(req, saved,
++              saved ? 0
++                    : (status == 0 ? 5 /* produced but not admitted */
++                                    : status),
++              detail ? detail : "", pending.asset_locator);
++}
++
++std::string BuildTapPathJson(const std::vector<std::string>& path) {
++  // Mirror of the V8-side strict grammar: flat array of <=16 strings,
++  // each 1..128 chars, no escapes.
++  if (path.size() > 16) {
++    return std::string();
++  }
++  std::string json = "[";
++  bool first = true;
++  for (const auto& step : path) {
++    if (step.empty() || step.size() > 128 ||
++        step.find('"') != std::string::npos ||
++        step.find('\\') != std::string::npos) {
++      return std::string();
++    }
++    if (!first) {
++      json.push_back(',');
++    }
++    first = false;
++    json.push_back('"');
++    json.append(step);
++    json.push_back('"');
++  }
++  json.push_back(']');
++  return json;
++}
++
++}  // namespace
++
 +void OnIgnitionDump(v8::Isolate* isolate, const char* anchor_label,
 +                    uint32_t window_id, const char* dump_json,
 +                    size_t dump_len);
@@ -16786,32 +17034,47 @@ index 0000000000..da0c4c4b16
 +                    size_t dump_len) {
 +  // The dump is an EXPLICIT operator action, not per-event observation:
 +  // it runs on a posted task with no script activation on the stack, so
-+  // only the scope's stop state gates it (the script-scope filter was
-+  // already applied at anchor-evaluation time — the browser chose this
-+  // renderer precisely because its page scripts were in scope).
++  // only the scope's stop state gates it. S1: a pending token request
++  // (same thread, synchronous callback) receives the actual asset
++  // locator + admission so the reply reports what REALLY happened.
 +  IgnitionScope* scope = ScopeFor(isolate);
 +  if (!scope || scope->Stopped()) {
++    if (t_pending_token_dump) {
++      t_pending_token_dump->admitted = false;
++    }
 +    return;
 +  }
-+  // The blob rides the ASSET channel: quadruple accounting identical to
-+  // every other asset (sha1 dedup, retrieval status, content file).
++  const std::string label(anchor_label ? anchor_label : "unlabeled");
++  std::string asset_url = "v8-materialized-dump://" + label;
++  if (t_pending_token_dump) {
++    asset_url += "#";
++    asset_url += t_pending_token_dump->request_id;
++  }
 +  const std::string summary = base::StringPrintf(
 +      "[{\"anchor\":\"%s\",\"window_id\":\"%u\",\"bytes\":\"%zu\"}]",
-+      anchor_label ? anchor_label : "unlabeled", window_id, dump_len);
-+  const std::string asset_url = "v8-materialized-dump://" +
-+      std::string(anchor_label ? anchor_label : "unlabeled");
-+  XTraceLogger::LogAssetEvent(
++      label.c_str(), window_id, dump_len);
++  const bool admitted = XTraceLogger::LogAssetEvent(
 +      "reverse", "asset", "V8.materializedDump",
 +      String(summary.c_str()), "v8-materialized-dump",
 +      String(asset_url.c_str()),
 +      String(base::span<const char>(dump_json, dump_len)));
++  if (t_pending_token_dump) {
++    t_pending_token_dump->admitted = admitted;
++    t_pending_token_dump->asset_locator = asset_url;
++  }
 +}
 +
 +void OnIgnitionTap(v8::Isolate* isolate, uint32_t script_id,
 +                   uint32_t bytecode_version, uint32_t bytecode_offset,
-+                   uint32_t window_id, const char* value_json,
-+                   size_t value_len) {
++                   uint32_t window_id, uint64_t object_token,
++                   const char* value_json, size_t value_len) {
 +  g_tap_events_observed.fetch_add(1, std::memory_order_relaxed);
++  // S1: record the token's OWNING runner while executing on it — the
++  // token dump routes point-to-point to exactly this (isolate, runner).
++  if (object_token != 0) {
++    RecordTokenRoute(static_cast<uint32_t>(object_token), isolate,
++                     base::SequencedTaskRunner::GetCurrentDefault());
++  }
 +  IgnitionScope* scope = ScopeFor(isolate);
 +  if (!scope || scope->Stopped() || scope->stack.empty() ||
 +      !scope->stack.back().selected) {
@@ -16838,9 +17101,12 @@ index 0000000000..da0c4c4b16
 +  }
 +  // Facts only (contract §4): slot/timepoint/instance/window + the
 +  // V8-side bounded value encoding; value_role stays "unclassified" —
-+  // interpretation belongs to the analysis layer.
++  // interpretation belongs to the analysis layer. object_token is a
++  // FACT (a weak registry serial), never a dereference.
 +  XTraceLogger::LogValueTap(script_id, bytecode_version, bytecode_offset,
-+                            window_id, value_json, value_len);
++                            window_id,
++                            static_cast<uint32_t>(object_token),
++                            value_json, value_len);
 +}
 +
 +void OnIgnitionMetadata(v8::Isolate* isolate, uint32_t script_id,
@@ -17015,117 +17281,62 @@ index 0000000000..da0c4c4b16
 +  return g_tap_events_observed.load(std::memory_order_relaxed);
 +}
 +
-+void RequestDumpFromExpressionImpl(const std::string& expression,
-+                                    const std::string& label,
-+                                    uint32_t window_id, bool* accepted,
-+                                    std::string* reason);
++void IgnitionBridge::RequestDumpToken(uint64_t token,
++                                      const std::vector<std::string>& path,
++                                      const std::string& label,
++                                      TokenDumpCallback callback) {
++  static std::atomic<uint64_t> g_next_request_id{1};
++  auto request = std::make_shared<TokenDumpRequest>(
++      g_next_request_id.fetch_add(1, std::memory_order_relaxed));
++  request->reply = std::move(callback);
++  request->reply_runner = base::SequencedTaskRunner::GetCurrentDefault();
++  const TokenDumpResolveFn resolve = base::BindRepeating(&ResolveTokenDump);
 +
-+void IgnitionBridge::RequestDumpFromExpression(
-+    const std::string& expression, const std::string& label,
-+    uint32_t window_id, bool* accepted, std::string* reason) {
-+  *accepted = false;
-+  // R4: V8 entry is only legal on the isolate-owning thread — hop there
-+  // when the control dispatch arrives elsewhere (mojo sequence).
-+  v8::Isolate* anchor_isolate;
++  // Point-to-point routing: the token's runner is whatever thread the
++  // registering tap executed on. Unknown token => reject WITHOUT any
++  // V8 entry or posting (no broadcast, no wrong-isolate execution).
 +  scoped_refptr<base::SequencedTaskRunner> runner;
++  raw_ptr<v8::Isolate> isolate = nullptr;
 +  {
-+    base::AutoLock lock(AnchorLock());
-+    anchor_isolate = Anchor().isolate;
-+    runner = Anchor().runner;
-+  }
-+  if (runner && !runner->RunsTasksInCurrentSequence()) {
-+    base::WaitableEvent done(base::WaitableEvent::ResetPolicy::MANUAL,
-+                             base::WaitableEvent::InitialState::NOT_SIGNALED);
-+    bool inner_accepted = false;
-+    std::string inner_reason = "hop-failed";
-+    bool posted = runner->PostTask(
-+        FROM_HERE,
-+        base::BindOnce(
-+            [](const std::string& expression, const std::string& label,
-+               uint32_t window_id, bool* accepted, std::string* reason,
-+               base::WaitableEvent* done) {
-+              RequestDumpFromExpressionImpl(expression, label, window_id,
-+                                            accepted, reason);
-+              done->Signal();
-+            },
-+            expression, label, window_id, &inner_accepted, &inner_reason,
-+            &done));
-+    if (!posted || !done.TimedWait(base::Seconds(10))) {
-+      *reason = "anchor-thread-hop-timeout";
-+      return;
++    base::AutoLock lock(g_token_routes_lock);
++    auto it = TokenRoutes().find(static_cast<uint32_t>(token));
++    if (it != TokenRoutes().end()) {
++      isolate = it->second.isolate;
++      runner = it->second.runner;
 +    }
-+    *accepted = inner_accepted;
-+    *reason = inner_reason;
++  }
++  if (!isolate || !runner) {
++    resolve.Run(request, /*saved=*/false, /*status=*/1,
++                "unknown-token (no tap registered this token in this "
++                "process)",
++                "");
 +    return;
 +  }
-+  RequestDumpFromExpressionImpl(expression, label, window_id, accepted,
-+                                reason);
++  const std::string path_json = BuildTapPathJson(path);
++  if (path_json.empty() && !path.empty()) {
++    resolve.Run(request, /*saved=*/false, /*status=*/3,
++                "path must be <=16 steps of 1..128 chars without quotes",
++                "");
++    return;
++  }
++  const bool posted = runner->PostTask(
++      FROM_HERE,
++      base::BindOnce(&RunTokenDumpOnOwningThread, request, isolate, token,
++                     path_json, label, resolve));
++  if (!posted) {
++    resolve.Run(request, /*saved=*/false, /*status=*/5,
++                "owning-runner-unavailable", "");
++  }
 +}
 +
-+void RequestDumpFromExpressionImpl(
-+    const std::string& expression, const std::string& label,
-+    uint32_t window_id, bool* accepted, std::string* reason) {
-+  v8::Isolate* isolate;
-+  v8::Global<v8::Context>* context_slot;
-+  {
-+    base::AutoLock lock(AnchorLock());
-+    isolate = Anchor().isolate;
-+    context_slot = &Anchor().context;
-+  }
-+  if (!isolate) {
-+    *reason = "no-anchor-isolate";
-+    return;
-+  }
-+  v8::Isolate::Scope isolate_scope(isolate);
-+  v8::HandleScope scope(isolate);
-+  v8::Local<v8::Context> context;
-+  if (!context_slot->IsEmpty()) {
-+    context = context_slot->Get(isolate);
-+  }
-+  if (context.IsEmpty()) {
-+    context = isolate->GetCurrentContext();
-+  }
-+  if (context.IsEmpty()) {
-+    *reason = "no-activation-context";
-+    return;
-+  }
-+  v8::Context::Scope context_scope(context);
-+  v8::Local<v8::String> source;
-+  if (!v8::String::NewFromUtf8(isolate, expression.c_str(),
-+                               v8::NewStringType::kNormal).ToLocal(&source)) {
-+    *reason = "source-alloc";
-+    return;
-+  }
-+  v8::Local<v8::Script> script;
-+  if (!v8::Script::Compile(context, source).ToLocal(&script)) {
-+    *reason = "compile-failed";
-+    return;
-+  }
-+  // R7: the classic embedder pattern for running script OUTSIDE a
-+  // blink-managed execution scope — a draining MicrotasksScope so the
-+  // CallDepthScope microtask DCHECK holds (the bare posted-task Run
-+  // tripped api-inl CallDepthScope without one).
-+  v8::MicrotasksScope microtasks(isolate,
-+                                 context->GetMicrotaskQueue(),
-+                                 v8::MicrotasksScope::kRunMicrotasks);
-+  v8::TryCatch try_catch(isolate);
-+  v8::Local<v8::Value> result;
-+  if (!script->Run(context).ToLocal(&result)) {
-+    *reason = try_catch.HasCaught() ? "eval-threw" : "eval-failed";
-+    return;
-+  }
-+  *accepted = v8::internal::xtrace::IgnitionObserverRequestDump(
-+      isolate, result, label.c_str(), window_id);
-+  *reason = *accepted ? "ok" : "no-dump-callback";
-+}
 +
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
 new file mode 100644
-index 0000000000..402badb754
+index 0000000000..9cd607ad10
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace-ignition-bridge.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,85 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -17135,7 +17346,9 @@ index 0000000000..402badb754
 +
 +#include <cstdint>
 +#include <string>
++#include <vector>
 +
++#include "base/functional/callback.h"
 +#include "third_party/blink/renderer/platform/platform_export.h"
 +
 +namespace v8 {
@@ -17181,13 +17394,28 @@ index 0000000000..402badb754
 +  // E7 evidence seam: taps observed by this process (test/drivers).
 +  static uint64_t TapEventsObserved();
 +
-+  // P55-R4: evaluate `expression` in the registering frame's main world
-+  // and dump the resulting object (bounded own-data walk). Runs on the
-+  // renderer main thread; fills accepted/reason.
-+  static void RequestDumpFromExpression(const std::string& expression,
-+                                        const std::string& label,
-+                                        uint32_t window_id, bool* accepted,
-+                                        std::string* reason);
++  // S1 (re-review RR1): token-rooted dump — the ONLY dump root. The
++  // expression-evaluation path is DELETED. Fully asynchronous and
++  // heap-owned: the request resolves EXACTLY once wherever its token
++  // lives (the tap that registered the token recorded the owning
++  // runner); no call-stack locals are captured across the hop, no
++  // blocking wait exists, late tasks see the capture-stopped state and
++  // exit. The reply carries the actual outcome: `saved` reflects the
++  // walker running AND the asset event being admitted; `asset_locator`
++  // names the manifest asset; `request_id` identifies this request.
++  // Status codes mirror the V8 boundary: 0 saved | 1 unknown-token |
++  // 2 token-collected | 3 bad-path | 4 rejected-root | 5 stopped (also
++  // no-dump-callback / not-admitted).
++  using TokenDumpCallback =
++      base::OnceCallback<void(bool saved, int32_t status,
++                              const std::string& reason,
++                              const std::string& asset_locator,
++                              const std::string& request_id)>;
++  static void RequestDumpToken(uint64_t token,
++                               const std::vector<std::string>& path,
++                               const std::string& label,
++                               TokenDumpCallback callback);
++
 +  static void OnActivationEnd();
 +};
 +
@@ -17196,10 +17424,10 @@ index 0000000000..402badb754
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_XTRACE_XTRACE_IGNITION_BRIDGE_H_
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
 new file mode 100644
-index 0000000000..cd3c07c671
+index 0000000000..4ba4b8374a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.cc
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,97 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -17268,19 +17496,22 @@ index 0000000000..cd3c07c671
 +  std::move(callback).Run(true /* distributed */);
 +}
 +
-+void XTraceControlImpl::DumpAnchor(
-+    const std::string& anchor_expression, const std::string& anchor_label,
-+    uint32_t window_id, DumpAnchorCallback callback) {
-+  // P55-R4: the renderer owns the page objects — evaluate the anchor
-+  // expression in the MAIN WORLD of the frame this control endpoint's
-+  // process serves, then invoke the engine's bounded dump. Evaluation
-+  // happens on the renderer main thread via the script state of the
-+  // frame that registered this endpoint.
-+  bool accepted = false;
-+  std::string reason = "no-frame";
-+  xtrace::IgnitionBridge::RequestDumpFromExpression(
-+      anchor_expression, anchor_label, window_id, &accepted, &reason);
-+  std::move(callback).Run(accepted, reason);
++void XTraceControlImpl::DumpToken(
++    uint64_t token, const std::vector<std::string>& path,
++    const std::string& label, DumpTokenCallback callback) {
++  // S1: point-to-point token dump, fully asynchronous — the bridge owns
++  // the request on the heap and resolves exactly once on the token's
++  // owning thread. This mojo sequence NEVER blocks and never touches V8.
++  xtrace::IgnitionBridge::RequestDumpToken(
++      token, path, label,
++      base::BindOnce(
++          [](DumpTokenCallback cb, bool saved, int32_t status,
++             const std::string& reason, const std::string& asset_locator,
++             const std::string& request_id) {
++            std::move(cb).Run(saved, status, reason, asset_locator,
++                             request_id);
++          },
++          std::move(callback)));
 +}
 +
 +void XTraceControlImpl::StopCapture(const std::string& capture_id,
@@ -17296,7 +17527,7 @@ index 0000000000..cd3c07c671
 +}  // namespace blink::xtrace
 diff --git a/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
 new file mode 100644
-index 0000000000..6f6932efa6
+index 0000000000..44b4379d5d
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/xtrace/xtrace_control_impl.h
 @@ -0,0 +1,52 @@
@@ -17329,9 +17560,9 @@ index 0000000000..6f6932efa6
 +  explicit XTraceControlImpl(
 +      mojo::PendingReceiver<blink::mojom::XTraceControl> receiver);
 +
-+  void DumpAnchor(const std::string& anchor_expression,
-+                  const std::string& anchor_label, uint32_t window_id,
-+                  DumpAnchorCallback callback) override;
++  void DumpToken(uint64_t token, const std::vector<std::string>& path,
++                 const std::string& label,
++                 DumpTokenCallback callback) override;
 +  void StopCapture(const std::string& capture_id,
 +                   uint32_t deadline_ms,
 +                   StopCaptureCallback callback) override;
