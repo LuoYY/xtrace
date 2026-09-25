@@ -127,7 +127,7 @@ def load_metadata_assets(trace: pathlib.Path):
 def t3(trace: pathlib.Path) -> dict:
     meta = load_metadata_assets(trace)
     per_instance = defaultdict(lambda: {
-        "named": 0, "keyed": 0, "offsets_named": set()})
+        "named": 0, "keyed": 0, "offsets_named": set(), "events": []})
     for event in load_events(trace):
         ign = event.get("ignition")
         if not ign:
@@ -138,6 +138,7 @@ def t3(trace: pathlib.Path) -> dict:
         if opcode in NAMED_OPCODES:
             inst["named"] += 1
             inst["offsets_named"].add(ign.get("bytecode_offset"))
+            inst["events"].append(ign.get("bytecode_offset"))
         elif opcode in KEYED_OPCODES:
             inst["keyed"] += 1
 
@@ -156,23 +157,51 @@ def t3(trace: pathlib.Path) -> dict:
             unproven_no_meta["<instance-without-metadata>"] += inst["named"]
             continue
         with_meta += 1
-        if inst["named"] > 0:
-            for const in blob.get("constants", []):
-                if "s" in const:
+        pool_indices = blob["instructions"].get("pool_indices")
+        if pool_indices and inst["named"] > 0:
+            # R4+R5: with per-instruction pool indices, NAMED-READ
+            # instructions resolve their key operand EXACTLY — offset
+            # -> pool_indices[offset] -> constants[idx]. This is a
+            # READ-proven entry; unreferenced pool strings stay
+            # candidates.
+            offsets_by_pos = {str(off): i for i, off in enumerate(
+                blob["instructions"]["offsets"])}
+            consts = blob.get("constants", [])
+            resolved_keys = set()
+            for event in inst.get("events", []):
+                pos = offsets_by_pos.get(str(event))
+                if pos is None:
+                    continue
+                idx = int(pool_indices[pos])
+                if 0 <= idx < len(consts) and "s" in consts[idx]:
+                    resolved_keys.add(consts[idx]["s"])
+            for key in resolved_keys:
+                candidates.append({
+                    "key": key,
+                    "script_id": int(script),
+                    "bytecode_version": int(version),
+                    "named_reads_on_instance": inst["named"],
+                    "classification": classify_key(key),
+                    "grade_override": "proven-read",
+                })
+            for const in consts:
+                if "s" in const and const["s"] not in resolved_keys:
                     candidates.append({
                         "key": const["s"],
                         "script_id": int(script),
                         "bytecode_version": int(version),
-                        "named_reads_on_instance": inst["named"],
+                        "named_reads_on_instance": 0,
                         "classification": classify_key(const["s"]),
                     })
         if inst["keyed"]:
             unproven_keyed[f"<keyed:{script}/{version}>"] += inst["keyed"]
 
-    read_list = ([{**e, "grade": "candidate-pool",
-                   "note": "pool membership on a reading instance; "
-                           "per-event key resolution needs D1 operand "
-                           "indices (R4)"}
+    read_list = ([{**{k: v for k, v in e.items()
+                        if k != "grade_override"},
+                   "grade": e.get("grade_override", "candidate-pool"),
+                   **({} if e.get("grade_override")
+                      else {"note": "pool membership only; per-event "
+                                    "resolution needs D1 pool_indices"})}
                   for e in sorted(candidates,
                                   key=lambda e: -e["named_reads_on_instance"])] +
                  [{"key": k, "reads": v, "grade": "unproven-keyed",

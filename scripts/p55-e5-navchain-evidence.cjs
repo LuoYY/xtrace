@@ -16,8 +16,45 @@ const exe = path.join(root, 'chromium/src/out/XTraceIntegration/ChromiumX.app/Co
 const runDir = fs.mkdtempSync(path.join(root, 'chromium/src/out/XTraceIntegration/validation', 'p55-e5-'));
 const trace = path.join(runDir, 'trace.ndjson');
 
-const source = `import importlib.util, pathlib, socketserver\np = pathlib.Path(${JSON.stringify(path.join(__dirname, 'serve_test_page.py'))})\nspec = importlib.util.spec_from_file_location('s', p)\nm = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(m)\nwith socketserver.TCPServer(('127.0.0.1', 0), m.make_test_page_handler(p.parent.parent / 'test-pages')) as server:\n print(server.server_address[1], flush=True)\n server.serve_forever()\n`;
-const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe', 'ignore'] });
+// R5-b: the PRIMARY oracle is a self-owned echo server that records the
+// Cookie header of every request it actually receives — independent of
+// any engine hook. The set->get chain stays as the renderer-side
+// AUXILIARY evidence (derived grade), never as the request anchor.
+const serverSource = `
+import json, pathlib, socketserver
+from http.server import SimpleHTTPRequestHandler
+
+PAGES = pathlib.Path(${JSON.stringify(path.join(__dirname, '..', 'test-pages'))})
+LOG = pathlib.Path(${JSON.stringify('__ECHO_LOG__')})
+NL = chr(10)
+
+class EchoHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        with LOG.open('a') as f:
+            f.write(json.dumps({'path': self.path,
+                                'cookie': self.headers.get('Cookie')}) + NL)
+        req_path = self.path.split('?')[0]
+        if req_path.startswith('/p55/'):
+            self.directory = str(PAGES)
+            self.path = req_path
+        else:
+            self.directory = str(PAGES.parent)
+        super().do_GET()
+    def log_message(self, *a):
+        pass
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+
+with Server(('127.0.0.1', 0), EchoHandler) as server:
+    print(server.server_address[1], flush=True)
+    server.serve_forever()
+`;
+const echoLog = path.join(runDir, 'echo-log.ndjson');
+const server = spawn('python3', ['-u', '-c',
+  serverSource.replace('__ECHO_LOG__', echoLog)],
+  { stdio: ['ignore', 'pipe', 'pipe'] });
+server.stderr.on('data', () => {});  // keep the pipe drained
 (async () => {
   const port = await new Promise(r => { let t = ''; server.stdout.on('data', c => { t += c; if (t.includes('\n')) r(Number(t.trim())); }); });
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('XTRACE_')));
@@ -96,11 +133,25 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
   assert(stage2Get.length >= 1,
     'stage-2 read did not observe the anchor value (same-value chain broken)');
 
+  // --- PRIMARY ORACLE: the echo server's own record of the Cookie
+  // header on the stage-2 request. Three-way equality: renderer set ==
+  // echo-received header == stage-2 read; all three on one nav_chain.
+  const echoRows = fs.readFileSync(echoLog, 'utf8').trim().split('\n')
+    .filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return {}; } });
+  const stage2Reqs = echoRows.filter(r => (r.path || '').includes('stage=2'));
+  assert(stage2Reqs.length >= 1,
+    'echo oracle saw no stage-2 request: ' + JSON.stringify(echoRows.slice(0, 3)));
+  const echoCookie = (stage2Reqs[0].cookie || '');
+  const m2 = echoCookie.match(/xtrace_nav=([a-z0-9-]+)/);
+  assert(m2 && m2[1] === anchor,
+    `echo-oracle anchor mismatch: sent ${anchor}, header had ${echoCookie}`);
   fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify({
     ...report, nav_chain: chains, anchor,
+    echo_cookie_header: echoCookie,
     stage2_reads: stage2Get.length }, null, 2));
   console.log(JSON.stringify({ terminal: report.terminal, chains: chains.length,
-    anchor, stage2_same_value_reads: stage2Get.length, verdict: 'pass' }));
+    anchor, echo_match: m2 && m2[1] === anchor,
+    stage2_same_value_reads: stage2Get.length, verdict: 'pass' }));
   console.log('P55-E5 NAV-CHAIN EVIDENCE: PASS');
   console.log('evidence: ' + runDir);
 })().catch(e => { console.error('P55-E5 NAV-CHAIN EVIDENCE: FAIL —', e.message); process.exit(1); });

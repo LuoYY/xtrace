@@ -9795,10 +9795,10 @@ index 613869ff..275da77f 100644
  
 diff --git a/src/interpreter/xtrace-ignition-observer.cc b/src/interpreter/xtrace-ignition-observer.cc
 new file mode 100644
-index 00000000..1eaa390c
+index 00000000..3aad6c8e
 --- /dev/null
 +++ b/src/interpreter/xtrace-ignition-observer.cc
-@@ -0,0 +1,1402 @@
+@@ -0,0 +1,1418 @@
 +// Copyright 2026 The XTrace Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in Chromium's LICENSE file.
@@ -10654,6 +10654,11 @@ index 00000000..1eaa390c
 +  out.append(",\"instructions\":{\"count\":");
 +  interpreter::BytecodeArrayIterator iterator(array);
 +  std::string offsets, opcodes, operands, register_operands;
++  // R4 (chief review F5): the actual CONSTANT-POOL INDEX operand of
++  // every instruction — this is what makes per-event key resolution
++  // possible (T3 joins event offset -> this table -> pool entry).
++  // -1 = the instruction has no constant-pool operand.
++  std::string pool_indices;
 +  size_t count = 0;
 +  char num[32];
 +  for (; !iterator.done(); iterator.Advance()) {
@@ -10663,6 +10668,7 @@ index 00000000..1eaa390c
 +      opcodes.push_back(',');
 +      operands.push_back(',');
 +      register_operands.push_back(',');
++      pool_indices.push_back(',');
 +    }
 +    snprintf(num, sizeof(num), "%u",
 +             static_cast<unsigned>(iterator.current_offset()));
@@ -10672,17 +10678,24 @@ index 00000000..1eaa390c
 +    const int operand_count =
 +        interpreter::Bytecodes::NumberOfOperands(bytecode);
 +    int register_count = 0;
++    int pool_index = -1;
 +    for (int i = 0; i < operand_count; i++) {
 +      const interpreter::OperandType type =
 +          interpreter::Bytecodes::GetOperandType(bytecode, i);
 +      if (interpreter::Bytecodes::IsRegisterOperandType(type)) {
 +        register_count++;
++      } else if (type ==
++                 interpreter::OperandType::kConstantPoolIndex) {
++        pool_index = static_cast<int>(
++            iterator.GetConstantPoolIndexOperand(i));
 +      }
 +    }
 +    snprintf(num, sizeof(num), "%d", operand_count);
 +    operands.append(num);
 +    snprintf(num, sizeof(num), "%d", register_count);
 +    register_operands.append(num);
++    snprintf(num, sizeof(num), "%d", pool_index);
++    pool_indices.append(num);
 +    count++;
 +  }
 +  out.append(std::to_string(count));
@@ -10691,6 +10704,9 @@ index 00000000..1eaa390c
 +  out.append(",\"operands\":[").append(operands).append("]");
 +  out.append(",\"register_operands\":[")
 +      .append(register_operands)
++      .append("]");
++  out.append(",\"pool_indices\":[")
++      .append(pool_indices)
 +      .append("]}");
 +
 +  // Constant pool: bounded safe entries. Scalars recorded; strings up to

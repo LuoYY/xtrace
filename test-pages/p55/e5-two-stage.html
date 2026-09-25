@@ -10,15 +10,18 @@
   if (stage === '1') {
     out.stage = 1;
     const anchor = 'e5-anchor-' + Math.random().toString(36).slice(2, 10);
+    // R5-b: NO read-back on stage 1 — the set->get evidence channel is
+    // the AUXILIARY link; the primary oracle is the echo server's
+    // record of the actual Cookie header on the stage-2 request.
     document.cookie = 'xtrace_nav=' + anchor + '; path=/';
     out.anchor = anchor;
-    out.wroteCookie = document.cookie.indexOf(anchor) !== -1;
     out.result = 'ok';
     document.getElementById('result').textContent = JSON.stringify(out);
     // Same-frame navigation to stage 2 (a reload would keep ?stage=1).
     setTimeout(() => { location.href = location.pathname + '?stage=2'; }, 100);
   } else {
     out.stage = 2;
+    // Single read, reported for the auxiliary channel only.
     out.cookieSeen = document.cookie.indexOf('xtrace_nav=') !== -1;
     out.result = 'ok';
     document.getElementById('result').textContent = JSON.stringify(out);

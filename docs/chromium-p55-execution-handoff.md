@@ -227,6 +227,15 @@ D1位置：`xtrace-ignition-observer.cc:743–929`、bridge `:247–280`。metad
 
 **R5-a（T3/T7 + nav_chain）**——反例 2/2 转绿：proven-pool 等级删除（池成员=candidate-pool，逐条注明待 R4 operand 索引）；T7 站点字典删除（family 需密度+随机路径 bundle URL 才 observed，仅密度 hypothesis，空 trace/普通负载 unresolved；mode 只认本 capture 状态码；cookie 只从本 capture 事件观察；语料 manifest 仅作 bundle 出处）；nav_chain 迁入 manifest.identity（对象形 frames[]+nav_chain[]），validator 对象形校验（后继相异+字段，legacy 兼容）；E5/E7 迁移后重跑 PASS（并当场抓到 manifest 括号数错误）。
 
+### 8.6 R4-b+R5-b 执行记录（2026-09-25，工程师）
+
+**R4-a（D1 operand/常量池索引）**：instructions 表新增 `pool_indices[]`（每指令的常量池操作数索引，无则 -1）；T3 逐事件 offset→pool_indices→constants 精确解析——`proven-read` 等级落地（事件 offset 精确定位到被读常量），未引用常量保持 candidate-pool。d8 实测：单事件解析出 `realKey` 为 proven-read、decoy 保持候选。
+
+**R4-b（chrome dump 锦点）**：`XTrace.requestDump` 命令面（pdl+protocol_config+handler）→ 控制器扇出（**首个接受者胜**，拒绝需全员拒绝后才报失败——页面 renderer 往往最晚回复）→ renderer `DumpAnchor`（mojom）→ 桥 `RequestDumpFromExpression`。关键工程点：锚点三元组（isolate/context/owning-runner）**原子配对**写入（两个写入线程绝不能混搭 isolate A + runner B，否则 isolate.cc 线程 DCHECK 直接崩）；控制分发线程与 isolate 线程不同时先投递后等待。
+**边界（如实）**：`Script::Run` 在裸投递任务里触发 blink 微任务域 DCHECK（api-inl CallDepthScope）——页内表达式求值必须走 blink ScriptController 的脚本执行机制，不能用裸 V8 API。R4-b 的命令面/扇出/锚点/线程跳转全部就位且编译通过，求值机制的最后一步（ScriptController 路径）为后续工作，requestDump 端到端未绿，不冒充完成。d8 级 dump（引擎 walker）不受影响，全部绿。
+
+**R5-b（echo 主 oracle）**：E5 驱动改为**三级验证**——renderer cookie.set 值 == **echo 服务实际收到的 Cookie 头**（自有 SimpleHTTPRequestHandler 记录，独立于任何引擎钩点）== 二阶段 cookie.get 值，三者经 nav_chain 同链；fixture 移除 stage-1 读回（set→get 降级为辅助通道，不再充当请求锚点）。PASS（echo_match: true）。
+
 R1/R3的可独立模块允许不同工程师分工，编译仍只有一个协调者。R4元数据与R5分析输入先定接口，不能分析器继续猜缺字段；R6要在测量工具修好后执行。网络正式观测点和budget语义先提设计裁决，不把实现阻塞藏到E8才说。
 
 ## 9. 本轮原始证据与完成审计
