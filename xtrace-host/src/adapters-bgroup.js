@@ -96,16 +96,26 @@ function createBGroupAdapters({ workspace, host, envs }) {
             ? Number(args.deadline_ms) : 8000;
         const stages = ['stop-requested'];
         let out;
+        // m-R3-4: the deadline timer MUST clear on the success path —
+        // a leaked 8s timer per stop dragged CLI exits and piled up.
+        let deadlineTimer = null;
         try {
           out = await Promise.race([
             h.send('XTrace.stopCapture'),
-            new Promise((_, reject) => setTimeout(() => {
-              const e = new Error('stop deadline elapsed');
-              e.code = 'STOP_DEADLINE';
-              reject(e);
-            }, deadlineMs)),
+            new Promise((_, reject) => {
+              deadlineTimer = setTimeout(() => {
+                const e = new Error('stop deadline elapsed');
+                e.code = 'STOP_DEADLINE';
+                reject(e);
+              }, deadlineMs);
+            }),
           ]);
+          clearTimeout(deadlineTimer);
+          deadlineTimer = null;
         } catch (error) {
+          if (deadlineTimer) {
+            clearTimeout(deadlineTimer);
+          }
           if (error.code === 'STOP_DEADLINE' || error.code === 'CDP_TIMEOUT') {
             stages.push('deadline-missed');
             return { action, state: 'stop-timeout', terminal: 'stop-timeout',

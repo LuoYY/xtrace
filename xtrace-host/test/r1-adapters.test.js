@@ -429,8 +429,10 @@ test('R1-1 integration: composition root — one broker, callTool, negotiated sc
     const stop = await host.callTool('jsvmp_trace', { action: 'stop' },
         { origin: 'ui', reason: 'R1 composition-root probe',
           basisHint: 'ui-direct-click' });
-    assert.ok(['complete', 'settled', 'inactive', 'stopped']
-        .includes(stop.terminal) || stop.terminal != null);
+    // D-P6-3: the REAL pair assertion (was a tautological includes ||
+    // != null) — transport complete AND a non-empty coverage axis
+    assert.equal(stop.pair.terminal, 'complete');
+    assert.ok(stop.pair.coverage, 'coverage axis present');
 
     const ledger = fs.readFileSync(host.broker.ledgerPath, 'utf8')
         .trim().split('\n').map((l) => JSON.parse(l));
@@ -497,8 +499,10 @@ test('R2-3 gate: three producers x one predicate — lossless page sums', () => 
   index.close();
 });
 
-// R2-2 anchor: stop-timeout grep coverage exists in the shipped gates
-test('R2-2 anchor: stop-timeout surfaces in shipped gates', () => {
+// m-R3-6: EXISTENCE check only — the real stop-timeout gates are the
+// CDP_TIMEOUT + dead-browser deadline unit tests in r1-core and E5 S2;
+// do NOT count this toward behavioral gate coverage.
+test('existence note (not a behavioral gate): stop-timeout strings ship', () => {
   const fs2 = require('node:fs');
   const path2 = require('node:path');
   const files = [

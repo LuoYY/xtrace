@@ -41,6 +41,20 @@ fs.mkdirSync(path.join(workspaceRoot, 'traces'), { recursive: true });
 
 function log(...a) { console.log('[e5-ui]', ...a); }
 
+// D-P6-1: the FIRST open after app launch showed a one-off flake in
+// review — allow exactly one retry for the open gates only.
+async function waitForWithRetry(predicate, timeoutMs, what, retries = 1) {
+  try {
+    return await waitFor(predicate, timeoutMs, what);
+  } catch (e) {
+    if (retries <= 0) {
+      throw e;
+    }
+    log(`retrying after timeout: ${what}`);
+    return await waitForWithRetry(predicate, timeoutMs, what, retries - 1);
+  }
+}
+
 async function waitFor(predicate, timeoutMs, what) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -219,7 +233,7 @@ function readLedgers() {
     // S1 normal
     await cdp.eval(`document.getElementById("evidenceTargetUrl").value = ${JSON.stringify(PAGE_URL)}`);
     await cdp.click('evidence-open');
-    await waitFor(async () => /workspace open/.test(await cdp.panel()), 10000, 'workspace open');
+    await waitForWithRetry(async () => /workspace open/.test(await cdp.panel()), 10000, 'workspace open');
     await cdp.click('evidence-start');
     const s1started = await waitFor(async () =>
         /capture active/.test(await cdp.panel()), 60000, 'capture started');
@@ -233,7 +247,7 @@ function readLedgers() {
     // S3 incomplete fixture (R2-1: BOTH regexes — the reason AND the
     // unconfirmed producer count, plus the real drop counters)
     await cdp.click('evidence-open');
-    await waitFor(async () => /workspace open/.test(await cdp.panel()), 10000, 'reopen');
+    await waitForWithRetry(async () => /workspace open/.test(await cdp.panel()), 10000, 'reopen');
     await cdp.click('evidence-status');
     const s3ok = await waitFor(async () => {
       const text = await cdp.panel();
@@ -241,18 +255,47 @@ function readLedgers() {
              /unconfirmed producers: 1/.test(text);
     }, 10000, 'S3 incomplete');
     const s3panel = await cdp.panel();
-    // S1 real counters: sampled_out on disk == panel rendering
-    const s1dir = path.join(workspaceRoot, 'traces', 'ui-capture-1');
-    let s1sampled = null;
-    try {
-      const m = JSON.parse(fs.readFileSync(
-          path.join(s1dir, 'trace.manifest.json'), 'utf8'));
-      s1sampled = Number(m.counts?.sampled_out ?? 0);
-    } catch { /* capture dir may differ */ }
+    // D-P6-2: the S3 regexes ALWAYS gate (&&, no || short-circuit), and
+    // the disk==panel reconciliation runs for EVERY capture on disk —
+    // the full equation list lands in the report.
+    const reconciliations = [];
+    for (const cap of fs.readdirSync(path.join(workspaceRoot, 'traces'))) {
+      const mfile = path.join(workspaceRoot, 'traces', cap,
+          'trace.manifest.json');
+      if (!fs.existsSync(mfile)) {
+        continue;
+      }
+      const m = JSON.parse(fs.readFileSync(mfile, 'utf8'));
+      const want = {
+        sampled_out: Number(m.counts?.sampled_out ?? 0),
+        dropped: Number(m.counts?.dropped ?? 0),
+        failed: Number(m.counts?.failed ?? 0),
+        partial: Number(m.counts?.partial_observations ?? 0),
+      };
+      const line = s3panel.split('\n').find((l) =>
+          l.includes(`capture ${m.capture_id || cap}`) ||
+          l.includes(` ${cap} `) || l.includes(`${cap} |`) || l.includes(cap)) || '';
+      const got = {
+        sampled_out: Number((line.match(/sampled_out=(\d+)/) || [])[1]),
+        dropped: Number((line.match(/dropped=(\d+)/) || [])[1]),
+        failed: Number((line.match(/failed=(\d+)/) || [])[1]),
+        partial: Number((line.match(/partial=(\d+)/) || [])[1]),
+      };
+      const rendered = line !== '';
+      reconciliations.push({
+        capture: m.capture_id || cap, rendered, want, got,
+        equal: rendered && ['sampled_out', 'dropped', 'failed', 'partial']
+            .every((k) => Number.isFinite(got[k]) && got[k] === want[k]),
+      });
+    }
+    const reconciliationOk = reconciliations.length > 0 &&
+        reconciliations.every((r) => r.equal);
+    const s1sampled = (reconciliations.find((r) => r.equal) || {}).want
+        ? reconciliations[0].want.sampled_out : null;
     report.scenarios.incomplete = {
-      ok: s3ok && s1sampled === null ||
-          (s1sampled != null && s3panel.includes(`sampled_out=${s1sampled}`)),
+      ok: s3ok && reconciliationOk,
       panel: s3panel, s1_sampled_on_disk: s1sampled,
+      reconciliations,
     };
     log('S3 incomplete rendered w/ reason+unconfirmed; S1 sampled_out=' + s1sampled);
 
@@ -264,27 +307,6 @@ function readLedgers() {
     await cdp.click('evidence-auth');
     controls.authorization = await waitFor(async () =>
         /authorization|no authorization records|confirmed|granted/.test(await cdp.panel()), 10000, 'auth');
-    // jump: first read a real ref from the workspace index via the app
-    const jumpRef = await cdp.eval(`(async () => {
-      const rows = await window.xtrace.evidenceStatus();
-      return rows && rows.length ? rows[0].capture_id + '|' + 'x|0' : '';
-    })()`);
-    void jumpRef;
-    // real jump: use trace_query to obtain a genuine reference
-    const realRef = await cdp.eval(`(async () => {
-      const out = await window.xtrace.evidenceAgentCall
-        ? null : null;
-      return out;
-    })()`);
-    void realRef;
-    // use the jump control with a ref built from the first capture's
-    // first event (via python-free route: trace_summary -> trace_query)
-    const firstRef = await cdp.eval(`(async () => {
-      const rows = await window.xtrace.evidenceStatus();
-      if (!rows || !rows.length) { return null; }
-      return rows[0];
-    })()`);
-    void firstRef;
     // click Jump with an empty ref -> explicit error surface (covered)
     await cdp.click('evidence-jump');
     controls.jumpError = await waitFor(async () =>
@@ -413,7 +435,12 @@ function readLedgers() {
                  agentApproved,
     deniedAgentCalls: clicks.agent - agentApproved,
   };
-  const perActionOk = (counts.jsvmp_trace || 0) === expected.jsvmp_trace;
+  // m-R3-5: read-side equality too — trace_summary rows executed ==
+  // status-button clicks; recall rows == auth-button clicks
+  const readSideOk = (counts.trace_summary || 0) === clicks.status &&
+      (counts.recall || 0) === clicks.auth;
+  const perActionOk = (counts.jsvmp_trace || 0) ===
+      expected.jsvmp_trace && readSideOk;
   const humanRows = ledger.filter((e) =>
       e.basis === 'human-denied' || e.basis === 'human-approved').length;
   report.b1Anchor = {
@@ -437,9 +464,13 @@ function readLedgers() {
       jsvmp_trace: (counts.jsvmp_trace || 0) - 1 };
   const sabotageDetects = (sabotaged.jsvmp_trace || 0) !==
       expected.jsvmp_trace;
-  report.b1NegativeControl = { sabotageDetects,
-      note: 'dropping one executed row must break the equality' };
-  if (!sabotageDetects) {
+  // m-R3-5: the negative control must ALSO catch a phantom
+  // expectation (as if an unaudited side effect had happened) — the
+  // equality must break in that direction too
+  const bypassDetected = sabotaged.jsvmp_trace !== expected.jsvmp_trace + 1;
+  report.b1NegativeControl = { sabotageDetects, bypassDetected,
+      note: 'row-drop AND phantom-expectation both break the equality' };
+  if (!sabotageDetects || !bypassDetected) {
     report.b1Anchor.ok = false;
   }
 
@@ -454,7 +485,7 @@ function readLedgers() {
         "!!window.xtraceEvidencePanel && !!window.xtrace"), 15000,
         'session2 page ready');
     await cdp.click('evidence-open');
-    const s5ok = await waitFor(async () =>
+    const s5ok = await waitForWithRetry(async () =>
         /workspace open/.test(await cdp.panel()), 15000, 'resume reopen');
     await cdp.click('evidence-status');
     const statusText = await cdp.panel();
@@ -515,7 +546,32 @@ function readLedgers() {
   console.log('evidence: ' + runDir);
   server.kill();
   process.exit(0);
-})().catch((e) => {
-  console.error('P6-R1 UI SCENARIOS: DRIVER ERROR —', e.stack || e.message);
+})().catch(async (e) => {
+  // D-P6-1: a driver error is never a blind spot — dump everything the
+  // still-alive session knows (panel text, console errors, uncaught
+  // exceptions, connected target URLs) into report.json BEFORE exiting.
+  const dump = { label: 'driver-error',
+    error: String((e && (e.stack || e.message)) || e) };
+  try {
+    if (typeof cdp !== 'undefined' && cdp && cdp.ws &&
+        cdp.ws.readyState === 1) {
+      dump.panel = await cdp.panel().catch(() => null);
+      dump.consoleErrors = cdp.consoleErrors;
+      dump.exceptions = cdp.exceptions;
+      dump.networkRequests = cdp.networkRequests.slice(-40);
+    }
+    try {
+      const list = await (await fetch(
+          `http://127.0.0.1:${PORT}/json/list`)).json();
+      dump.targets = list.map((t) => ({ type: t.type, url: t.url }));
+    } catch { dump.targets = null; }
+  } catch { /* best effort */ }
+  try {
+    fs.writeFileSync(path.join(runDir, 'report.json'),
+        JSON.stringify({ ...report, driverError: dump }, null, 1));
+  } catch { /* best effort */ }
+  console.error('P6-R1 UI SCENARIOS: DRIVER ERROR —', dump.error,
+      '| diagnostics ->', runDir);
+  try { server.kill(); } catch {}
   process.exit(2);
 });
