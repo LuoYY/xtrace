@@ -100,3 +100,15 @@ and paired closure.
   reproducible baseline, but a working checkout may carry local, un-exported
   refinements. If a case you reproduce looks thinner than expected, that gap is
   the first thing to check; see [`chromium-build.md`](chromium-build.md).
+
+## P6-R1 整改门禁（2026-09-27 新增）
+
+| 门禁 | 命令 | 需要浏览器 | 依赖 |
+| --- | --- | --- | --- |
+| 统一回归（python 381/launcher 28/host 19/GUI 216） | `bash scripts/run_tests.sh` | 否 | Python ≥3.10、npm |
+| D-P55-1 同程序等价 | `node scripts/p6-e0-dp551-equivalence.cjs` | **是**（ChromiumX） | out/XTraceIntegration |
+| analyzer v3 因果树 | `python3 scripts/p6-e0-analyzer-v3-gate.py` | 否 | 盘上 p55-e7 capture |
+| Host R1 单元门禁（B1-B6/M4/M11/组合根真机） | `npm --prefix xtrace-host test` | 一例是（真机组合根） | ChromiumX |
+| E5 五+一场景交互 + B1 审计锚点 | `node scripts/p6-e5-ui-scenarios.cjs` | **是**（Electron+ChromiumX） | xtrace-gui node_modules |
+| E6 闭环九阶段 | `node scripts/p6-e6-closed-loop.cjs` | **是** | 同上 |
+| 静态形态门禁 | `node scripts/p6-r1-static-shape.js` | 否 | — |

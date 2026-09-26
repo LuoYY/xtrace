@@ -377,3 +377,47 @@ progress JSON `p6` = `e0-e7-final-package-submitted`。**申请：按工单长�
 - `accepted-p6` **未标**。P6 的机制代码保留在树上（不 revert），整改以增量提交进行。
 - 路线图：M2 记为"机制落地 2026-09-26、验收未通过"，窗口与后续档位已在 [roadmap-milestones.md](roadmap-milestones.md) §1/§7/§8 重估。
 - 本轮缺陷类总结（写进 §7 速度基线的备注）：产品面阶段的返工密度**没有**如预测下降，但缺陷类从"V8 内存安全"变成"**接线缺失 + 夹具过小 + 钩子进产品路径**"；对策不是加人手，而是把"负控/真实夹具/组合根覆盖/源码形态核对"写进下一份工单的验收锚点（P7 起由我在工单里直接列）。
+
+---
+
+# P6-R1 整改执行记录（2026-09-27，工程师）
+
+按 §R1.7 的 R1-1…R1-13 一次推进。**全部 6 项阻塞 + 13 项重要项整改完毕**；R1.8 复审门禁清单全部亲跑绿。
+
+## R1 整改实现对照
+
+| 项 | 实现 |
+| --- | --- |
+| R1-1 组合根（B1 前提/M2） | `host.js` 整体重写：`createHost` 内建 workspace/broker/envs/index/adapters + `host.callTool`；**launch spec 单一来源** `buildLaunchSpec`（观察契约旗标；传输旗标归 launchBrowser），**env 的 activeProfile 被启动规格消费**（E6 实测 spec profile == env profile）；`resolveOrphan` 接进 GUI `evidence:resolve-orphan`。源码形态门禁（`p6-r1-static-shape.js`）：createBroker 调用点=定义+组合根+架构师 probe；`contains:()=>true`/`assertInside:(t)=>t` 桩 **0 命中** |
+| R1-2 全部入口过 Broker（B1+M8） | GUI main.js 证据面整体重写：start/stop/cancel/clear 四个副作用全部 `host.callTool('jsvmp_trace', …)`；status/jump/auth-records/capabilities 走 read-evidence 档（**granted 行落账**）。E5 驱动器 B1 锚点：ledger executed/confirmed 行数与会话内工具调用一致，且**全部 confirmed 行带 basis** |
+| R1-3 人工确认面（B2+D1） | `evidence:confirmation` IPC + 面板待决队列（800ms 刷新）+ 批准/拒绝按钮 + 理由输入框（面板控件供 reason，无写死串）；审计 basis 四值（session-grant / ui-direct-click / human-approved / human-denied）；`resolveConfirmation` 调用点收敛到确认 IPC 处理器（静态门禁断言）。E5 场景 6 实测：agent 调用 → 面板待决 → 拒绝（denied-by-user + 副作用零）→ 批准（human-approved + executed） |
+| R1-4 确认生命周期（M4） | Broker 重写：待决项带 created/expires；**迟到批准→confirmation-expired 且副作用零**（注入时钟红测试）；同键并发第二个调用**明确拒绝**（duplicate-confirmation-pending）无悬挂；`cancelPending`/`cancelAllPending`（loop 看门狗超时自动 retire 自己的确认）；`onConfirmation` 回调暴露确认 id（消除双重 gate 的重复审计行——m2） |
+| R1-5 真流式+窗口契约（B3+D2+M13） | `evidence-index.scanEvents`：分块 readSync + 行组装 + 早停；谓词（api/ignition/bindings/param）**下推进扫描**；返回 scanned_events/matched/total_events/window_complete/next_cursor；游标语义=含端点重访（**分页行数累加==文件真值**）。A 组全部事件级工具带窗口信封 + 256KiB 字节上界 + truncated 披露。**真实 capture 门禁**：`p55-e7-ERduFv`（26,539 事件、ignition 首条在第 7,676 行）分页累加==13,444、bindings==592（修复前 0） |
+| R1-6 切片健壮性（B4+M11） | `bound()` 结构化收缩（数组减半→整删→plain-cut 信封→最小信封，**绝不字符串切割后补引号**），dropped_fields 披露，`minimalEnvelopeBytes()` 导出下限；cap∈{32,64,100,128,150,200,512,4096}×三形**零异常且 bytes≤max(cap,floor)**；evidenceSlice 整体过 bound()；`relevance()` 用归一 `row.causality`（v3 对象形不再是死代码）+ `RELEVANCE_WEIGHTS` 可测权重表 + **打乱负控**（篡改权重→排序结论翻转→红）；`makeSlice` 异常上报给模型（极小预算 loop 3 案例 settle 不 reject） |
+| R1-7 证据服务去硬编码（B5+M6+m6） | 删掉 GUI 服务层硬编码文件名与双实现：jump 走 `evidence_jump` 工具（索引 `trace_file` 列，**流式定位**返回 line+byte_offset��未命中**报错**非 null）；GUI 面板加 jump 入口（引用串→行号+byte_offset 渲染）；**E6 第 7 阶段改用 `evidence_jump(citedRef)` 解析 Agent 自己的引用**（line 4996 @ 7,860,611 实测）。trace-on 命名夹具红测试：计数/producer 名单==盘上真值 |
+| R1-8 边界闸门统一（B6） | skill_read_resource/skill_get/listSkills/notes_get 全走 `workspace.assertInside`（realpath 闸门）；resource 名先行白名单（绝对路径/`..` 拒绝）。三形态红测试：**符号链接逃逸/绝对路径/`..` 全拒**，且工具层与 workspace 层结论一致 |
+| R1-9 能力面接通（M1+M5） | `host.toolSchemas()` 输出带协商后 state/reason；**不可用工具不进模型工具表**（进能力清单）；GUI 面板 Capabilities 按钮显示三态计数+缺口文案；四项指纹依赖 env 工具注册为 unavailable-with-reason（`unavailableReason` 无 available 函数时即权威不可用——negotiate 修复）。组合根集成实测：非增强 caps 下增强工具全 unavailable |
+| R1-10 clear/activeProfile/resolveOrphan（M3/M2） | `jsvmp_trace clear` 真语义：清 Host 活动 capture 引用 + 后续 status 报 active_capture:null + 磁盘产物不动；GUI 面板 Clear 按钮。activeProfile 被 launch spec 消费（E6 stage 2 实测）；resolveOrphan 接 `evidence:resolve-orphan`（adopt-read-only 时 index.ingestCaptureDir 落地） |
+| R1-11 产品化去钩子（M7） | `dialog.showOpenDialog` 目录选择（Choose workspace…）；目标 URL 输入框；reason 输入框（stop/cancel/agent 共用）；E2E workspace 钩子仅作**标注的 harness 加速器**留在 app.js（静态门禁断言仅 app.js 含 `__xtraceE2E`）；**夹具注入移出产品 IPC**——驱动器自带本地页面服务器传 targetUrl |
+| R1-12 门禁接线与强度（M9+M10） | `run_tests.sh` 含 xtrace-host 套件（亲跑 exit 0）；E5 **两会话** console/network 断言 + **exceptionThrown 收集**（全 0）；B3 真实 capture 常设门禁；排序负控/越界负控/含端点游标正控；弱断言收紧（denial 路径改真实断言、值边界优先改权重表断言、`void deniedModel` 类死代码随测试重写消除）；夹具加大（6000 前缀 pad + 26k 真实 capture） |
+| R1-13 文档与状态账（M12+m1-m5） | progress JSON p6_detail 补 R1 全记录；本节回填；reproduce.md 登记新门禁；m1：cdp.js 删 MESSAGE_HEADER 死导出、send 支持超时（看门狗在 loop/驱动层）；m2：execute 暴露确认 id（onConfirmation），驱动器不再二次 gate；m3：cancel 文案如实（"underlying stop wait abandoned — check Status"，renderCancel）；m4：单一 Broker（组合根内建），先点 Stop 不再 TypeError；m5：env manager `launches` 字段改名为 `opens` 语义化（status 中以 opens 计数） |
+
+## R1.8 复审门禁清单（2026-09-27 亲跑，全绿）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `bash scripts/run_tests.sh`（含 host 套件） | exit 0：python 381 / launcher 28 / **xtrace-host 19** / GUI 216 |
+| `p6-e0-dp551-equivalence.cjs` | PASS（off/on deep-equal、taps>0 正控） |
+| `p6-e0-analyzer-v3-gate.py` | 6/6 GREEN |
+| `p6-e5-ui-scenarios.cjs`（含场景 6 人工确认 + B1 锚点） | **GREEN**：S1 complete+partial、S3 incomplete、S4 cancel、S5 resume、S6 deny→denied-by-user/批准→human-approved+executed；两 session console/exception/非本地请求全 0；B1 锚点 jsvmpExecutions=6/confirmed 全带 basis/humanDecisions≥2 |
+| `p6-e6-closed-loop.cjs` | **GREEN** 九阶段（含 env profile 被启动规格消费、citedRef jump line 4996、审计全过 Broker） |
+| `p6-r1-static-shape.js`（新） | GREEN（createBroker 调用点/桩 0 命中/resolveConfirmation 收敛/run_tests 接线/钩子仅 app.js） |
+| xtrace-host `npm test`（重写后的 R1 套件） | **19/19**：Broker basis/生命周期/同键并发/迟到批准、B3 双门禁（合成 6000-pad + 真实 26,539 事件分页等式）、B4 cap 扫描、B6 三形态、M6 jump、M11 权重负控、组合根真机集成 |
+| `p55-s0-red-tests.py` / `p4-review-contract.cjs` / `p5-reopen-counterexamples.cjs` | 8/8 GREEN / 21/21 / 12/12 保持 |
+| `verify_patches.py --with-dylibs` | verdict pass（R1 全程零 chromium/src 触碰） |
+| `p55-e7-valueobs-evidence.cjs` | PASS（同程序等价保持） |
+| GUI `npm test` | 216/216（新 B5 trace-on 计数门禁 + M6 jump 门禁 + 新渲染器断言） |
+
+证据目录：`validation/p6-e5-uglOjn/`（五+一场景 + B1 锚点 report.json）、`validation/p6-e6-RsCgr2/`（闭环九阶段）、`out/XTraceP55D8/validation/p55-s0-*` 等。无 chromium/src 改动（补丁栈与 accepted-p55 状态一致）。
+
+progress JSON `p6` = `p6-r1-remediation-complete`。**申请：按 §R1.7 一次复审。**

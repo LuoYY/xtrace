@@ -27,14 +27,16 @@
   }
 
   function renderStopProgress(outcome) {
-    if (!outcome || !outcome.state) {
+    // the broker tool result uses `terminal` for the settled state
+    const state = outcome && (outcome.state || outcome.terminal);
+    if (!state) {
       return "stop: unknown";
     }
     const stages = (outcome.stages || []).join(" -> ");
-    switch (outcome.state) {
+    switch (state) {
       case "complete":
       case "settled":
-        return `stop: ${outcome.state} coverage=${outcome.coverage || "unknown"} [${stages}] ${outcome.elapsed_ms || 0}ms`;
+        return `stop: ${state} coverage=${outcome.coverage || "unknown"} [${stages}] ${outcome.elapsed_ms || 0}ms`;
       case "incomplete":
         return `stop: incomplete [${stages}]`;
       case "stop-timeout":
@@ -42,7 +44,7 @@
       case "cancelled":
         return `stop: cancelled by user [${stages}]`;
       default:
-        return `stop: ${outcome.state} [${stages}]`;
+        return `stop: ${state} [${stages}]`;
     }
   }
 
@@ -64,6 +66,36 @@
     return `${event.capture_id}|${event.producer_id}|${event.producer_seq}`;
   }
 
+  function renderCancel(outcome) {
+    if (!outcome) {
+      return "cancel: no-op";
+    }
+    return `cancel: retired=${outcome.retired_confirmations ?? 0} ` +
+           `pending confirmation(s) retired; the underlying stop wait ` +
+           `is abandoned — check Status for the settled terminal`;
+  }
+
+  function renderCapabilities(caps) {
+    if (!caps || !caps.counts) {
+      return "capabilities: unknown";
+    }
+    const head = `capabilities: available=${caps.counts.available} ` +
+        `degraded=${caps.counts.degraded} unavailable=${caps.counts.unavailable}`;
+    const gaps = (caps.gaps || []).map((g) =>
+        `  ${g.name} [${g.state}] ${g.reason || ""}`);
+    return [head, ...gaps].join("\n");
+  }
+
+  function renderEvidenceJump(out) {
+    if (!out) {
+      return "jump: no result";
+    }
+    return `jump: ${out.capture_id}|${out.producer_id}|${out.producer_seq} ` +
+        `-> line ${out.line} @ byte ${out.byte_offset} ` +
+        `(${out.trace_file || "trace"}) api=${out.api || out.event?.api || "?"}`;
+  }
+
   return { renderCaptureStatus, renderStopProgress,
-           renderAuthorizationRecords, evidenceRefFromEvent };
+           renderAuthorizationRecords, evidenceRefFromEvent,
+           renderCancel, renderCapabilities, renderEvidenceJump };
 });

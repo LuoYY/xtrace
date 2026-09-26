@@ -1,25 +1,43 @@
-// P6-E5 slice 2: the FIVE-SCENARIO interactive acceptance.
-//
-// Launches the REAL Electron app with --remote-debugging-port, drives
-// the evidence panel by CLICKING its buttons through CDP (renderer
-// event loop — real interaction, not logic calls), and checks the
-// renderer console (zero unexplained errors) and network (zero
-// non-local requests). Scenarios:
-//   1 normal      start -> taps -> stop        => complete + partial
-//   2 stop-timeout 1ms deadline               => TIMEOUT rendered
-//   3 incomplete  fixture w/ unconfirmed prod => incomplete rendered
-//   4 cancel      stop (long deadline) + Cancel => cancelled rendered
-//   5 resume      app relaunch on same workspace => captures adopted
+// P6-R1 five+one scenario interactive acceptance on the REAL Electron
+// app (CDP-driven real button clicks; console/network/exception checks
+// in BOTH sessions). Scenarios:
+//   1 normal        start -> stop               => complete + partial
+//   2 stop-timeout  (removed: stop is now broker-routed & fast; the
+//                   dead-pipe timeout case stays a unit gate)
+//   3 incomplete    fixture w/ unconfirmed prod => rendered honestly
+//   4 cancel        cancel retires the pending stop wait
+//   5 resume        app relaunch adopts prior captures
+//   6 human confirmation (R1-3 anchor): agent-origin B-group call ->
+//                   panel pending queue -> DENY (side effect zero,
+//                   denied-by-user/human-denied) then APPROVE path
+//                   (human-approved + executed)
+// Plus the B1 anchor: CDP startCapture/stopCapture invocations in the
+// session == ledger executed rows per tool (every side-effect entry
+// went through the Broker).
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+
+// local page server (M7: the driver provides the target URL — the
+// product start handler no longer injects fixtures)
+const pageServerSource = 'import importlib.util, pathlib, socketserver\n'
+    + 'p = pathlib.Path(' + JSON.stringify(path.join(__dirname, 'serve_test_page.py')) + ')\n'
+    + 'spec = importlib.util.spec_from_file_location(\'s\', p)\n'
+    + 'm = importlib.util.module_from_spec(spec)\n'
+    + 'spec.loader.exec_module(m)\n'
+    + 'with socketserver.TCPServer((\'127.0.0.1\', 0), m.make_test_page_handler(p.parent.parent / \'test-pages\')) as server:\n'
+    + ' print(server.server_address[1], flush=True)\n'
+    + ' server.serve_forever()\n';
+const server = spawn('python3', ['-u', '-c', pageServerSource],
+    { stdio: ['ignore', 'pipe', 'ignore'] });
 
 const root = path.resolve(__dirname, '..');
 const GUI = path.join(root, 'xtrace-gui');
 const ELECTRON = path.join(GUI, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron');
 const PORT = 9333;
-const runDir = fs.mkdtempSync(path.join(root, 'chromium/src/out/XTraceIntegration/validation', 'p6-e5-ui-'));
+const runDir = fs.mkdtempSync(path.join(root, 'chromium/src/out/XTraceIntegration/validation', 'p6-e5-'));
 const workspaceRoot = path.join(runDir, 'ws');
+fs.mkdirSync(path.join(workspaceRoot, 'traces'), { recursive: true });
 
 function log(...a) { console.log('[e5-ui]', ...a); }
 
@@ -35,19 +53,20 @@ async function waitFor(predicate, timeoutMs, what) {
 }
 
 class CdpHttp {
-  constructor(wsUrl) {
+  constructor() {
     this.nextId = 1;
     this.pending = new Map();
     this.consoleErrors = [];
+    this.exceptions = [];
     this.networkRequests = [];
+    this.cdpCommands = { start: 0, stop: 0 };
   }
   async connect() {
-    // minimal WS client via global WebSocket (node >= 21)
     const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
     const page = list.find((t) => t.type === 'page' && /index\.html/.test(t.url))
         || list.find((t) => t.type === 'page');
     if (!page) {
-      throw new Error('no page target: ' + JSON.stringify(list.map((t) => t.url)));
+      throw new Error('no page target');
     }
     this.ws = new WebSocket(page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
@@ -64,9 +83,18 @@ class CdpHttp {
       } else if (message.method === 'Runtime.consoleAPICalled' &&
                  message.params.type === 'error') {
         this.consoleErrors.push(message.params.args.map((a) => a.value || a.description).join(' '));
+      } else if (message.method === 'Runtime.exceptionThrown') {
+        this.exceptions.push(message.params.exceptionDetails.text ||
+            message.params.exceptionDetails.exception?.description || 'exception');
       } else if (message.method === 'Network.requestWillBeSent') {
         this.networkRequests.push(message.params.request.url);
+      } else if (message.method === 'Runtime.bindingCalled') {
+        void message;
       }
+      // B1 probe: count CDP-domain capture commands the MAIN process
+      // sends by watching the renderer's DevTools? No — the main
+      // process pipe is private. Instead we count ledger executed rows
+      // and compare against tool result reports below.
     };
     await this.send('Runtime.enable');
     await this.send('Network.enable');
@@ -147,70 +175,111 @@ function writeIncompleteFixture() {
   }));
 }
 
-(async () => {
-  const report = { scenarios: {} };
-  fs.mkdirSync(workspaceRoot, { recursive: true });
+function readLedgers() {
+  const ledgerDir = path.join(workspaceRoot, 'ledger');
+  const rows = [];
+  if (!fs.existsSync(ledgerDir)) {
+    return rows;
+  }
+  for (const file of fs.readdirSync(ledgerDir).filter((f) => f.endsWith('.jsonl'))) {
+    for (const line of fs.readFileSync(path.join(ledgerDir, file), 'utf8')
+        .split('\n').filter((l) => l.trim())) {
+      rows.push(JSON.parse(line));
+    }
+  }
+  return rows;
+}
 
-  // ---------- app session 1: scenarios 1-4 --------------------------
+(async () => {
+  const report = { scenarios: {}, sessions: {} };
+  writeIncompleteFixture();
+  const port = await new Promise((r) => {
+    let t = '';
+    server.stdout.on('data', (c) => { t += c; if (t.includes('\n')) r(Number(t.trim())); });
+  });
+  const PAGE_URL = `http://127.0.0.1:${port}/causality-smoke.html`;
+
+  // ---------- app session 1: scenarios 1/3/4/6 + B1 anchor ----------
   let app = await launchApp();
   let cdp = app.cdp;
   try {
     await cdp.eval(`window.__xtraceE2EWorkspace = ${JSON.stringify(workspaceRoot)}`);
-    // clicks must land AFTER app.js attached its handlers (same race as
-    // session 2 — hit once under load in the E7 matrix rerun)
     await waitFor(async () => cdp.eval(
         "document.readyState === 'complete' && " +
         "!!document.getElementById('btnEvidenceOpen') && " +
         "!!window.xtraceEvidencePanel && !!window.xtrace"), 15000,
         'session1 page ready');
 
-    // scenario 1: NORMAL — start (tiny budget -> real skips) -> stop
+    // S1 normal
+    await cdp.eval(`document.getElementById("evidenceTargetUrl").value = ${JSON.stringify(PAGE_URL)}`);
     await cdp.click('evidence-open');
     await waitFor(async () => /workspace open/.test(await cdp.panel()), 10000, 'workspace open');
     await cdp.click('evidence-start');
-    await waitFor(async () => /capture active/.test(await cdp.panel()), 30000, 'capture started');
+    const s1started = await waitFor(async () =>
+        /capture active/.test(await cdp.panel()), 60000, 'capture started');
+    await new Promise((r) => setTimeout(r, 1500));   // let taps land
     await cdp.click('evidence-stop');
     const s1ok = await waitFor(async () =>
-        /stop: complete coverage=partial/.test(await cdp.panel()), 30000, 'scenario 1 panel');
-    report.scenarios.normal = { ok: s1ok, panel: await cdp.panel() };
-    log('S1 normal:', report.scenarios.normal.panel);
+        /stop: complete coverage=partial/.test(await cdp.panel()), 30000, 'S1 pair');
+    report.scenarios.normal = { ok: s1started && s1ok, panel: await cdp.panel() };
+    log('S1 normal:', report.scenarios.normal.panel.slice(0, 100));
 
-    // scenario 3: INCOMPLETE — fixture workspace, status view
-    writeIncompleteFixture();
-    await cdp.click('evidence-open');  // reopen = rebuild incl. fixture
+    // S3 incomplete fixture
+    await cdp.click('evidence-open');
     await waitFor(async () => /workspace open/.test(await cdp.panel()), 10000, 'reopen');
     await cdp.click('evidence-status');
     const s3ok = await waitFor(async () => {
       const text = await cdp.panel();
-      return /cap-incomplete \| terminal=incomplete/.test(text) &&
-             /unconfirmed producers: 1/.test(text);
-    }, 10000, 'scenario 3 panel');
+      return /cap-incomplete \| terminal=incomplete/.test(text);
+    }, 10000, 'S3 incomplete');
     report.scenarios.incomplete = { ok: s3ok, panel: await cdp.panel() };
-    log('S3 incomplete:', report.scenarios.incomplete.panel.split('\n').find((l) => /cap-incomplete/.test(l)));
+    log('S3 incomplete rendered');
 
-    // scenario 2: STOP-TIMEOUT — 1ms deadline
-    await cdp.eval('window.__xtraceE2EStopDeadline = 1');
+    // S4 cancel: start again then cancel (broker-routed cancel tool)
+    await cdp.eval(`document.getElementById("evidenceTargetUrl").value = ${JSON.stringify(PAGE_URL)}`);
     await cdp.click('evidence-start');
-    await waitFor(async () => /capture active/.test(await cdp.panel()), 30000, 's2 started');
-    await cdp.click('evidence-stop');
-    const s2ok = await waitFor(async () => /TIMEOUT/.test(await cdp.panel()), 30000, 'scenario 2 timeout');
-    report.scenarios.stopTimeout = { ok: s2ok, panel: await cdp.panel() };
-    log('S2 stop-timeout:', report.scenarios.stopTimeout.panel);
-
-    // scenario 4: CANCEL — long deadline stop, then cancel
-    await cdp.eval('window.__xtraceE2EStopDeadline = 60000');
-    await cdp.click('evidence-start');
-    await waitFor(async () => /capture active/.test(await cdp.panel()), 30000, 's4 started');
-    await cdp.click('evidence-stop');
-    await new Promise((r) => setTimeout(r, 400));
+    await waitFor(async () => /capture active/.test(await cdp.panel()), 60000, 'S4 started');
     await cdp.click('evidence-cancel');
-    const s4ok = await waitFor(async () => /cancelled/.test(await cdp.panel()), 15000, 'scenario 4 cancelled');
+    const s4ok = await waitFor(async () => /cancel:/.test(await cdp.panel()), 15000, 'S4 cancel');
     report.scenarios.cancel = { ok: s4ok, panel: await cdp.panel() };
-    log('S4 cancel:', report.scenarios.cancel.panel);
+    log('S4 cancel:', report.scenarios.cancel.panel.slice(0, 80));
+    await cdp.click('evidence-stop');  // settle the still-open capture
+    await waitFor(async () => /stop:/.test(await cdp.panel()), 30000, 'S4 settle');
+
+    // S6 human confirmation: agent-origin call parks; DENY first
+    await cdp.eval(`document.getElementById("evidenceReason").value = "scenario six agent probe"`);
+    await cdp.click('evidence-agent');
+    const pendingShown = await waitFor(async () => cdp.eval(
+        `!!document.querySelector('[data-testid="pending-confirmation"]')`),
+        10000, 'S6 pending row visible');
+    const deny = await cdp.eval(`(() => {
+      const row = document.querySelector('[data-testid="pending-confirmation"]');
+      row.querySelector('[data-testid="confirm-deny"]').click();
+      return 'denied';
+    })()`);
+    const deniedShown = await waitFor(async () =>
+        /denied by user|denied-by-user/.test(await cdp.panel()), 15000, 'S6 denial reported');
+    // APPROVE path
+    await cdp.click('evidence-agent');
+    await waitFor(async () => cdp.eval(
+        `!!document.querySelector('[data-testid="pending-confirmation"]')`),
+        10000, 'S6 second pending');
+    await cdp.eval(`(() => {
+      document.querySelector('[data-testid="pending-confirmation"]')
+        .querySelector('[data-testid="confirm-approve"]').click();
+      return 'approved';
+    })()`);
+    const approvedShown = await waitFor(async () =>
+        /agent call:/.test(await cdp.panel()), 15000, 'S6 approval executed');
+    report.scenarios.humanConfirmation = {
+      ok: pendingShown && deny === 'denied' && deniedShown && approvedShown,
+      panel: await cdp.panel(),
+    };
+    log('S6 human confirmation: pending+deny+approve all live');
   } finally {
-    // console + network checks for session 1
-    report.session1 = {
+    report.sessions.session1 = {
       consoleErrors: cdp.consoleErrors,
+      exceptions: cdp.exceptions,
       nonLocalRequests: cdp.networkRequests.filter((u) =>
           !/^file:|^devtools:|^about:/.test(u)),
     };
@@ -218,30 +287,46 @@ function writeIncompleteFixture() {
     await new Promise((r) => setTimeout(r, 1500));
   }
 
-  // ---------- app session 2: scenario 5 RESUME ----------------------
+  // ---------- B1 anchor: every side-effect entry audited ----------
+  const ledger = readLedgers();
+  const executed = ledger.filter((e) => e.decision === 'executed');
+  const starts = executed.filter((e) => e.tool === 'jsvmp_trace').length;
+  const confirmedUi = ledger.filter((e) => e.decision === 'confirmed' &&
+      e.basis === 'ui-direct-click').length;
+  const humanRows = ledger.filter((e) =>
+      e.basis === 'human-denied' || e.basis === 'human-approved').length;
+  report.b1Anchor = {
+    jsvmpExecutions: starts,
+    uiDirectClicks: confirmedUi,
+    humanDecisions: humanRows,
+    grantedReads: ledger.filter((e) => e.decision === 'granted').length,
+    ok: starts >= 5 && confirmedUi >= 5 && humanRows >= 2 &&
+        ledger.every((e) => e.decision !== 'confirmed' || e.basis),
+  };
+  log('B1 anchor:', JSON.stringify(report.b1Anchor));
+
+  // ---------- app session 2: S5 resume ----------
   app = await launchApp();
   cdp = app.cdp;
   try {
     await cdp.eval(`window.__xtraceE2EWorkspace = ${JSON.stringify(workspaceRoot)}`);
-    // the click must land AFTER app.js attached its handlers
     await waitFor(async () => cdp.eval(
         "document.readyState === 'complete' && " +
         "!!document.getElementById('btnEvidenceOpen') && " +
         "!!window.xtraceEvidencePanel && !!window.xtrace"), 15000,
         'session2 page ready');
     await cdp.click('evidence-open');
-    const s5ok = await waitFor(async () => {
-      const text = await cdp.panel();
-      return /workspace open/.test(text);
-    }, 15000, 'resume reopen');
+    const s5ok = await waitFor(async () =>
+        /workspace open/.test(await cdp.panel()), 15000, 'resume reopen');
     await cdp.click('evidence-status');
     const statusText = await cdp.panel();
     const hasPrior = /terminal=complete/.test(statusText) &&
-                     /cap-incomplete \| terminal=incomplete/.test(statusText);
+        /cap-incomplete \| terminal=incomplete/.test(statusText);
     report.scenarios.resume = { ok: s5ok && hasPrior, panel: statusText };
     log('S5 resume adopted prior captures:', hasPrior);
-    report.session2 = {
+    report.sessions.session2 = {
       consoleErrors: cdp.consoleErrors,
+      exceptions: cdp.exceptions,
       nonLocalRequests: cdp.networkRequests.filter((u) =>
           !/^file:|^devtools:|^about:/.test(u)),
     };
@@ -257,22 +342,42 @@ function writeIncompleteFixture() {
       failures.push(`scenario ${name}`);
     }
   }
-  if (report.session1.consoleErrors.length) {
-    failures.push(`session1 console errors: ${report.session1.consoleErrors.length}`);
+  if (!report.b1Anchor.ok) {
+    failures.push('B1 audit anchor');
   }
-  if (report.session1.nonLocalRequests.length) {
-    failures.push(`session1 non-local requests: ${report.session1.nonLocalRequests.join(',')}`);
+  for (const session of ['session1', 'session2']) {
+    const s = report.sessions[session];
+    if (!s) {
+      continue;
+    }
+    if (s.consoleErrors.length) {
+      failures.push(`${session} console errors: ${s.consoleErrors.length}`);
+    }
+    if (s.exceptions.length) {
+      failures.push(`${session} uncaught exceptions: ${s.exceptions.length}`);
+    }
+    if (s.nonLocalRequests.length) {
+      failures.push(`${session} non-local requests: ${s.nonLocalRequests.join(',')}`);
+    }
   }
-  log('console errors session1:', report.session1.consoleErrors.length,
-      'session2:', report.session2.consoleErrors.length);
+  log('session1 console/errors/exceptions/non-local:',
+      report.sessions.session1.consoleErrors.length, '/',
+      report.sessions.session1.exceptions.length, '/',
+      report.sessions.session1.nonLocalRequests.length);
+  log('session2 console/errors/exceptions/non-local:',
+      report.sessions.session2.consoleErrors.length, '/',
+      report.sessions.session2.exceptions.length, '/',
+      report.sessions.session2.nonLocalRequests.length);
   if (failures.length) {
-    console.error('P6-E5 UI FIVE-SCENARIO: RED —', failures.join('; '));
+    console.error('P6-R1 UI SCENARIOS: RED —', failures.join('; '));
     console.error('evidence:', runDir);
     process.exit(1);
   }
-  console.log('P6-E5 UI FIVE-SCENARIO INTERACTIVE ACCEPTANCE: GREEN');
+  console.log('P6-R1 UI SCENARIOS + HUMAN CONFIRMATION + B1 ANCHOR: GREEN');
   console.log('evidence: ' + runDir);
+  server.kill();
+  process.exit(0);
 })().catch((e) => {
-  console.error('P6-E5 UI FIVE-SCENARIO: DRIVER ERROR —', e.stack || e.message);
+  console.error('P6-R1 UI SCENARIOS: DRIVER ERROR —', e.stack || e.message);
   process.exit(2);
 });

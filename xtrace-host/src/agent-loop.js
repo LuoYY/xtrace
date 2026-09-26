@@ -1,39 +1,56 @@
 'use strict';
-// P6-E4: the agent tool-call loop — cancellable, budgeted, guarded.
-//
-// The MODEL is injected (an adapter callback receiving the context and
-// returning the next tool call or a final answer); the LOOP owns the
-// frx-semantics guardrails (not weakened): context budget (slices only,
-// raw traces never), no-progress circuit breaker, per-call timeout,
-// cancellation token honored BETWEEN calls and inside pending waits.
+// P6-R1 (R1-6): the agent tool-call loop. R1 hardening:
+//   * makeSlice errors are REPORTED to the model like tool errors —
+//     the loop NEVER unwinds on a slice failure (B4).
+//   * Context accounting uses ACTUAL result bytes (M13): tool returns
+//     over budget are refused with a pointer to narrower queries, same
+//     rule as slices. Raw traces enter neither way.
+//   * Watchdog timeout cancels the broker pending confirmation (M4) so
+//     a late approval cannot fire a side effect after the loop moved on.
 
 const { createSlicer } = require('./slicer');
 
+const DEFAULT_LIMITS = {
+  max_iterations: 24,
+  context_bytes: 131072,
+  call_timeout_ms: 30000,
+  no_progress_streak: 3,
+};
+
 function createAgentLoop({ broker, tools, index, workspace, model,
-                           limits }) {
-  const lim = {
-    max_iterations: limits?.max_iterations ?? 24,
-    context_bytes: limits?.context_bytes ?? 131072,
-    call_timeout_ms: limits?.call_timeout_ms ?? 30000,
-    no_progress_streak: limits?.no_progress_streak ?? 3,
-    ...limits,
-  };
+                           limits, host }) {
+  const lim = { ...DEFAULT_LIMITS, ...(limits || {}) };
   const slicer = createSlicer({ index, budget: limits?.slice_budget });
   const byName = new Map(tools.map((t) => [t.name, t]));
 
-  /** Tool schema mapping for the model surface (name/tier/io/state). */
+  /** Tool schema mapping for the model surface (R1-9: negotiated state
+   * rides along when the host provides toolSchemas). */
   function toolSchemas() {
-    return tools.map((t) => ({
+    const base = tools.map((t) => ({
       name: t.name,
       tier: t.tier,
       input: t.input || {},
       output: t.output || 'unknown',
       state: t.state || undefined,
+      reason: t.reason || t.degradedReason || undefined,
     }));
+    if (host && typeof host.toolSchemas === 'function') {
+      // the composition root's negotiated surface wins when present
+      return host.toolSchemas();   // async at the call site
+    }
+    return base;
   }
 
-  /** ONE cancellable iteration of tool execution. Cancellation is
-   * honored before dispatch and races the timeout during execution. */
+  async function schemasForModel() {
+    if (host && typeof host.toolSchemas === 'function') {
+      return host.toolSchemas();
+    }
+    return toolSchemas();
+  }
+
+  /** ONE cancellable tool execution. Cancellation honored before
+   * dispatch; the watchdog races execution AND retires the broker
+   * pending confirmation on timeout (M4). */
   async function runToolCall(call, ctx) {
     if (ctx.cancelled) {
       throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
@@ -43,16 +60,26 @@ function createAgentLoop({ broker, tools, index, workspace, model,
       return { error: `unknown tool: ${call.name}` };
     }
     let timer = null;
+    let confirmationId = null;
     const watchdog = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(Object.assign(
-          new Error(`tool timeout: ${call.name}`),
-          { code: 'TOOL_TIMEOUT' })), lim.call_timeout_ms);
+      timer = setTimeout(() => {
+        // M4: retire our own pending confirmation so no late approval
+        // fires the side effect after we report the timeout.
+        if (confirmationId && broker.cancelPending) {
+          broker.cancelPending(confirmationId);
+        }
+        reject(Object.assign(
+            new Error(`tool timeout: ${call.name}`),
+            { code: 'TOOL_TIMEOUT' }));
+      }, lim.call_timeout_ms);
     });
     try {
       const result = await Promise.race([
-        broker.execute(tool, call.args || {}, { origin: 'agent',
-                                                reason: call.reason ||
-                                                    'agent loop tool call' }),
+        broker.execute(tool, call.args || {}, {
+          origin: 'agent',
+          reason: call.reason || 'agent loop tool call',
+          onConfirmation: (id) => { confirmationId = id; },
+        }),
         watchdog,
       ]);
       return { result };
@@ -60,18 +87,17 @@ function createAgentLoop({ broker, tools, index, workspace, model,
       if (error.code === 'CANCELLED') {
         throw error; // only cancellation unwinds the loop
       }
-      // denials, timeouts and tool failures are REPORTED to the model
-      // (the loop stays alive; the no-progress breaker decides when to
-      // stop) — frx guardrail semantics, not weakened.
+      // denials, timeouts and tool failures are REPORTED (frx guardrail
+      // semantics, not weakened); the no-progress breaker decides when
+      // to stop.
       return { error: String(error.message) };
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** The loop. The model adapter decides the next step; slices are the
-   * ONLY trace-derived context (shapes via the slicer); the budget
-   * caps total context bytes; no-progress trips the breaker. */
+  /** The loop: slices (three shapes) + tools, both byte-accounted; the
+   * model adapter decides each step. */
   async function run({ cancellation } = {}) {
     const ctx = {
       cancelled: false,
@@ -93,7 +119,7 @@ function createAgentLoop({ broker, tools, index, workspace, model,
       iteration += 1;
       const decision = await model({
         iteration,
-        tools: toolSchemas(),
+        tools: await schemasForModel(),
         slices: ctx.slices,
         last,
         budget: { used: ctx.contextBytes, max: lim.context_bytes },
@@ -104,14 +130,27 @@ function createAgentLoop({ broker, tools, index, workspace, model,
                  iterations: iteration, log: ctx.log };
       }
       if (decision.type === 'slice') {
-        // add a bounded slice (three shapes only)
-        const slice = makeSlice(decision.shape, decision.capture_id,
-                                decision.options);
+        // R1-6/B4: slice failures are REPORTED, never thrown
+        let slice;
+        try {
+          slice = makeSlice(decision.shape, decision.capture_id,
+                            decision.options);
+        } catch (error) {
+          ctx.log.push({ iteration, type: 'slice-error',
+                         shape: decision.shape,
+                         error: String(error.message) });
+          last = { error: `slice failed: ${error.message}` };
+          noProgress += 1;
+          if (noProgress >= lim.no_progress_streak) {
+            return { status: 'no-progress', iterations: iteration,
+                     log: ctx.log };
+          }
+          continue;
+        }
         const bytes = JSON.stringify(slice).length;
         if (ctx.contextBytes + bytes > lim.context_bytes) {
           ctx.log.push({ iteration, type: 'slice-rejected',
-                         reason: 'context budget exhausted',
-                         bytes });
+                         reason: 'context budget exhausted', bytes });
           last = { error: 'context budget exhausted — query narrower slices' };
           noProgress += 1;
         } else {
@@ -120,20 +159,29 @@ function createAgentLoop({ broker, tools, index, workspace, model,
           ctx.log.push({ iteration, type: 'slice', shape: decision.shape,
                          bytes });
           last = { slice: decision.shape, bytes };
+          noProgress = 0;
         }
         continue;
       }
       if (decision.type === 'tool') {
         const outcome = await runToolCall(decision, ctx);
-        const bytes = Math.min(JSON.stringify(outcome).length, 8192);
-        ctx.contextBytes += bytes;
-        ctx.log.push({ iteration, type: 'tool', name: decision.name,
-                       ok: !outcome.error });
-        last = outcome;
-        if (outcome.error) {
+        // M13: account by ACTUAL bytes; over-budget results are refused
+        // with a narrower-query pointer (raw traces never ride along).
+        const actualBytes = outcome.error
+            ? outcome.error.length
+            : JSON.stringify(outcome.result || {}).length;
+        if (actualBytes > lim.context_bytes) {
+          ctx.log.push({ iteration, type: 'tool-result-refused',
+                         name: decision.name, bytes: actualBytes });
+          last = { error: 'tool result exceeded the context budget — ' +
+                          'narrow the query (limit/from_seq)' };
           noProgress += 1;
         } else {
-          noProgress = 0;
+          ctx.contextBytes += Math.min(actualBytes, 8192);
+          ctx.log.push({ iteration, type: 'tool', name: decision.name,
+                         ok: !outcome.error, bytes: actualBytes });
+          last = outcome;
+          noProgress = outcome.error ? noProgress + 1 : 0;
         }
         if (noProgress >= lim.no_progress_streak) {
           return { status: 'no-progress', iterations: iteration,
@@ -159,7 +207,7 @@ function createAgentLoop({ broker, tools, index, workspace, model,
     throw new Error(`unknown slice shape: ${shape}`);
   }
 
-  return { run, toolSchemas, slicer };
+  return { run, toolSchemas: schemasForModel, slicer };
 }
 
 module.exports = { createAgentLoop };

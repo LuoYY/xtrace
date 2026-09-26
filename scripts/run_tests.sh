@@ -35,7 +35,13 @@ echo "Using $($PYTHON --version) at $PYTHON"
 cd "$ROOT"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m unittest discover -s tests -v
 (
-  cd xtrace-launcher
+  # P6-R1 (M9): the Agent Host suite is part of the standing gate
+if command -v npm >/dev/null 2>&1; then
+  echo "== xtrace-host suite"
+  npm --prefix "$ROOT/xtrace-host" test || exit 1
+fi
+
+cd xtrace-launcher
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. "$PYTHON" -m unittest discover -s tests -v
 )
 npm --prefix xtrace-gui test

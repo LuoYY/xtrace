@@ -11,106 +11,178 @@ const {
 } = require("./xtraceProcess");
 const {attachAssetContent, readAssetManifest} = require("./xtraceAssets");
 const {generateReportForTrace} = require("./xtraceReport");
-// P6-E5: evidence service + host orchestration (main process only)
-const {createEvidenceService} = require("./evidenceService");
+// P6-R1: the evidence surface over the HOST COMPOSITION ROOT. There
+// is exactly one Broker (inside the host) — this file never constructs
+// one, never stubs a workspace, and every side-effect entry (start/
+// stop/cancel/clear) goes through host.callTool, i.e. through the
+// Broker with confirmation + audit (B1). Read entries ride the
+// read-evidence tier (granted rows). resolveConfirmation is called
+// ONLY from the evidence:confirmation handler below (B2/R1.6-D1).
 const {createHost} = require("../../../xtrace-host/src/host");
-const {createBroker, TIERS} = require("../../../xtrace-host/src/broker");
+const {resolveOrphan} = require("../../../xtrace-host/src/host");
+const {BASES} = require("../../../xtrace-host/src/broker");
 
 function electronAppRoot() {
   // xtrace-gui/src/main/main.js -> repo root
   return path.resolve(__dirname, "..", "..", "..");
 }
 
-const evidence = createEvidenceService({host: null});
-let evidenceHost = null;
-let evidenceBroker = null;
+let evidenceHost = null;          // the composition root (or null)
 
-ipcMain.handle("evidence:open-workspace", (_e, dir) =>
-    evidence.openWorkspace(dir));
-ipcMain.handle("evidence:capture-status", (_e, captureId) =>
-    evidence.captureStatus(captureId || undefined));
-ipcMain.handle("evidence:auth-records", () => evidence.authorizationRecords());
-ipcMain.handle("evidence:jump", (_e, ref) => evidence.evidenceJump(ref));
-ipcMain.handle("evidence:cancel", () => evidence.cancelActive());
-
-ipcMain.handle("evidence:start", async (_e, options = {}) => {
-  const root = options.workspaceRoot;
-  if (!root) {
-    throw new Error("workspaceRoot required");
+function requireHost() {
+  if (!evidenceHost || evidenceHost.closed) {
+    throw new Error("no live host — open a workspace and start a capture first");
   }
-  // close any previous hosted browser first (a second ChromiumX on the
-  // SAME profile dir would hit the singleton lock)
+  return evidenceHost;
+}
+
+// ---- read entries (Broker read tier: granted rows, no dialogs) ------
+ipcMain.handle("evidence:open-workspace", async (_e, dir) => {
   if (evidenceHost && !evidenceHost.closed) {
     try { await evidenceHost.close(); } catch {}
   }
-  global.__e5StartCount = (global.__e5StartCount || 0) + 1;
-  const traceFile = options.traceFile ||
-      path.join(root, "traces", `ui-scenario-${global.__e5StartCount}`,
-                "trace.ndjson");
-  fs.mkdirSync(path.dirname(traceFile), {recursive: true});
-  const executable = options.executable ||
-      path.join(electronAppRoot(), "chromium", "src", "out",
-          "XTraceIntegration", "ChromiumX.app/Contents/MacOS/Chromium");
+  // NOTE: the capture counter is NOT reset — every start gets a fresh
+  // trace directory, so reopening a workspace can never overwrite a
+  // prior capture's products.
   evidenceHost = await createHost({
-    executable,
-    browserArgs: [
-      `--user-data-dir=${path.join(root, "p" + global.__e5StartCount)}`,
-      "--xtrace-enable", `--xtrace-file=${traceFile}`,
-      "--xtrace-categories=reverse", "--xtrace-causality=sync",
-      "--xtrace-ignition-observer",
-      "--js-flags=--allow-natives-syntax --max-opt=0",
-    ],
-    workspaceRoot: root,
-    traceFile,
+    executable: CHROMIUM_X(),
+    workspaceRoot: dir,
+    skipBrowserLaunch: true,       // the browser launches on start
   });
-  evidenceBroker = createBroker({workspace: {dir: () => path.join(root, "ledger"),
-      root, contains: () => true, assertInside: (t) => t}});
-  const capture = await evidenceHost.send("XTrace.startCapture", {
-    categories: "reverse", mode: "ignition-precise", tier: "ignition",
-    valueObservation: {
-      scriptPattern: "",
-      windows: [{id: 0, start: 0, end: 4000000}],
-      maxTapsPerActivation: options.maxTaps ?? 5,
-      maxTapsPerWindow: options.maxTaps ?? 5,
-    },
-  });
-  const page = await evidenceHost.send("Target.createTarget", {url: "about:blank"});
-  const {sessionId} = await evidenceHost.send("Target.attachToTarget",
-      {targetId: page.targetId, flatten: true});
-  await evidenceHost.send("Runtime.enable", {}, sessionId);
-  const LOOP = `(()=>{const s=document.createElement('script');
-    s.textContent='window.__e5=(function(){function f(n){var acc=0;for(var i=0;i<n;i++){acc=(acc+i*7)%4096;}return acc;}var r={v:f(20)};return r;})();';
-    document.documentElement.appendChild(s);
-    return window.__e5;})()`;
-  await evidenceHost.send("Runtime.evaluate", {expression: LOOP,
-      returnByValue: true}, sessionId);
-  await new Promise((r) => setTimeout(r, options.settleMs ?? 1200));
-  return {state: capture.state, captureId: capture.captureId, traceFile};
+  evidenceWorkspaceRoot = evidenceHost.workspace.root;
+  return { root: evidenceHost.workspace.root,
+           captures: evidenceHost.reindex().length };
 });
 
-ipcMain.handle("evidence:stop", async (_e, options = {}) => {
-  // the UI's stop goes THROUGH the Broker (UI origin, confirmed) — the
-  // audit trail covers every execution entry, the UI included
-  const reason = options.reason || "UI scenario stop";
-  evidence.setHost(evidenceHost);
-  const tool = {
-    name: "jsvmp_trace.stop", tier: TIERS.STATEFUL_CONTROL,
-    run: async () => evidence.stopProgress(options || {}),
-  };
-  const gateResult = evidenceBroker.gate(tool.name, tool.tier,
-                                         {origin: "ui", reason});
-  const exec = evidenceBroker.execute(tool, {}, {origin: "ui", reason});
-  if (gateResult.decision === "confirmation-required") {
-    for (let i = 0; i < 200 && evidenceBroker.pendingCount() > 0; i++) {
-      await new Promise((r) => setTimeout(r, 5));
-      for (const id of evidenceBroker.pendingIds()) {
-        evidenceBroker.resolveConfirmation(id, true);
-      }
-    }
+ipcMain.handle("evidence:capture-status", (_e, captureId) =>
+    requireHost().callTool("trace_summary",
+        captureId ? { capture_id: captureId } : {}, { origin: "ui" }));
+
+ipcMain.handle("evidence:auth-records", () =>
+    requireHost().callTool("recall", { limit: 60 }, { origin: "ui" }));
+
+ipcMain.handle("evidence:jump", (_e, ref) =>
+    requireHost().callTool("evidence_jump", { ref }, { origin: "ui" }));
+
+ipcMain.handle("evidence:capabilities", async () => {
+  const caps = await requireHost().capabilities();
+  return { enhanced: caps.enhanced,
+           counts: {
+             available: caps.tools.filter((t) => t.state === "available").length,
+             degraded: caps.tools.filter((t) => t.state === "degraded").length,
+             unavailable: caps.tools.filter((t) => t.state === "unavailable").length,
+           },
+           gaps: caps.tools.filter((t) => t.state !== "available")
+               .map((t) => ({ name: t.name, state: t.state, reason: t.reason })) };
+});
+
+ipcMain.handle("evidence:pending", () => {
+  const host = requireHost();
+  return host.broker.pendingList();
+});
+
+// ---- THE confirmation handler (the ONLY resolveConfirmation caller) --
+ipcMain.handle("evidence:confirmation", (_e, { id, approved }) => {
+  const host = requireHost();
+  return host.broker.resolveConfirmation(id, Boolean(approved));
+});
+
+// ---- side-effect entries: host.callTool ONLY (B1) --------------------
+const CHROMIUM_X = () => path.join(electronAppRoot(), "chromium", "src",
+    "out", "XTraceIntegration", "ChromiumX.app/Contents/MacOS/Chromium");
+
+let evidenceStartCount = 0;
+let evidenceWorkspaceRoot = null;
+
+ipcMain.handle("evidence:start", async (_e, options = {}) => {
+  const root = options.workspaceRoot || evidenceWorkspaceRoot;
+  if (!root) {
+    throw new Error("open a workspace first");
   }
-  const out = await exec;
-  return {state: out.state, coverage: out.coverage, stages: out.stages,
-          pair: out.pair || null};
+  evidenceWorkspaceRoot = root;
+  // one hosted browser at a time (a second launch on one profile hits
+  // the ChromiumX singleton lock): retire any previous host first
+  if (evidenceHost && !evidenceHost.closed) {
+    try { await evidenceHost.close(); } catch {}
+    evidenceHost = null;
+  }
+  evidenceStartCount += 1;
+  const traceFile = options.traceFile ||
+      path.join(root, "traces", `ui-capture-${evidenceStartCount}`,
+                "trace.ndjson");
+  const {createHost: relaunch} = require("../../../xtrace-host/src/host");
+  const host = evidenceHost = await relaunch({
+    executable: CHROMIUM_X(),
+    workspaceRoot: root,
+    traceFile,
+    browserArgs: [options.targetUrl || "about:blank"],
+  });
+  // The START itself is a side effect: through the Broker. UI-origin
+  // direct click IS the confirmation (R1.6-D1), recorded as such.
+  const out = await host.callTool("jsvmp_trace",
+      { action: "start", max_taps: options.maxTaps ?? 5 },
+      { origin: "ui", reason: options.reason || "UI start capture",
+        basisHint: BASES.UI_DIRECT_CLICK });
+  return { state: out.state, captureId: out.captureId, traceFile };
+});
+
+ipcMain.handle("evidence:stop", (_e, options = {}) => {
+  const host = requireHost();
+  // UI direct click = the confirmation; reason comes from the panel's
+  // editable control (renderer passes it), never a hardcoded string.
+  return host.callTool("jsvmp_trace", { action: "stop" },
+      { origin: "ui",
+        reason: options.reason || "stop via evidence panel",
+        basisHint: BASES.UI_DIRECT_CLICK });
+});
+
+ipcMain.handle("evidence:cancel", (_e, options = {}) => {
+  const host = requireHost();
+  // cancel is a SIDE EFFECT too: the Broker-registered cancel action.
+  return host.callTool("jsvmp_trace", { action: "cancel" },
+      { origin: "ui", reason: options.reason || "cancel via evidence panel",
+        basisHint: BASES.UI_DIRECT_CLICK });
+});
+
+ipcMain.handle("evidence:clear", (_e, options = {}) =>
+    requireHost().callTool("jsvmp_trace", { action: "clear" },
+        { origin: "ui", reason: options.reason || "clear via panel",
+          basisHint: BASES.UI_DIRECT_CLICK }));
+
+// M7: a REAL directory picker — the E2E workspace hook stays only as a
+// harness accelerator and is labeled as such in the renderer.
+ipcMain.handle("evidence:choose-workspace", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory", "createDirectory"],
+    title: "Choose an XTrace evidence workspace",
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return null;
+  }
+  return result.filePaths[0];
+});
+
+// The AGENT/MCP entry through the same Broker: agent-origin stateful
+// calls NEVER self-confirm (R1.6-D1) — they park at the pending queue
+// until a human answers on the panel.
+ipcMain.handle("evidence:agent-call", (_e, { tool, args, reason }) => {
+  const host = requireHost();
+  return host.callTool(tool, args || {},
+      { origin: "agent", reason: reason || "agent-initiated call" });
+});
+
+// §5.4 restart entry: adopt-or-terminate a leftover browser.
+ipcMain.handle("evidence:resolve-orphan", (_e, { pid, traceDir }) => {
+  const host = requireHost();
+  const { resolveOrphan: decide } =
+      require("../../../xtrace-host/src/host");
+  const decision = decide({ pid, traceDir,
+      pidAlive: (p) => { try { process.kill(p, 0); return true; }
+                         catch { return false; } } });
+  if (decision.action === "adopt-read-only") {
+    host.index.ingestCaptureDir(traceDir);
+  }
+  return decision;
 });
 
 let mainWindow = null;

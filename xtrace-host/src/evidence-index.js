@@ -156,8 +156,9 @@ function createEvidenceIndex(dbPath) {
 
   // ---- queries (references ALWAYS carry capture + producer + seq) ----
   function listCaptures() {
-    return db.prepare(`SELECT capture_id, dir, terminal, coverage,
-        event_count, total_sampled_out, total_partial_observations
+    return db.prepare(`SELECT capture_id, dir, trace_file, terminal,
+        coverage, event_count, total_sampled_out,
+        total_partial_observations
         FROM captures ORDER BY indexed_ms DESC`).all();
   }
 
@@ -174,30 +175,66 @@ function createEvidenceIndex(dbPath) {
             WHERE capture_id = ?`).all(captureId);
   }
 
-  /** EVENT-LEVEL: streams the NDJSON (never the index) with an api
-   * filter; every row carries its capture + producer + seq reference. */
-  function streamEvents(captureId, { api, limit = 100 } = {}) {
+  /** EVENT-LEVEL (R1-5/D2): TRUE streaming scan of the NDJSON with the
+   * predicate PUSHED INTO the scan (never take-then-filter). Reads the
+   * file in chunks line by line, stops at maxRows/maxBytes, and returns
+   * the window contract: scanned_events / matched / total_events (from
+   * the capture row) / window_complete / next_cursor. Every row carries
+   * its capture + producer + seq reference. */
+  function scanEvents(captureId, {
+    fromSeq = null, maxRows = 100, maxBytes = 262144,
+    predicates = {},   // { api, ignition: bool, bindings: bool, param }
+  } = {}) {
     const capture = db.prepare(
-        'SELECT trace_file FROM captures WHERE capture_id = ?').get(captureId);
+        'SELECT trace_file, event_count FROM captures WHERE capture_id = ?')
+        .get(captureId);
     if (!capture) {
       throw new Error(`unknown capture: ${captureId}`);
     }
-    const out = [];
-    const text = fs.readFileSync(capture.trace_file, 'utf8');
-    for (const line of text.split('\n')) {
+    const totalEvents = Number(capture.event_count || 0);
+    const rows = [];
+    let scanned = 0;
+    let matched = 0;
+    let bytesOut = 0;
+    let windowComplete = true;
+    let nextCursor = null;
+    let stopped = false;
+    const startSeq = fromSeq == null ? -Infinity : Number(fromSeq);
+
+    const emit = (line) => {
+      scanned += 1;
       if (!line.trim()) {
-        continue;
+        return;
       }
       let event;
       try {
         event = JSON.parse(line);
       } catch {
-        continue;
+        return;
       }
-      if (api && event.api !== api) {
-        continue;
+      const seq = Number(event.producer_seq);
+      if (seq < startSeq) {
+        return;   // cursor: inclusive revisit — the boundary row is the
+                  // FIRST row of the next page, so page row-sums equal
+                  // the file truth exactly (no off-by-one skips)
       }
-      out.push({
+      if (predicates.api && event.api !== predicates.api) {
+        return;
+      }
+      if (predicates.ignition && !event.ignition) {
+        return;
+      }
+      if (predicates.bindings &&
+          !(event.channel === 'bindings' ||
+            /WebIDL\.entry/.test(String(event.api || '')))) {
+        return;
+      }
+      if (predicates.param &&
+          !JSON.stringify(event.args || {}).includes(predicates.param)) {
+        return;
+      }
+      matched += 1;
+      const row = {
         capture_id: captureId,
         producer_id: event.producer_id ?? null,
         producer_seq: event.producer_seq ?? null,
@@ -205,16 +242,62 @@ function createEvidenceIndex(dbPath) {
         phase: event.phase ?? null,
         causality: event.causality?.kind ?? event.causality_kind ?? null,
         event,
-      });
-      if (out.length >= limit) {
-        break;
+      };
+      const rowBytes = line.length;
+      if (rows.length >= maxRows || bytesOut + rowBytes > maxBytes) {
+        windowComplete = false;
+        nextCursor = seq;
+        stopped = true;   // early stop: continuation via next_cursor
+        return;
       }
+      rows.push(row);
+      bytesOut += rowBytes;
+    };
+
+    // TRUE streaming (M13): chunked readSync + manual line assembly +
+    // early stop — bounded memory, no full-file read.
+    const fd = fs.openSync(capture.trace_file, 'r');
+    try {
+      const chunkSize = 1 << 16;
+      const buffer = Buffer.allocUnsafe(chunkSize);
+      let carry = '';
+      while (!stopped) {
+        const bytesRead = fs.readSync(fd, buffer, 0, chunkSize, null);
+        if (bytesRead <= 0) {
+          break;
+        }
+        const chunk = carry + buffer.toString('utf8', 0, bytesRead);
+        let start = 0;
+        let nl;
+        while (!stopped && (nl = chunk.indexOf('\n', start)) !== -1) {
+          emit(chunk.slice(start, nl));
+          start = nl + 1;
+        }
+        carry = chunk.slice(start);
+      }
+      if (!stopped && carry.trim()) {
+        emit(carry);
+      }
+    } finally {
+      fs.closeSync(fd);
     }
-    return out;
+    return { rows, scanned_events: scanned, matched, total_events: totalEvents,
+             window_complete: windowComplete,
+             next_cursor: nextCursor, bytes: bytesOut };
+  }
+
+  /** Legacy compat wrapper (predicates via api; window contract lost —
+   * prefer scanEvents). Kept for the slicer's internal use until it
+   * migrates; will be removed with the slicer rewrite. */
+  function streamEvents(captureId, { api, limit = 100 } = {}) {
+    const out = scanEvents(captureId,
+        { predicates: api ? { api } : {}, maxRows: limit,
+          maxBytes: 1 << 30 });
+    return out.rows;
   }
 
   return { ingestCaptureDir, rebuildFromDir, listCaptures, topApis,
-           assetRows, streamEvents,
+           assetRows, scanEvents, streamEvents,
            close: () => db.close() };
 }
 

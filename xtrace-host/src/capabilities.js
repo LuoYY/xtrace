@@ -27,7 +27,12 @@ function negotiate({ browserCapabilities, adapters }) {
       });
       continue;
     }
-    if (typeof adapter.available === 'function' && !adapter.available(browserCapabilities)) {
+    const declaredUnavailable =
+        (typeof adapter.available === 'function' &&
+         !adapter.available(browserCapabilities)) ||
+        (typeof adapter.available !== 'function' &&
+         typeof adapter.unavailableReason === 'string');
+    if (declaredUnavailable) {
       list.push({
         name: adapter.name,
         tier: adapter.tier,

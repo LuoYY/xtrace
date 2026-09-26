@@ -1,19 +1,44 @@
 'use strict';
-// P6-E1: the Agent Host — browser ownership plus the frozen
-// process-ownership decision (handoff §5.4): pipe closed => browser
-// exited; NO reconnect semantics in P6. After a Host restart the
-// on-disk artifacts persist; the caller picks ONE of:
-//   adoptReadOnly(traceDir)  — read products, no capture continuation
-//   terminateOrphan(pid, traceDir) — pid liveness + manifest state
-//       decide termination (a LIVE pid whose manifest is not settled
-//       may be terminated; a settled manifest means it already ended).
+// P6-R1 (R1-1): the Host COMPOSITION ROOT — the single place the
+// product assembles its object graph. createHost() builds the
+// workspace, the Broker, the env manager, the derived index and the
+// registered adapter set, and exposes host.callTool(). UI, drivers and
+// any future MCP entry consume ONLY this root (source-shape gate:
+// createBroker( call sites = composition root + unit tests).
+//
+// The Host also owns the LAUNCH SPEC (M8/R1-2): one canonical browser
+// argument list (precise environment: causality=sync + observer +
+// tier-lock js-flags) consumed by every launch path, with the env
+// manager's active profile feeding --user-data-dir (M2: activeProfile
+// finally has a consumer). Pipe closed => the browser is gone; NO
+// reconnect in P6 — adoptOrTerminate() is the §5.4 restart entry.
 
 const fs = require('node:fs');
 const path = require('node:path');
 const { launchBrowser } = require('./cdp');
 const { createBroker } = require('./broker');
 const { createWorkspace } = require('./workspace');
-const { registry } = require('./capabilities');
+const { createEnvManager } = require('./env-manager');
+const { createEvidenceIndex } = require('./evidence-index');
+const { createAGroupAdapters } = require('./adapters-agroup');
+const { createBGroupAdapters } = require('./adapters-bgroup');
+const { negotiate } = require('./capabilities');
+
+/** THE launch spec (single source, M8): every browser this Host owns
+ * runs with the precise-environment flags the B-group tools require.
+ * The transport flags (headless/remote-debugging-pipe/no-first-run)
+ * belong to launchBrowser; this list is the OBSERVATION contract. */
+function buildLaunchSpec({ traceFile, profileDir, extraArgs = [] }) {
+  const args = [
+    `--user-data-dir=${profileDir}`,
+    '--xtrace-causality=sync', '--xtrace-ignition-observer',
+    '--js-flags=--allow-natives-syntax --max-opt=0',
+  ];
+  if (traceFile) {
+    args.push('--xtrace-enable', `--xtrace-file=${traceFile}`);
+  }
+  return [...args, ...extraArgs];
+}
 
 async function createHost({
   executable,
@@ -23,96 +48,186 @@ async function createHost({
   cwd,
   policy,
   traceFile = null,
+  skipBrowserLaunch = false,
+  launchBrowserImpl = launchBrowser,
 }) {
   const workspace = createWorkspace(workspaceRoot);
   const broker = createBroker({ workspace, policy });
-  const adapters = registry();
-  const stderrPath = path.join(workspace.dir('ledger'), 'browser-stderr.log');
-  const stderr = fs.openSync(stderrPath, 'a');
+  const envs = createEnvManager({ workspace });
+  const index = createEvidenceIndex(
+      path.join(workspace.dir('index'), 'index.db'));
+  index.rebuildFromDir(workspace.dir('traces'));
 
-  const launched = await launchBrowser({
-    executable, args: browserArgs, env, cwd, stderr,
-  });
+  // The env manager's active profile feeds the launch spec (M2).
+  const profileDir = envs.activeProfile() ||
+      path.join(workspace.dir('profiles'), '_default');
+  fs.mkdirSync(profileDir, { recursive: true });
+  const resolvedTrace = traceFile ? path.resolve(String(traceFile)) : null;
+  if (resolvedTrace) {
+    fs.mkdirSync(path.dirname(resolvedTrace), { recursive: true });
+  }
+
+  let launched = null;
+  let connection = null;
+  if (!skipBrowserLaunch) {
+    // The observation spec ALWAYS applies (M8: single source); caller
+    // browserArgs may only ADD (e.g. a start URL), never replace it.
+    const launchArgs = [...buildLaunchSpec({
+      traceFile: resolvedTrace, profileDir }), ...browserArgs];
+    launched = await launchBrowserImpl({
+      executable,
+      args: launchArgs,
+      env, cwd,
+      stderr: fs.openSync(
+          path.join(workspace.dir('ledger'), 'browser-stderr.log'), 'a'),
+    });
+    connection = launched.connection;
+  }
+
   const host = {
-    workspace,
-    broker,
-    adapters,
-    child: launched.child,
-    version: launched.version,
-    traceFile: traceFile ? path.resolve(String(traceFile)) : null,
-    send: (method, params, sessionId) => {
-      if (host.closed) {
-        return Promise.reject(new Error('CDP connection closed (host)'));
-      }
-      return launched.connection.send(method, params, sessionId);
-    },
-    onEvent: (handler) => launched.connection.on('event', handler),
+    workspace, broker, envs, index,
+    executable,
+    version: launched ? launched.version : null,
+    traceFile: resolvedTrace,
+    profileDir,
     closed: false,
 
-    async capabilities() {
-      let caps = null;
-      try {
-        const raw = await launched.connection.send('XTrace.getCapabilities');
-        caps = { hasXTraceDomain: true, raw };
-      } catch (error) {
-        const noDomain = /not found|unknown|does not exist/i.test(String(error.message));
-        caps = { hasXTraceDomain: !noDomain, probeError: String(error.message) };
+    send(method, params, sessionId) {
+      if (host.closed || !connection) {
+        return Promise.reject(new Error('CDP connection closed (host)'));
       }
-      return adapters.negotiate(caps);
+      return connection.send(method, params, sessionId);
+    },
+    onEvent(handler) {
+      if (connection) {
+        connection.on('event', handler);
+      }
     },
 
-    /** Terminate the owned browser and mark the Host closed. The pipe
-     * closing on its own also flips closed (no reconnect). */
+    /** Rebuild the derived index from the traces root (acceptance path
+     * unchanged; also the post-restart adoption substrate). */
+    reindex() {
+      return index.rebuildFromDir(workspace.dir('traces'));
+    },
+
+    /** Negotiated three-state capability list (R1-9 surface). */
+    async capabilities() {
+      let caps = null;
+      if (!connection) {
+        caps = { hasXTraceDomain: false,
+                 probeError: 'host launched without a browser' };
+      } else {
+        try {
+          const raw = await connection.send('XTrace.getCapabilities');
+          caps = { hasXTraceDomain: true, raw };
+        } catch (error) {
+          const noDomain = /not found|unknown|does not exist/i
+              .test(String(error.message));
+          caps = { hasXTraceDomain: !noDomain,
+                   probeError: String(error.message) };
+        }
+      }
+      const negotiated = negotiate({ browserCapabilities: caps,
+                                     adapters: host.adapters.all() });
+      host.capabilitySnapshot = negotiated;
+      return negotiated;
+    },
+
+    /** Tool schemas WITH negotiated state/reason (R1-9). Unavailable
+     * tools are excluded from the model surface and reported in the
+     * capability list instead. */
+    async toolSchemas() {
+      const negotiated = await host.capabilities();
+      return negotiated.tools
+          .filter((t) => t.state !== 'unavailable')
+          .map((t) => ({
+            name: t.name, tier: t.tier, input: t.input, output: t.output,
+            state: t.state, reason: t.reason || undefined,
+            sideEffects: t.sideEffects || 'none',
+          }));
+    },
+
+    /** The ONLY way anything executes a tool (B1: UI included). */
+    async callTool(name, args, context) {
+      const tool = host.tools.get(name);
+      if (!tool) {
+        throw new Error(`unknown tool: ${name}`);
+      }
+      return broker.execute(tool, args || {}, context || { origin: 'ui' });
+    },
+
     async close() {
       if (host.closed) {
         return;
       }
       host.closed = true;
-      try {
-        await launched.connection.send('Browser.close');
-      } catch {
-        // pipe already gone — the browser exited on its own
+      if (connection) {
+        try {
+          await connection.send('Browser.close');
+        } catch {
+          // pipe already gone — the browser exited on its own
+        }
       }
+      index.close();
     },
   };
 
-  launched.connection.on('closed', () => {
-    host.closed = true;
-  });
-  launched.connection.once('closed', () => host.onPipeLost
-      ? host.onPipeLost()
-      : null);
+  // Registered adapter set — built AFTER `host` exists so B-group tools
+  // can hold the live host reference.
+  host.adapters = (() => {
+    const adapters = [
+      ...createAGroupAdapters({ workspace, index, host }),
+      ...createBGroupAdapters({ workspace, host, envs }),
+    ];
+    host.tools = new Map();
+    for (const adapter of adapters) {
+      host.tools.set(adapter.name, broker.register(adapter));
+    }
+    return {
+      all: () => adapters,
+      get: (name) => host.tools.get(name),
+    };
+  })();
+
+  if (connection) {
+    connection.on('closed', () => {
+      host.closed = true;
+    });
+  }
   return host;
 }
 
 /** Post-restart orphan resolution (frozen decision: exactly one of
- * read-only adoption or termination). */
-function resolveOrphan({ pid, traceDir, kill = (p) => process.kill(p, 'SIGTERM'),
-                          pidAlive = (p) => { try { process.kill(p, 0); return true; }
-                                              catch { return false; } } }) {
-  const manifestPath = path.join(traceDir, `${path.basename(traceDir, '.ndjson')}.manifest.json`);
+ * read-only adoption or termination) — the REAL §5.4 entry, called by
+ * the UI's resume flow; index re-ingest implements the adoption. */
+function resolveOrphan({ pid, traceDir, index, kill = (p) =>
+        process.kill(p, 'SIGTERM'), pidAlive = (p) => {
+      try { process.kill(p, 0); return true; } catch { return false; }
+    } }) {
+  const manifestPath = path.join(traceDir, 'trace.manifest.json');
   let settled = false;
   let terminal = 'unknown';
   try {
-    const manifest = JSON.parse(fs.readFileSync(
-        path.join(traceDir, 'trace.manifest.json'), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     terminal = (manifest.terminal && manifest.terminal.state) || 'unknown';
-    settled = terminal !== 'unknown';
+    settled = true;
   } catch {
-    settled = fs.existsSync(manifestPath); // v1/v2-era products count as settled artifacts
+    settled = fs.existsSync(manifestPath); // v1/v2-era products count
   }
   const alive = pid != null && pidAlive(pid);
   if (!alive) {
-    return { action: 'adopt-read-only', reason: `pid ${pid} not alive; artifacts persist`, terminal };
+    return { action: 'adopt-read-only',
+             reason: `pid ${pid} not alive; artifacts persist`, terminal };
   }
   if (settled) {
     return { action: 'adopt-read-only',
-             reason: `manifest settled (terminal=${terminal}); capture already ended`, terminal };
+             reason: `manifest settled (terminal=${terminal}); capture ` +
+                     `already ended`, terminal };
   }
   kill(pid);
   return { action: 'terminated',
-           reason: 'live pid with unsettled manifest — terminated per no-reconnect policy',
-           terminal };
+           reason: 'live pid with unsettled manifest — terminated per ' +
+                   'no-reconnect policy', terminal };
 }
 
-module.exports = { createHost, resolveOrphan };
+module.exports = { createHost, resolveOrphan, buildLaunchSpec };

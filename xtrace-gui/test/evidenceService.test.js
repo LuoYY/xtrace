@@ -1,20 +1,21 @@
 'use strict';
-// P6-E5 (first slice) gates: evidence service over real workspace
-// shapes (complete+partial, incomplete+unconfirmed, timeout, cancel,
-// resume adoption) and the renderer panel rendering — the LOGIC layer
-// of the five scenarios. The five-scenario INTERACTIVE acceptance
-// (launching the app, clicking, checking console/network) is the E5
-// second slice and is NOT claimed here.
-
+// P6-R1 GUI evidence gates: the thin helpers (B5 counters under a
+// NON-default trace filename via the composition-root index), plus the
+// renderer renderers for the new panel surfaces.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createEvidenceService } = require('../src/main/evidenceService');
+const { enrichStatusRows, dropCountersFromManifest,
+        unconfirmedProducers } = require('../src/main/evidenceService');
 const panel = require('../src/renderer/evidencePanel');
+const { createHost } = require('../../xtrace-host/src/host');
 
-function writeCapture(root, name, { terminal, coverage, unconfirmed }) {
+function writeCapture(root, name, { traceName = 'trace-on.ndjson',
+                                     dropped = 7, failed = 3,
+                                     sampled = 11, partial = 5,
+                                     unconfirmed = true }) {
   const dir = path.join(root, 'traces', name);
   fs.mkdirSync(dir, { recursive: true });
   const events = [
@@ -25,23 +26,32 @@ function writeCapture(root, name, { terminal, coverage, unconfirmed }) {
      args: [], stack: [], attribution: {status: 'unresolved'},
      causality: {kind: 'paired', call_id: 's:1', parent_id: null,
                  depth: 0, duration_us: null}},
+    {schema_version: 3, producer_id: 'bnet:z:9:1', process_epoch: '9',
+     producer_seq: '1', writer_seq: '1', config_generation: '1',
+     mono_time_us: '2', wall_time_us: '2', pid: 2, tid: 2,
+     category: 'reverse', phase: 'call', api: 'BrowserNetwork.response',
+     args: [], stack: [], attribution: {status: 'unresolved'},
+     causality: {kind: 'external', call_id: null, parent_id: null,
+                 depth: 0, duration_us: null}},
   ];
-  fs.writeFileSync(path.join(dir, 'trace.ndjson'),
+  fs.writeFileSync(path.join(dir, traceName),
       events.map((e) => JSON.stringify(e)).join('\n') + '\n');
-  fs.writeFileSync(path.join(dir, 'trace.manifest.json'), JSON.stringify({
+  fs.writeFileSync(path.join(dir,
+      traceName.replace(/\.ndjson$/, '.manifest.json')), JSON.stringify({
     schema_version: 3, capture_id: name, accounting_model: '2',
-    observation_coverage: coverage,
-    terminal: terminal === 'complete'
-        ? { state: 'complete', reason: null }
-        : { state: 'incomplete', reason: 'producer-unconfirmed' },
-    counts: { eligible: '5', enqueued: '5', dropped: '1', accepted: '5',
-              written: '4', failed: '1', sampled_out: '2',
-              partial_observations: '1' },
+    observation_coverage: 'partial',
+    terminal: { state: 'complete', reason: null },
+    counts: { eligible: '9', enqueued: '9', dropped: String(dropped),
+              accepted: '9', written: '6', failed: String(failed),
+              sampled_out: String(sampled),
+              partial_observations: String(partial) },
     producers: [
-      { producer_id: 'rtx:a:1:1', process_epoch: '1', eligible: '5',
-        enqueued: '5', dropped: '1', sampled_out: '2',
-        partial_observations: '1', accepted: '5', written: '4',
-        failed: '1', watermark: { received: true } },
+      { producer_id: 'rtx:a:1:1', process_epoch: '1', eligible: '9',
+        enqueued: '9', dropped: String(dropped),
+        sampled_out: String(sampled),
+        partial_observations: String(partial), accepted: '9',
+        written: '6', failed: String(failed),
+        watermark: { received: true } },
       ...(unconfirmed ? [{ producer_id: 'bnet:z:9:1', process_epoch: '9',
           eligible: null, enqueued: null, dropped: null,
           watermark: { received: false } }] : []),
@@ -50,86 +60,73 @@ function writeCapture(root, name, { terminal, coverage, unconfirmed }) {
   return dir;
 }
 
-function service(root) {
-  const svc = createEvidenceService({ host: null });
-  svc.openWorkspace(root);
-  return svc;
-}
-
-test('evidence service: status carries terminal/coverage/drop counters', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'e5-'));
-  writeCapture(root, 'cap-ok', { terminal: 'complete',
-                                 coverage: 'partial', unconfirmed: false });
-  writeCapture(root, 'cap-bad', { terminal: 'incomplete',
-                                  coverage: 'partial', unconfirmed: true });
-  const svc = service(root);
-
-  const ok = svc.captureStatus('cap-ok')[0];
-  assert.equal(ok.terminal, 'complete');
-  assert.equal(ok.coverage, 'partial');
-  assert.deepEqual(ok.drop_counters,
-      { dropped: 1, failed: 1, sampled_out: 2, partial_observations: 1 });
-  assert.equal(ok.unconfirmed_producers.length, 0);
-
-  const bad = svc.captureStatus('cap-bad')[0];
-  assert.equal(bad.terminal, 'incomplete');
-  assert.equal(bad.terminal_reason, 'producer-unconfirmed');
-  assert.deepEqual(bad.unconfirmed_producers, ['bnet:z:9:1']);
-
-  // renderer rendering of both shapes
-  const text = panel.renderCaptureStatus(svc.captureStatus());
-  assert.match(text, /cap-ok \| terminal=complete \| coverage=partial/);
-  assert.match(text, /sampled_out=2/);
-  assert.match(text, /cap-bad \| terminal=incomplete \(producer-unconfirmed\)/);
-  assert.match(text, /unconfirmed producers: 1/);
+test('B5 gate: trace-on naming — counters equal disk truth via the composition root', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-gui-b5-'));
+  const dir = writeCapture(root, 'cap-b5', {});
+  const host = await createHost({ executable: '/nonexistent',
+      workspaceRoot: root, skipBrowserLaunch: true });
+  try {
+    const rows = await host.callTool('trace_summary', {},
+        { origin: 'ui' });
+    assert.equal(rows.length, 1);
+    // enrich through the SAME manifest-reading path the panel uses
+    const readManifest = (row) => {
+      const manifestName = 'trace-on.manifest.json';
+      const p = path.join(row.dir, manifestName);
+      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8'))
+          : null;
+    };
+    const enriched = enrichStatusRows(rows, readManifest)[0];
+    assert.equal(enriched.terminal, 'complete');
+    assert.deepEqual(enriched.drop_counters,
+        { dropped: 7, failed: 3, sampled_out: 11, partial_observations: 5 });
+    assert.deepEqual(enriched.unconfirmed_producers, ['bnet:z:9:1']);
+    assert.equal(dropCountersFromManifest(null).dropped, 0);
+    assert.deepEqual(unconfirmedProducers(null), []);
+  } finally {
+    host.close();
+  }
 });
 
-test('evidence service: stopProgress timeout + cancel + dead-browser', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'e5b-'));
-  writeCapture(root, 'cap-x', { terminal: 'complete',
-                                coverage: 'full', unconfirmed: false });
-  const svc = service(root);
-  // scenario 2 (no browser): stop with a dead pipe reports timeout
-  const out = await svc.stopProgress({ deadlineMs: 100, pollMs: 20 });
-  assert.equal(out.state, 'stop-timeout');
-  assert.match(panel.renderStopProgress(out), /TIMEOUT/);
-
-  // scenario 5: adopt read-only after a restart (resume path)
-  const dir = path.join(root, 'traces', 'cap-x');
-  fs.rmSync(path.join(root, 'index', 'index.db'));
-  const svc2 = service(root);
-  const adopted = svc2.adoptReadOnly(dir);
-  assert.equal(adopted.adopted, true);
-  assert.equal(adopted.eventCount, 1);
-  assert.equal(svc2.captureStatus('cap-x')[0].terminal, 'complete');
+test('M6 gate: jump resolves via the index trace_file under trace-on naming', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r1-gui-m6-'));
+  writeCapture(root, 'cap-jump', {});
+  const host = await createHost({ executable: '/nonexistent',
+      workspaceRoot: root, skipBrowserLaunch: true });
+  try {
+    const ref = 'cap-jump|rtx:a:1:1|1';
+    const out = await host.callTool('evidence_jump', { ref },
+        { origin: 'ui' });
+    assert.equal(out.line, 1);
+    assert.ok(Number.isInteger(out.byte_offset));
+    assert.ok(out.trace_file.endsWith('trace-on.ndjson'));
+    assert.match(panel.renderEvidenceJump(out), /line 1/);
+    await assert.rejects(() => host.callTool('evidence_jump',
+        { ref: 'cap-jump|none|9' }, { origin: 'ui' }), /not found/);
+  } finally {
+    host.close();
+  }
 });
 
-test('evidence service: authorization records + evidence jump refs', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'e5c-'));
-  const dir = writeCapture(root, 'cap-auth', { terminal: 'complete',
-                                               coverage: 'full',
-                                               unconfirmed: false });
-  const svc = service(root);
-  // a broker ledger lands when tools run; simulate one row
-  fs.mkdirSync(path.join(root, 'ledger'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'ledger', 'broker-1.jsonl'), JSON.stringify({
-    tool: 'jsvmp_trace', tier: 'stateful-control', origin: 'ui',
-    decision: 'confirmed', reason: 'controlled capture'
-  }) + '\n');
-  const records = svc.authorizationRecords();
-  assert.equal(records.length, 1);
-  assert.equal(records[0].decision, 'confirmed');
-  const text = panel.renderAuthorizationRecords(records);
-  assert.match(text, /jsvmp_trace confirmed via ui — controlled capture/);
-  assert.match(panel.renderAuthorizationRecords([]), /no authorization records/);
-
-  // evidence jump: ref resolves to the trace line
-  const ref = panel.evidenceRefFromEvent({
-    capture_id: 'cap-auth', producer_id: 'rtx:a:1:1', producer_seq: '1' });
-  assert.equal(ref, 'cap-auth|rtx:a:1:1|1');
-  const jump = svc.evidenceJump(ref);
-  assert.equal(jump.api, 'Document.cookie.set');
-  assert.equal(jump.line, 1);
-  assert.throws(() => svc.evidenceJump('cap-auth|none|99'), /not found/);
-  void dir;
+test('renderers: cancel honesty, capability gaps, authorization basis', () => {
+  assert.match(panel.renderCancel({ retired_confirmations: 1 }),
+      /retired=1.*check Status/s);
+  assert.match(panel.renderCapabilities({ counts: {
+      available: 10, degraded: 2, unavailable: 4 },
+      gaps: [{ name: 'env_current_process', state: 'unavailable',
+               reason: 'depends on the fingerprint override layer (P7)' }] }),
+      /available=10 degraded=2 unavailable=4/);
+  assert.match(panel.renderCapabilities({ counts: {
+      available: 10, degraded: 2, unavailable: 4 },
+      gaps: [{ name: 'env_current_process', state: 'unavailable',
+               reason: 'depends on the fingerprint override layer (P7)' }] }),
+      /env_current_process \[unavailable\] depends on the fingerprint/);
+  const text = panel.renderAuthorizationRecords([
+    { tool: 'jsvmp_trace', decision: 'confirmed', origin: 'ui',
+      basis: 'ui-direct-click', reason: 'operator stop' },
+    { tool: 'jsvmp_trace', decision: 'denied-by-user', origin: 'agent',
+      basis: 'human-denied', reason: 'begin capture' },
+  ]);
+  assert.match(text, /confirmed via ui — operator stop/);
+  assert.match(text, /denied-by-user via agent — begin capture/);
 });

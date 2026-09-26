@@ -16,12 +16,19 @@ contextBridge.exposeInMainWorld("xtrace", {
   onEvents: (callback) => {
     ipcRenderer.on("xtrace:events", (_event, events) => callback(events));
   },
-  // P6-E5 evidence surface (main-process owned; no Node in renderer)
+  // P6-R1 evidence surface (main-process owned; no Node in renderer)
   evidenceOpenWorkspace: (dir) => ipcRenderer.invoke("evidence:open-workspace", dir),
+  evidenceChooseWorkspace: () => ipcRenderer.invoke("evidence:choose-workspace"),
   evidenceStatus: (captureId) => ipcRenderer.invoke("evidence:capture-status", captureId),
   evidenceStart: (options) => ipcRenderer.invoke("evidence:start", options),
   evidenceStop: (options) => ipcRenderer.invoke("evidence:stop", options),
-  evidenceCancel: () => ipcRenderer.invoke("evidence:cancel"),
+  evidenceCancel: (options) => ipcRenderer.invoke("evidence:cancel", options),
+  evidenceClear: (options) => ipcRenderer.invoke("evidence:clear", options),
   evidenceJump: (ref) => ipcRenderer.invoke("evidence:jump", ref),
-  evidenceAuthRecords: () => ipcRenderer.invoke("evidence:auth-records")
+  evidenceAuthRecords: () => ipcRenderer.invoke("evidence:auth-records"),
+  evidenceCapabilities: () => ipcRenderer.invoke("evidence:capabilities"),
+  evidencePending: () => ipcRenderer.invoke("evidence:pending"),
+  evidenceConfirmation: (id, approved) => ipcRenderer.invoke("evidence:confirmation", {id, approved}),
+  evidenceResolveOrphan: (pid, traceDir) => ipcRenderer.invoke("evidence:resolve-orphan", {pid, traceDir}),
+  evidenceAgentCall: (tool, args, reason) => ipcRenderer.invoke("evidence:agent-call", {tool, args, reason})
 });

@@ -1,29 +1,24 @@
-// P6-E6: the closed-loop acceptance. ONE pass through the full chain,
-// every execution entry through the Broker audit:
-//   env (isolated profile) -> controlled capture (Broker-confirmed) ->
-//   local page under taps -> stop + integrity (pair assertion +
-//   validator) -> index rebuild -> agent analysis (slices + tools) ->
-//   UI evidence jump (the agent's citation resolves to a trace line).
+// P6-R1 closed loop — every stage through the HOST COMPOSITION ROOT
+// (one broker, one workspace; the driver never constructs a broker):
+//   env (isolated, activeProfile consumed by the launch spec) ->
+//   Broker-confirmed start -> local page under taps -> stop pair +
+//   validator -> index -> agent analysis (slices+tools, all Broker) ->
+//   UI evidence jump resolving THE AGENT'S OWN citedRef -> audit covers
+//   every execution entry.
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const { spawn, spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const EXE = path.join(root, 'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
 const { createHost } = require(path.join(root, 'xtrace-host/src/host'));
-const { createBroker, TIERS } = require(path.join(root, 'xtrace-host/src/broker'));
-const { createWorkspace } = require(path.join(root, 'xtrace-host/src/workspace'));
-const { createEnvManager } = require(path.join(root, 'xtrace-host/src/env-manager'));
-const { createEvidenceIndex } = require(path.join(root, 'xtrace-host/src/evidence-index'));
-const { createAGroupAdapters } = require(path.join(root, 'xtrace-host/src/adapters-agroup'));
-const { createBGroupAdapters } = require(path.join(root, 'xtrace-host/src/adapters-bgroup'));
 const { createAgentLoop } = require(path.join(root, 'xtrace-host/src/agent-loop'));
+const { BASES } = require(path.join(root, 'xtrace-host/src/broker'));
 
 const runDir = fs.mkdtempSync(path.join(root, 'chromium/src/out/XTraceIntegration/validation', 'p6-e6-'));
 const report = { stages: [] };
 const stage = (name, ok, detail) => {
-  report.stages.push({ name, ok, detail: String(detail).slice(0, 200) });
+  report.stages.push({ name, ok: !!ok, detail: String(detail).slice(0, 200) });
   console.log(`${ok ? 'OK ' : 'FAIL'} ${name}: ${String(detail).slice(0, 160)}`);
   if (!ok) {
     throw new Error(`stage failed: ${name} — ${detail}`);
@@ -31,66 +26,45 @@ const stage = (name, ok, detail) => {
 };
 
 (async () => {
-  // ---- 1. isolated environment ----------------------------------------
+  // ---- 1. composition root over an ISOLATED env -----------------------
   const workspaceRoot = path.join(runDir, 'ws');
   fs.mkdirSync(workspaceRoot, { recursive: true });
-  const ws = createWorkspace(workspaceRoot);
-  const envs = createEnvManager({ workspace: ws });
-  envs.create('e6-env', { notes: 'closed-loop isolated env' });
-  const opened = envs.open('e6-env');
-  stage('env-isolated', opened.open === true && opened.profile_dir.startsWith(ws.dir('profiles')),
-        `profile=${opened.profile_dir}`);
+  // env manager FIRST (host consumes its active profile in the spec)
+  const host0 = await createHost({ executable: EXE,
+      workspaceRoot, skipBrowserLaunch: true });
+  const envCreated = await host0.callTool('env_create',
+      { name: 'e6-env', notes: 'closed-loop isolated env' },
+      { origin: 'agent', basisHint: BASES.UI_DIRECT_CLICK,
+        reason: 'create the isolated env for the closed loop' });
+  const opened = await host0.callTool('env_open', { name: 'e6-env' },
+      { origin: 'agent', basisHint: BASES.UI_DIRECT_CLICK,
+        reason: 'activate the env so the launch spec consumes its profile' });
+  stage('env-isolated', opened.open === true &&
+      opened.profile_dir.startsWith(host0.workspace.dir('profiles')),
+      `profile=${opened.profile_dir}`);
+  await host0.close();
 
-  // ---- 2-3. controlled capture over a local page ------------------------
-  const traceFile = path.join(ws.dir('traces'), 'closed-loop', 'trace.ndjson');
-  fs.mkdirSync(path.dirname(traceFile), { recursive: true });
-  const host = await createHost({
-    executable: EXE,
-    browserArgs: [
-      `--user-data-dir=${opened.profile_dir}`,
-      '--xtrace-enable', `--xtrace-file=${traceFile}`,
-      '--xtrace-categories=reverse', '--xtrace-causality=sync',
-      '--xtrace-ignition-observer',
-      '--js-flags=--allow-natives-syntax --max-opt=0',
-    ],
-    workspaceRoot, traceFile,
-  });
-  const broker = createBroker({ workspace: ws });
-
-  // EVERY tool execution below goes through broker.execute — the audit
-  // ledger is the single record of what ran.
-  const all = {};
-  function registerAll(adapters) {
-    for (const adapter of adapters) {
-      all[broker.register(adapter).name] = adapter;
-    }
-  }
-  // B-group needs no index; A-group (queries) registers AFTER the
-  // capture settles so the real index binds to its tools.
-  registerAll(createBGroupAdapters({ workspace: ws, host, envs }));
-  async function call(toolName, args, reason) {
-    const tool = all[toolName];
-    const exec = broker.execute(tool, args, { origin: 'agent', reason });
-    const g = broker.gate(toolName, tool.tier, { origin: 'agent', reason });
-    if (g.decision === 'confirmation-required') {
-      for (let i = 0; i < 400 && broker.pendingCount() > 0; i++) {
-        await new Promise((r) => setTimeout(r, 5));
-        for (const id of broker.pendingIds()) {
-          broker.resolveConfirmation(id, true);
-        }
-      }
-    }
-    return exec;
-  }
-
-  const start = await call('jsvmp_trace', { action: 'start', max_taps: 5 },
-      'closed-loop controlled capture of the local fixture');
-  stage('capture-started', start.state === 'active', `state=${start.state} plan=${start.tapPlanSerial}`);
+  // ---- 2-3. controlled capture over a local page -----------------------
+  const traceFile = path.join(workspaceRoot, 'traces', 'closed-loop',
+      'trace.ndjson');
+  const host = await createHost({ executable: EXE, workspaceRoot,
+      traceFile, browserArgs: ['about:blank'] });
+  const specUsedProfile = host.profileDir === opened.profile_dir;
+  stage('launch-spec-consumes-env-profile', specUsedProfile,
+      `spec profile == env profile: ${host.profileDir}`);
 
   const page = await host.send('Target.createTarget', { url: 'about:blank' });
   const { sessionId } = await host.send('Target.attachToTarget',
       { targetId: page.targetId, flatten: true });
   await host.send('Runtime.enable', {}, sessionId);
+
+  const start = await host.callTool('jsvmp_trace',
+      { action: 'start', max_taps: 5 },
+      { origin: 'ui', reason: 'closed-loop controlled capture',
+        basisHint: BASES.UI_DIRECT_CLICK });
+  stage('capture-started', start.state === 'active',
+        `state=${start.state} plan=${start.tapPlanSerial}`);
+
   const LOOP = `(()=>{const s=document.createElement('script');
     s.textContent='window.__e6=(function(){function f(n){var acc=0;for(var i=0;i<n;i++){acc=(acc+i*7)%4096;}return acc;}var r={v:f(20),wrap:{seed:777}};return r;})();';
     document.documentElement.appendChild(s);
@@ -102,8 +76,9 @@ const stage = (name, ok, detail) => {
   await new Promise((r) => setTimeout(r, 1500));
 
   // ---- 4. stop + integrity ---------------------------------------------
-  const stop = await call('jsvmp_trace', { action: 'stop' },
-      'closed-loop settle with pair assertion');
+  const stop = await host.callTool('jsvmp_trace', { action: 'stop' },
+      { origin: 'ui', reason: 'closed-loop settle with pair assertion',
+        basisHint: BASES.UI_DIRECT_CLICK });
   stage('stop-pair', stop.pair?.terminal === 'complete' &&
                      stop.pair?.coverage === 'partial',
         JSON.stringify(stop.pair));
@@ -111,88 +86,82 @@ const stage = (name, ok, detail) => {
       path.join(root, 'scripts/validate_trace.py'),
       '--schema-version', '3', '--profile', 'generic-vmp', traceFile],
       { encoding: 'utf8', timeout: 120000 });
-  stage('validator', val.status === 0,
-        `exit=${val.status} ${val.stderr ? val.stderr.slice(-120) : ''}`);
+  stage('validator', val.status === 0, `exit=${val.status}`);
 
   // ---- 5. index ---------------------------------------------------------
-  const index = createEvidenceIndex(path.join(ws.dir('index'), 'index.db'));
-  const rebuilt = index.rebuildFromDir(ws.dir('traces'));
+  const rebuilt = host.reindex();
   const captureId = rebuilt[0].captureId;
   stage('index-rebuilt', rebuilt.length === 1 && rebuilt[0].eventCount > 1000,
-        `capture=${captureId} events=${rebuilt[0].eventCount} apis=${rebuilt[0].apis}`);
+        `capture=${captureId} events=${rebuilt[0].eventCount}`);
 
-  // ---- 6. agent analysis (slices + tools, all via Broker) ----------------
-  const agentTools = createAGroupAdapters({ workspace: ws, index });
-  registerAll(agentTools);
-  // the evidence-jump substrate call below also uses the real index
+  // ---- 6. agent analysis (composition-root tools only) ------------------
   let citedRef = null;
   const model = async (state) => {
     if (state.iteration === 1) {
       return { type: 'slice', shape: 'manifest-summary', capture_id: captureId };
     }
     if (state.iteration === 2) {
-      return { type: 'tool', name: 'jsvmp_query', args: { capture_id: captureId, limit: 10 } };
+      return { type: 'tool', name: 'jsvmp_query',
+               args: { capture_id: captureId, limit: 10 } };
     }
     if (state.iteration === 3) {
-      const rows = state.last.result;
-      citedRef = rows.length
-          ? `${captureId}|${rows[0].producer_id}|${rows[0].producer_seq}` : null;
+      const out = state.last.result;
+      citedRef = out && out.events && out.events.length
+          ? `${captureId}|${out.events[0].producer_id}|${out.events[0].producer_seq}`
+          : null;
       return { type: 'final', answer: {
         conclusion: 'Ignition dispatch observed under a bounded tap plan',
         evidence_ref: citedRef,
-        coverage: 'partial (budget skips accounted)',
+        window: out && out.window_complete !== undefined
+            ? { complete: out.window_complete, matched: out.matched,
+                total: out.total_events } : null,
       } };
     }
     return { type: 'final', answer: {} };
   };
-  const loop = createAgentLoop({ broker, tools: agentTools, index,
-                                 workspace: ws, model,
-                                 limits: { context_bytes: 65536 } });
+  const agentTools = [...host.adapters.all()]
+      .filter((t) => host.capabilitySnapshot === undefined || true);
+  void agentTools;
+  const loop = createAgentLoop({ broker: host.broker,
+      tools: [...host.tools.values()], index: host.index,
+      workspace: host.workspace, model, host,
+      limits: { context_bytes: 65536 } });
   const agentOut = await loop.run();
   stage('agent-analysis', agentOut.status === 'complete' && citedRef,
         `status=${agentOut.status} ref=${citedRef} iters=${agentOut.iterations}`);
 
-  // ---- 7. UI evidence jump: the citation resolves to a trace line -------
-  const jump = await call('trace_query', { capture_id: captureId, limit: 1 },
-      'closed-loop evidence jump substrate');
-  void jump;
-  const firstRow = index.streamEvents(captureId, { limit: 1 })[0];
-  const svcLikeJump = {
-    ref: `${captureId}|${firstRow.producer_id}|${firstRow.producer_seq}`,
-    line: null,
-  };
-  const text = fs.readFileSync(traceFile, 'utf8').split('\n');
-  for (let i = 0; i < text.length; i++) {
-    if (text[i].includes(`"producer_id":"${firstRow.producer_id}"`) &&
-        text[i].includes(`"producer_seq":"${firstRow.producer_seq}"`)) {
-      svcLikeJump.line = i + 1;
-      break;
-    }
-  }
-  stage('evidence-jump', svcLikeJump.line !== null,
-        `ref=${svcLikeJump.ref} -> line ${svcLikeJump.line}`);
+  // ---- 7. UI evidence jump resolving THE AGENT'S citation (M6) ---------
+  const jump = await host.callTool('evidence_jump', { ref: citedRef },
+      { origin: 'ui' });
+  stage('evidence-jump', jump.line >= 1 &&
+      Number.isInteger(jump.byte_offset) &&
+      jump.trace_file === traceFile,
+        `ref=${citedRef} -> line ${jump.line} @ ${jump.byte_offset}`);
 
-  // ---- 8. the audit covers EVERY execution entry -------------------------
-  const ledger = fs.readFileSync(broker.ledgerPath, 'utf8').trim().split('\n')
-      .map((l) => JSON.parse(l));
+  // ---- 8. audit covers EVERY execution entry ----------------------------
+  const ledger = fs.readFileSync(host.broker.ledgerPath, 'utf8')
+      .trim().split('\n').map((l) => JSON.parse(l));
   const executed = ledger.filter((e) => e.decision === 'executed');
   const confirmed = ledger.filter((e) => e.decision === 'confirmed');
-  const startStop = executed.filter((e) => e.tool === 'jsvmp_trace');
-  stage('broker-audit', startStop.length >= 2 && confirmed.length >= 2 &&
-        executed.every((e) => ['agent', 'ui', 'mcp'].includes(e.origin)),
-        `executed=${executed.length} confirmed=${confirmed.length} ` +
-        `tools=${[...new Set(executed.map((e) => e.tool))].join(',')}`);
+  const granted = ledger.filter((e) => e.decision === 'granted');
+  stage('broker-audit',
+      executed.length >= 4 && confirmed.length >= 2 && granted.length >= 2 &&
+      executed.every((e) => ['agent', 'ui', 'mcp'].includes(e.origin)) &&
+      ledger.filter((e) => e.decision === 'confirmed')
+          .every((e) => e.basis),
+      `executed=${executed.length} confirmed=${confirmed.length} ` +
+      `granted=${granted.length} tools=${[...new Set(executed.map((e) => e.tool))].join(',')}`);
 
   await host.close();
-  index.close();
   report.verdict = 'pass';
   fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(report, null, 1));
-  console.log('P6-E6 CLOSED LOOP: GREEN');
+  console.log('P6-R1 CLOSED LOOP: GREEN');
   console.log('evidence: ' + runDir);
+  process.exit(0);
 })().catch((e) => {
   report.verdict = 'fail';
   report.error = String(e.message || e);
   try { fs.writeFileSync(path.join(runDir, 'report.json'), JSON.stringify(report, null, 1)); } catch {}
-  console.error('P6-E6 CLOSED LOOP: RED —', e.message);
+  console.error('P6-R1 CLOSED LOOP: RED —', e.message);
   process.exit(1);
 });
