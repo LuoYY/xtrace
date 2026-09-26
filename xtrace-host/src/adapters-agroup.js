@@ -129,11 +129,15 @@ function createAGroupAdapters({ workspace, index }) {
     input: { capture_id: 'string', script_id: 'string?', limit: 'int?' },
     output: 'ignition event rows',
     run: async (args) => {
+      // scan a wide window FIRST, then filter and slice — ignition rows
+      // are rarely at the head of the stream.
+      const limit = clampInt(args.limit, 1, 1000, 100);
       const rows = index.streamEvents(
-          requireString(args, 'capture_id'), { limit: clampInt(args.limit, 1, 1000, 100) });
+          requireString(args, 'capture_id'), { limit: 5000 });
       const out = rows.filter((r) => r.event.ignition)
           .filter((r) => !args.script_id ||
-                  r.event.ignition.script_id === String(args.script_id));
+                  r.event.ignition.script_id === String(args.script_id))
+          .slice(0, limit);
       return out.map((r) => ({
         capture_id: r.capture_id, producer_id: r.producer_id,
         producer_seq: r.producer_seq,

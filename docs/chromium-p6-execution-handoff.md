@@ -168,3 +168,22 @@ preload 增 evidence 七通道（open-workspace/start/stop/cancel/status/jump/au
 调试中修复的三个真实缺陷：CSP 阻断内联脚本（改 UMD 全局直用）；evidence:start 可执行路径少层级；同 profile 二次启动撞 ChromiumX 单例锁（先关旧 host + 每 start 独立 profile/trace 子目录）；外加 S5 点击早于 app.js 装载的竞态（就绪门）。Electron 二进制按需重装（dist 292M）。
 
 progress JSON `p6` = `e5-interactive-five-scenario-green`。
+
+## E6：闭环验收（2026-09-26，GREEN）
+
+`scripts/p6-e6-closed-loop.cjs` 一次通过全链，九阶段每段实测：
+
+| 阶段 | 实测 |
+| --- | --- |
+| 隔离环境 | env_create+open，profile 在工作区 profiles/e6-env 下 |
+| 受控采集 | jsvmp_trace start 经 Broker（确认+审计），state=active plan=1 |
+| 本地页 | 注入脚本运行 v=1330（taps 消耗 max_taps=5 预算） |
+| 停止+完整性 | **pair={terminal:complete, coverage:partial}**；validator exit=0 |
+| 索引 | rebuild 29,321 事件 / 131 API |
+| Agent 分析 | 切片(manifest-summary)→工具(jsvmp_query)→final，3 迭代，结论带 `capture|producer|seq` 证据引用 |
+| 证据跳转 | 引用解析到 trace 行号（line 1 实测） |
+| 审计 | executed=4、confirmed=2；jsvmp_trace/jsvmp_query/trace_query 全部经 Broker（agent/ui/mcp 之外的来源为零） |
+
+过程修复两处真实缺陷：jsvmp_query 先切后滤导致 Ignition 行不在流头时空返回（改宽窗扫描再切——Host 套件 14/14 保持）；E6 驱动器 A 组注册顺序（索引就绪后注册查询工具）。
+
+progress JSON `p6` = `e6-closed-loop-green`。
