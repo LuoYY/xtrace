@@ -22,6 +22,7 @@ async function createHost({
   env = process.env,
   cwd,
   policy,
+  traceFile = null,
 }) {
   const workspace = createWorkspace(workspaceRoot);
   const broker = createBroker({ workspace, policy });
@@ -38,6 +39,7 @@ async function createHost({
     adapters,
     child: launched.child,
     version: launched.version,
+    traceFile: traceFile ? path.resolve(String(traceFile)) : null,
     send: (method, params, sessionId) => {
       if (host.closed) {
         return Promise.reject(new Error('CDP connection closed (host)'));

@@ -82,3 +82,22 @@ progress JSON `p6` = `e0-debt-cleared`（下一步：E1 Host 骨架 + Broker 核
 | 真实 capture | E7 真实目录（13,919 事件、124 API、9 资产、terminal=complete/coverage=full）rebuild+topApis+assetRows 全通 |
 
 无 chromium/src 触碰。progress JSON `p6` = `e2-index-agroup-landed`。
+
+## E3：B 组控制适配器 + 最小 env（2026-09-26）
+
+### 实现
+
+| 模块 | 内容 |
+| --- | --- |
+| `src/env-manager.js` | 最小 env 七项的承载：每 env 独立 profile 目录（工作区 profiles/ 下，结构性隔离）；**单开独占**（open 拒绝第二环境）；delete 拒绝 open 态且限定 profiles 根内（经 workspace 边界）；activeProfile() 供浏览器启动取当前 env 的 profile；名字白名单（拒绝 `../` 逃逸） |
+| `src/adapters-bgroup.js` | 冻结五项（全部 STATEFUL_CONTROL，逐次确认+理由+审计）：**jsvmp_trace**（start=ignition-precise+taps 配置 / stop=**返回 (terminal, coverage) 对**（terminal 来自 stopCapture、coverage 来自 manifest——两轴独立不混淆）/ status=getCaptureStatus / clear=仅清 Host 活动引用，**dump 不在 agent 工具面**）；jsvm_status（capture+能力姿态汇总）；webapi_trace（reverse 面、无 taps——与 jsvmp_trace 的区分点，degraded 披露首批接口集）；scripts_capture_all（captureAssets=full）；env 七项经 env-manager |
+| `src/broker.js`（返工） | 确认登记重做：待决项按 (tool,origin,reason) 键化——**gate() 给 UI 看到的 id 就是 execute() 等待的同一项**（原实现靠毫秒时间戳碰撞侥幸对齐，E1 测试复跑抓出该缺陷，属正确性修复非测试适配）；pendingIds() 暴露真实 id |
+
+### 门禁（`xtrace-host` npm test 11/11 GREEN，两遍复跑稳定）
+
+| 案例 | 断言 |
+| --- | --- |
+| env 生命周期 | 七操作全过；**隔离实测**（两 env 目录互不见对方 marker）；单开独占；open 中拒绝 delete；名字逃逸拒绝 |
+| **jsvmp_trace 集成（真实浏览器）** | max_taps=5 启动→页面 tap 运行→stop：**pair={terminal:'complete', coverage:'partial'}**（真实预算跳过 sampled_out>0）；trace_file 回传；status 可查；审计含 grant+confirmation-required+confirmed+executed 全迹（≥6 条） |
+
+无 chromium/src 触碰。progress JSON `p6` = `e3-bgroup-env-landed`。

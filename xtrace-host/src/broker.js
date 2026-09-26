@@ -37,7 +37,10 @@ function createBroker({ workspace, policy, clock = () => Date.now() }) {
 
   const ledgerPath = path.join(workspace.dir('ledger'),
                                `broker-${clock()}.jsonl`);
-  const pending = new Map(); // confirmationId -> {resolve, request}
+  // Pending confirmations keyed by (tool|origin|reason) so the id a UI
+  // saw from gate() is the SAME entry execute() waits on — no
+  // millisecond-collision luck.
+  const pending = new Map(); // entryKey -> {id, resolve, toolName, toolTier, origin}
 
   function audit(entry) {
     const row = JSON.stringify({ ...entry, wall_ms: clock() }) + '\n';
@@ -83,10 +86,18 @@ function createBroker({ workspace, policy, clock = () => Date.now() }) {
         return { decision: 'denied',
                  reason: 'stateful control requires a reason string' };
       }
-      const id = `confirm-${toolName}-${clock()}-${pending.size}`;
+      const key = `${toolName}|${origin}|${reason}`;
+      let entry = pending.get(key);
+      if (!entry) {
+        entry = {
+          id: `confirm-${toolName}-${clock()}-${pending.size}`,
+          resolve: null, toolName, toolTier, origin,
+        };
+        pending.set(key, entry);
+      }
       audit({ tool: toolName, tier: toolTier, origin,
               decision: 'confirmation-required', reason });
-      return { decision: 'confirmation-required', id, reason };
+      return { decision: 'confirmation-required', id: entry.id, reason };
     }
     // HOST_EXEC: reserved tier — default deny.
     audit({ tool: toolName, tier: toolTier, origin,
@@ -96,15 +107,19 @@ function createBroker({ workspace, policy, clock = () => Date.now() }) {
 
   /** The UI side resolves a confirmation request: approve/deny once. */
   function resolveConfirmation(id, approved) {
-    const req = pending.get(id);
-    if (!req) {
-      return false;
+    for (const [key, entry] of pending) {
+      if (entry.id === id) {
+        pending.delete(key);
+        audit({ tool: entry.toolName, tier: entry.toolTier,
+                origin: entry.origin,
+                decision: approved ? 'confirmed' : 'denied-by-user' });
+        if (entry.resolve) {
+          entry.resolve(approved);
+        }
+        return true;
+      }
     }
-    pending.delete(id);
-    audit({ tool: req.toolName, tier: req.toolTier,
-            origin: req.origin, decision: approved ? 'confirmed' : 'denied-by-user' });
-    req.resolve(approved);
-    return true;
+    return false;
   }
 
   /** The single execution entry. Caller supplies a pre-registered tool
@@ -118,10 +133,10 @@ function createBroker({ workspace, policy, clock = () => Date.now() }) {
       throw err;
     }
     if (g.decision === 'confirmation-required') {
+      const key = `${tool.name}|${(context && context.origin) || 'unknown'}|${(context && context.reason) || ''}`;
+      const entry = pending.get(key);
       const approved = await new Promise((resolve) => {
-        pending.set(g.id, { resolve, toolName: tool.name,
-                            toolTier: tool.tier,
-                            origin: context && context.origin });
+        entry.resolve = resolve;
       });
       if (!approved) {
         const err = new Error(`broker: ${tool.name} denied by user`);
@@ -153,6 +168,7 @@ function createBroker({ workspace, policy, clock = () => Date.now() }) {
     audit,
     ledgerPath,
     pendingCount: () => pending.size,
+    pendingIds: () => [...pending.values()].map((e) => e.id),
   };
 }
 
