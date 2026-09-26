@@ -147,3 +147,24 @@ complete+partial 状态渲染（场景1 形）、incomplete+未确认 producer�
 - evidenceService 的 host 参数当前可空（死管路即场景2 语义）；接线上 IPC/preload 通道随第二片交互驱动一并落。
 
 无 chromium/src 触碰。progress JSON `p6` = `e5-slice1-service-panel`。
+
+## E5（第二片）：五场景真实交互验收（2026-09-26）
+
+### 接线
+
+preload 增 evidence 七通道（open-workspace/start/stop/cancel/status/jump/auth-records）；main.js 增 evidence 服务处理器 + **evidence:start**（Electron 内经 xtrace-host createHost 拥有 ChromiumX：precise 模式+taps、每 start 独立 profile 子目录与 trace 子目录）与 **evidence:stop**（**经 Broker UI-origin 确认后走 stopProgress**——UI 亦不绕审计）；渲染面板（index.html 证据区六按钮 + app.js 接线，CSP 兼容经 UMD 全局、零内联脚本）。
+
+### 验收（`scripts/p6-e5-ui-scenarios.cjs`，真实 Electron 应用 + CDP 真点击，**GREEN**）
+
+| 场景 | 面板实测 |
+| --- | --- |
+| 1 正常 | `stop: complete coverage=partial [stop-requested -> stop-answered -> manifest-settled]` |
+| 3 incomplete | `cap-incomplete \| terminal=incomplete (producer-unconfirmed) \| ... \| unconfirmed producers: 1` |
+| 2 停止超时 | `stop: TIMEOUT after 0ms [stop-requested] — capture may still be settling` |
+| 4 取消 | `stop: cancelled by user [stop-requested]` |
+| 5 恢复 | 应用重启后同工作区收养既有 captures（含前四场景产物），Status 可见 |
+| console/network | session1/session2 **console 错误 0**；**非本地网络请求 0**（file/devtools/about 外为零） |
+
+调试中修复的三个真实缺陷：CSP 阻断内联脚本（改 UMD 全局直用）；evidence:start 可执行路径少层级；同 profile 二次启动撞 ChromiumX 单例锁（先关旧 host + 每 start 独立 profile/trace 子目录）；外加 S5 点击早于 app.js 装载的竞态（就绪门）。Electron 二进制按需重装（dist 292M）。
+
+progress JSON `p6` = `e5-interactive-five-scenario-green`。

@@ -66,6 +66,19 @@
       </div>
     </section>
 
+    <section id="evidenceSection" class="run-panel" data-testid="evidence-panel">
+      <h2>Evidence</h2>
+      <div class="controls">
+        <button id="btnEvidenceOpen" data-testid="evidence-open">Open workspace</button>
+        <button id="btnEvidenceStart" data-testid="evidence-start">Start capture</button>
+        <button id="btnEvidenceStop" data-testid="evidence-stop">Stop</button>
+        <button id="btnEvidenceCancel" data-testid="evidence-cancel">Cancel</button>
+        <button id="btnEvidenceStatus" data-testid="evidence-status">Status</button>
+        <button id="btnEvidenceAuth" data-testid="evidence-auth">Authorization</button>
+      </div>
+      <pre id="evidencePanel" data-testid="evidence-output" class="evidence-output"></pre>
+    </section>
+
     <section class="status-band">
       <div><span>Status</span><strong id="runState">Idle</strong></div>
       <div><span>PID</span><strong id="pid">-</strong></div>
@@ -101,6 +114,7 @@
   <script src="./reportView.js"></script>
   <script src="./rerunRecipe.js"></script>
   <script src="./captureGate.js"></script>
+  <script src="./evidencePanel.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

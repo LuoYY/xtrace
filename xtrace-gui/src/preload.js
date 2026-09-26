@@ -15,5 +15,13 @@ contextBridge.exposeInMainWorld("xtrace", {
   },
   onEvents: (callback) => {
     ipcRenderer.on("xtrace:events", (_event, events) => callback(events));
-  }
+  },
+  // P6-E5 evidence surface (main-process owned; no Node in renderer)
+  evidenceOpenWorkspace: (dir) => ipcRenderer.invoke("evidence:open-workspace", dir),
+  evidenceStatus: (captureId) => ipcRenderer.invoke("evidence:capture-status", captureId),
+  evidenceStart: (options) => ipcRenderer.invoke("evidence:start", options),
+  evidenceStop: (options) => ipcRenderer.invoke("evidence:stop", options),
+  evidenceCancel: () => ipcRenderer.invoke("evidence:cancel"),
+  evidenceJump: (ref) => ipcRenderer.invoke("evidence:jump", ref),
+  evidenceAuthRecords: () => ipcRenderer.invoke("evidence:auth-records")
 });

@@ -263,3 +263,75 @@ boot().catch((error) => {
   $("runState").textContent = "Error";
   renderDetail({error: String(error), stack: error.stack});
 });
+
+// P6-E5: evidence panel wiring (all interaction through the preload
+// bridge — no Node in the renderer).
+(function initEvidencePanel() {
+  const panel = document.getElementById("evidencePanel");
+  if (!panel || !window.xtrace || !window.xtraceEvidencePanel) {
+    return;
+  }
+  const lib = window.xtraceEvidencePanel;
+  let workspaceRoot = null;
+  const executable = null; // main falls back to the launch default
+
+  const setPanel = (text) => { panel.textContent = text; };
+
+  document.getElementById("btnEvidenceOpen").addEventListener("click", async () => {
+    try {
+      workspaceRoot = workspaceRoot || window.__xtraceE2EWorkspace || null;
+      if (!workspaceRoot) {
+        setPanel("no workspace selected (E2E harness sets window.__xtraceE2EWorkspace)");
+        return;
+      }
+      const out = await window.xtrace.evidenceOpenWorkspace(workspaceRoot);
+      setPanel(`workspace open: ${out.root} captures=${out.captures}`);
+    } catch (error) {
+      setPanel(`open failed: ${error.message || error}`);
+    }
+  });
+
+  document.getElementById("btnEvidenceStart").addEventListener("click", async () => {
+    try {
+      const out = await window.xtrace.evidenceStart({
+        workspaceRoot, executable,
+        maxTaps: window.__xtraceE2EMaxTaps ?? 5,
+      });
+      setPanel(`capture ${out.state} id=${out.captureId}`);
+    } catch (error) {
+      setPanel(`start failed: ${error.message || error}`);
+    }
+  });
+
+  document.getElementById("btnEvidenceStop").addEventListener("click", async () => {
+    try {
+      const out = await window.xtrace.evidenceStop({
+        deadlineMs: window.__xtraceE2EStopDeadline ?? 8000,
+        reason: window.__xtraceE2EStopReason || "UI scenario stop",
+      });
+      setPanel(lib.renderStopProgress(out));
+    } catch (error) {
+      setPanel(`stop failed: ${error.message || error}`);
+    }
+  });
+
+  document.getElementById("btnEvidenceCancel").addEventListener("click", async () => {
+    const cancelled = await window.xtrace.evidenceCancel();
+    setPanel(cancelled ? "cancel requested" : "nothing to cancel");
+  });
+
+  document.getElementById("btnEvidenceStatus").addEventListener("click", async () => {
+    try {
+      const rows = await window.xtrace.evidenceStatus();
+      setPanel(lib.renderCaptureStatus(rows));
+    } catch (error) {
+      setPanel(`status failed: ${error.message || error}`);
+    }
+  });
+
+  document.getElementById("btnEvidenceAuth").addEventListener("click", async () => {
+    const rows = await window.xtrace.evidenceAuthRecords();
+    setPanel(lib.renderAuthorizationRecords(rows));
+  });
+})();
+

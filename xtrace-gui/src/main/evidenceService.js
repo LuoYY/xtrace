@@ -20,11 +20,12 @@ const path = require('node:path');
 const { createWorkspace, createBroker } = require('../../../xtrace-host/src/index');
 const { createEvidenceIndex } = require('../../../xtrace-host/src/evidence-index');
 
-function createEvidenceService({ host }) {
+function createEvidenceService({ host } = {}) {
   let workspace = null;
   let index = null;
   let broker = null;
   let activeCancel = null;
+  let liveHost = host || null;
 
   function openWorkspace(dir) {
     workspace = createWorkspace(dir);
@@ -33,6 +34,10 @@ function createEvidenceService({ host }) {
     broker = createBroker({ workspace });
     return { root: workspace.root,
              captures: index.listCaptures().length };
+  }
+
+  function setHost(host) {
+    liveHost = host;
   }
 
   function requireWorkspace() {
@@ -76,7 +81,7 @@ function createEvidenceService({ host }) {
    * resolves to {state:'cancelled'} (scenario 4). */
   async function stopProgress({ deadlineMs = 8000, pollMs = 200 } = {}) {
     requireWorkspace();
-    if (!host || host.closed) {
+    if (!liveHost || liveHost.closed) {
       return { state: 'stop-timeout', stage: 'no-browser',
                reason: 'browser pipe already closed' };
     }
@@ -85,7 +90,7 @@ function createEvidenceService({ host }) {
     const stages = [];
     try {
       stages.push('stop-requested');
-      const stopPromise = host.send('XTrace.stopCapture');
+      const stopPromise = liveHost.send('XTrace.stopCapture');
       while (true) {
         if (activeCancel.cancelled) {
           return { state: 'cancelled', stages, elapsed_ms: Date.now() - started };
@@ -100,8 +105,8 @@ function createEvidenceService({ host }) {
           // coverage axis settles with the manifest shortly after
           let coverage = null;
           for (let i = 0; i < 10; i++) {
-            const manifest = host.traceFile
-                ? readManifestAt(host.traceFile) : null;
+            const manifest = (liveHost.traceFile
+                ? readManifestAt(liveHost.traceFile) : null);
             if (manifest && manifest.terminal) {
               coverage = manifest.observation_coverage ?? null;
               break;
@@ -144,7 +149,7 @@ function createEvidenceService({ host }) {
     if (!hit) {
       throw new Error(`reference not found: ${ref}`);
     }
-    const lineIndex = findLine(host, captureId, producerId, seq);
+    const lineIndex = findLine(captureId, producerId, seq);
     return {
       capture_id: captureId, producer_id: producerId, producer_seq: seq,
       api: hit.api,
@@ -209,16 +214,14 @@ function createEvidenceService({ host }) {
     return null;
   }
 
-  function findLine(hostRef, captureId, producerId, seq) {
-    void hostRef;
+  function findLine(captureId, producerId, seq) {
     const captures = index.listCaptures()
         .filter((c) => c.capture_id === captureId);
     if (!captures.length) {
       return null;
     }
     const text = fs.readFileSync(
-        path.join(captures[0].dir, path.basename(captures[0].dir)
-            .replace(/$/, '') && 'trace.ndjson'), 'utf8');
+        path.join(captures[0].dir, 'trace.ndjson'), 'utf8');
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].includes(`"producer_id":"${producerId}"`) &&
@@ -230,7 +233,7 @@ function createEvidenceService({ host }) {
   }
 
   return { openWorkspace, captureStatus, stopProgress, cancelActive,
-           evidenceJump, authorizationRecords, adoptReadOnly };
+           evidenceJump, authorizationRecords, adoptReadOnly, setHost };
 }
 
 module.exports = { createEvidenceService };

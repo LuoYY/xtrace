@@ -11,6 +11,107 @@ const {
 } = require("./xtraceProcess");
 const {attachAssetContent, readAssetManifest} = require("./xtraceAssets");
 const {generateReportForTrace} = require("./xtraceReport");
+// P6-E5: evidence service + host orchestration (main process only)
+const {createEvidenceService} = require("./evidenceService");
+const {createHost} = require("../../../xtrace-host/src/host");
+const {createBroker, TIERS} = require("../../../xtrace-host/src/broker");
+
+function electronAppRoot() {
+  // xtrace-gui/src/main/main.js -> repo root
+  return path.resolve(__dirname, "..", "..", "..");
+}
+
+const evidence = createEvidenceService({host: null});
+let evidenceHost = null;
+let evidenceBroker = null;
+
+ipcMain.handle("evidence:open-workspace", (_e, dir) =>
+    evidence.openWorkspace(dir));
+ipcMain.handle("evidence:capture-status", (_e, captureId) =>
+    evidence.captureStatus(captureId || undefined));
+ipcMain.handle("evidence:auth-records", () => evidence.authorizationRecords());
+ipcMain.handle("evidence:jump", (_e, ref) => evidence.evidenceJump(ref));
+ipcMain.handle("evidence:cancel", () => evidence.cancelActive());
+
+ipcMain.handle("evidence:start", async (_e, options = {}) => {
+  const root = options.workspaceRoot;
+  if (!root) {
+    throw new Error("workspaceRoot required");
+  }
+  // close any previous hosted browser first (a second ChromiumX on the
+  // SAME profile dir would hit the singleton lock)
+  if (evidenceHost && !evidenceHost.closed) {
+    try { await evidenceHost.close(); } catch {}
+  }
+  global.__e5StartCount = (global.__e5StartCount || 0) + 1;
+  const traceFile = options.traceFile ||
+      path.join(root, "traces", `ui-scenario-${global.__e5StartCount}`,
+                "trace.ndjson");
+  fs.mkdirSync(path.dirname(traceFile), {recursive: true});
+  const executable = options.executable ||
+      path.join(electronAppRoot(), "chromium", "src", "out",
+          "XTraceIntegration", "ChromiumX.app/Contents/MacOS/Chromium");
+  evidenceHost = await createHost({
+    executable,
+    browserArgs: [
+      `--user-data-dir=${path.join(root, "p" + global.__e5StartCount)}`,
+      "--xtrace-enable", `--xtrace-file=${traceFile}`,
+      "--xtrace-categories=reverse", "--xtrace-causality=sync",
+      "--xtrace-ignition-observer",
+      "--js-flags=--allow-natives-syntax --max-opt=0",
+    ],
+    workspaceRoot: root,
+    traceFile,
+  });
+  evidenceBroker = createBroker({workspace: {dir: () => path.join(root, "ledger"),
+      root, contains: () => true, assertInside: (t) => t}});
+  const capture = await evidenceHost.send("XTrace.startCapture", {
+    categories: "reverse", mode: "ignition-precise", tier: "ignition",
+    valueObservation: {
+      scriptPattern: "",
+      windows: [{id: 0, start: 0, end: 4000000}],
+      maxTapsPerActivation: options.maxTaps ?? 5,
+      maxTapsPerWindow: options.maxTaps ?? 5,
+    },
+  });
+  const page = await evidenceHost.send("Target.createTarget", {url: "about:blank"});
+  const {sessionId} = await evidenceHost.send("Target.attachToTarget",
+      {targetId: page.targetId, flatten: true});
+  await evidenceHost.send("Runtime.enable", {}, sessionId);
+  const LOOP = `(()=>{const s=document.createElement('script');
+    s.textContent='window.__e5=(function(){function f(n){var acc=0;for(var i=0;i<n;i++){acc=(acc+i*7)%4096;}return acc;}var r={v:f(20)};return r;})();';
+    document.documentElement.appendChild(s);
+    return window.__e5;})()`;
+  await evidenceHost.send("Runtime.evaluate", {expression: LOOP,
+      returnByValue: true}, sessionId);
+  await new Promise((r) => setTimeout(r, options.settleMs ?? 1200));
+  return {state: capture.state, captureId: capture.captureId, traceFile};
+});
+
+ipcMain.handle("evidence:stop", async (_e, options = {}) => {
+  // the UI's stop goes THROUGH the Broker (UI origin, confirmed) — the
+  // audit trail covers every execution entry, the UI included
+  const reason = options.reason || "UI scenario stop";
+  evidence.setHost(evidenceHost);
+  const tool = {
+    name: "jsvmp_trace.stop", tier: TIERS.STATEFUL_CONTROL,
+    run: async () => evidence.stopProgress(options || {}),
+  };
+  const gateResult = evidenceBroker.gate(tool.name, tool.tier,
+                                         {origin: "ui", reason});
+  const exec = evidenceBroker.execute(tool, {}, {origin: "ui", reason});
+  if (gateResult.decision === "confirmation-required") {
+    for (let i = 0; i < 200 && evidenceBroker.pendingCount() > 0; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      for (const id of evidenceBroker.pendingIds()) {
+        evidenceBroker.resolveConfirmation(id, true);
+      }
+    }
+  }
+  const out = await exec;
+  return {state: out.state, coverage: out.coverage, stages: out.stages,
+          pair: out.pair || null};
+});
 
 let mainWindow = null;
 let currentRun = null;
