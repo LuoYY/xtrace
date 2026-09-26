@@ -187,3 +187,30 @@ progress JSON `p6` = `e5-interactive-five-scenario-green`。
 过程修复两处真实缺陷：jsvmp_query 先切后滤导致 Ignition 行不在流头时空返回（改宽窗扫描再切——Host 套件 14/14 保持）；E6 驱动器 A 组注册顺序（索引就绪后注册查询工具）。
 
 progress JSON `p6` = `e6-closed-loop-green`。
+
+## E7：证据包与终审提交（2026-09-26）
+
+### 回归矩阵（全部亲跑）
+
+| 门禁 | 结果 |
+| --- | --- |
+| xtrace-host 套件 | 14/14（E1 边界/Broker/协商/孤儿 + E2 重建/引用 + E3 env/真机 pair + E4 切片/循环） |
+| xtrace-gui 套件 | 216/216（211 旧 + E5 证据服务/面板 3 + v3 代表性 2） |
+| P5.5 冻结反例 | S0 python 8/8 保持绿 |
+| 五场景交互验收 | GREEN（含 E7 重跑时抓出并修复 S1 就绪竞态——加载门禁推广到两会话） |
+| E6 闭环 | GREEN（九阶段一次通过） |
+| 测试目标门禁 | PASS（controller+producer 先重建后跑） |
+| 补丁栈 | verify pass（本轮 P6 全程零 chromium/src 触碰，栈与 accepted-p55 状态一致）——证据 `validation/p6-patch-verify.json` |
+
+### 工单完成对照（§8 完成定义）
+
+草稿 §12 P6 行 + 首批清单逐项能力矩阵实测一致（13 项 A 组注册、B 组五项+env 七项经 Broker、frx 依赖两项 unavailable 带原因）+ 债务零（E0：D-P55-1 同程序等价、analyzer/GUI v3）+ E5 真实交互五场景 GREEN + E6 闭环一次通过 + Broker 审计覆盖全部执行入口（E6 断言 + E5 UI stop 同径）。
+
+### 诚实边界
+
+- frx L1 源码未迁入（babel/dispatcher_probe 两项 unavailable 披露）；护栏按"原语义不削弱"实现。
+- env_open 的完整浏览器随环境重启语义为工作区记录级（profile 目录绑定）；E6 用独立 profile 实测隔离，多环境轮换的会话级切换随 P7 完整环境管理器。
+- Agent 模型适配器为注入回调（P6 不默认外发）；E6 用脚本化模型走完真实工具链。
+- E5 面板为证据区最小实现（状态/进度/授权/跳转原语）；证据跳转的 UI 内嵌预览随后续迭代。
+
+progress JSON `p6` = `e0-e7-final-package-submitted`。**申请：按工单长程单次终审；accepted-p6 由架构师标记。**

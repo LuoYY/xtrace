@@ -156,6 +156,13 @@ function writeIncompleteFixture() {
   let cdp = app.cdp;
   try {
     await cdp.eval(`window.__xtraceE2EWorkspace = ${JSON.stringify(workspaceRoot)}`);
+    // clicks must land AFTER app.js attached its handlers (same race as
+    // session 2 — hit once under load in the E7 matrix rerun)
+    await waitFor(async () => cdp.eval(
+        "document.readyState === 'complete' && " +
+        "!!document.getElementById('btnEvidenceOpen') && " +
+        "!!window.xtraceEvidencePanel && !!window.xtrace"), 15000,
+        'session1 page ready');
 
     // scenario 1: NORMAL — start (tiny budget -> real skips) -> stop
     await cdp.click('evidence-open');
