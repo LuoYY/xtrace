@@ -127,3 +127,23 @@ progress JSON `p6` = `e0-debt-cleared`（下一步：E1 Host 骨架 + Broker 核
 - 模型适配器为注入回调：P6 不默认外发（工单非目标），E6 闭环用脚本化模型。
 
 无 chromium/src 触碰。progress JSON `p6` = `e4-agent-loop-landed`。
+
+## E5（第一片）：证据服务 + 渲染面板（2026-09-26）
+
+### 实现
+
+| 模块 | 内容 |
+| --- | --- |
+| `xtrace-gui/src/main/evidenceService.js` | 主进程桥接 xtrace-host（workspace/派生索引/Broker）：`captureStatus`（terminal/coverage/**丢弃计数四元组** dropped/failed/sampled_out/partial_observations + 未确认 producer 名单）、`stopProgress`（分阶段 stop-requested→stop-answered→manifest-settled，**截止错失→stop-timeout**、`cancelActive`→cancelled）、`evidenceJump`（capture|producer|seq 引用→trace 行号+事件）、`authorizationRecords`（Broker 审计行）、`adoptReadOnly`（§5.4 恢复路径：重启后只读收养产物）。Node 权限全部留在主进程 |
+| `xtrace-gui/src/renderer/evidencePanel.js` | 渲染面板纯逻辑（UMD 同 reportView 惯例，零 Node）：状态/coverage/丢弃计数渲染、stop 进度（含 TIMEOUT 与 cancelled 文案）、授权记录渲染、事件→证据引用构造 |
+
+### 门禁（GUI `npm test` **216/216**：213 旧 + 3 新）
+
+complete+partial 状态渲染（场景1 形）、incomplete+未确认 producer（场景3 形）、stop-timeout（场景2 形，死管路）、**resume 只读收养**（场景5 形：索引删除后 adoptReadOnly 重建）、授权记录渲染、证据跳转引用解析（cap-auth|producer|seq→行号，未命中拒绝）。
+
+### 边界（如实）
+
+- **五场景真实交互验收未做**（本片交付逻辑层与服务层；工单 E5 明言"逻辑测试不能替代交互验收"）。第二片：以 Electron 应用实测启动驱动五场景（正常/停止超时/incomplete/取消/恢复），逐场景点击+console/network 检查。场景4（取消）的完整交互路径亦在第二片。
+- evidenceService 的 host 参数当前可空（死管路即场景2 语义）；接线上 IPC/preload 通道随第二片交互驱动一并落。
+
+无 chromium/src 触碰。progress JSON `p6` = `e5-slice1-service-panel`。
