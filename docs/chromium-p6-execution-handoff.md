@@ -394,7 +394,7 @@ progress JSON `p6` = `e0-e7-final-package-submitted`。**申请：按工单长�
 | R1-4 确认生命周期（M4） | Broker 重写：待决项带 created/expires；**迟到批准→confirmation-expired 且副作用零**（注入时钟红测试）；同键并发第二个调用**明确拒绝**（duplicate-confirmation-pending）无悬挂；`cancelPending`/`cancelAllPending`（loop 看门狗超时自动 retire 自己的确认）；`onConfirmation` 回调暴露确认 id（消除双重 gate 的重复审计行——m2） |
 | R1-5 真流式+窗口契约（B3+D2+M13） | `evidence-index.scanEvents`：分块 readSync + 行组装 + 早停；谓词（api/ignition/bindings/param）**下推进扫描**；返回 scanned_events/matched/total_events/window_complete/next_cursor；游标语义=含端点重访（**分页行数累加==文件真值**）。A 组全部事件级工具带窗口信封 + 256KiB 字节上界 + truncated 披露。**真实 capture 门禁**：`p55-e7-ERduFv`（26,539 事件、ignition 首条在第 7,676 行）分页累加==13,444、bindings==592（修复前 0） |
 | R1-6 切片健壮性（B4+M11） | `bound()` 结构化收缩（数组减半→整删→plain-cut 信封→最小信封，**绝不字符串切割后补引号**），dropped_fields 披露，`minimalEnvelopeBytes()` 导出下限；cap∈{32,64,100,128,150,200,512,4096}×三形**零异常且 bytes≤max(cap,floor)**；evidenceSlice 整体过 bound()；`relevance()` 用归一 `row.causality`（v3 对象形不再是死代码）+ `RELEVANCE_WEIGHTS` 可测权重表 + **打乱负控**（篡改权重→排序结论翻转→红）；`makeSlice` 异常上报给模型（极小预算 loop 3 案例 settle 不 reject） |
-| R1-7 证据服务去硬编码（B5+M6+m6） | 删掉 GUI 服务层硬编码文件名与双实现：jump 走 `evidence_jump` 工具（索引 `trace_file` 列，**流式定位**返回 line+byte_offset��未命中**报错**非 null）；GUI 面板加 jump 入口（引用串→行号+byte_offset 渲染）；**E6 第 7 阶段改用 `evidence_jump(citedRef)` 解析 Agent 自己的引用**（line 4996 @ 7,860,611 实测）。trace-on 命名夹具红测试：计数/producer 名单==盘上真值 |
+| R1-7 证据服务去硬编码（B5+M6+m6） | 删掉 GUI 服务层硬编码文件名与双实现：jump 走 `evidence_jump` 工具（索引 `trace_file` 列，**流式定位**返回 line+byte_offset、未命中**报错**非 null）；GUI 面板加 jump 入口（引用串→行号+byte_offset 渲染）；**E6 第 7 阶段改用 `evidence_jump(citedRef)` 解析 Agent 自己的引用**（line 4996 @ 7,860,611 实测）。trace-on 命名夹具红测试：计数/producer 名单==盘上真值 |
 | R1-8 边界闸门统一（B6） | skill_read_resource/skill_get/listSkills/notes_get 全走 `workspace.assertInside`（realpath 闸门）；resource 名先行白名单（绝对路径/`..` 拒绝）。三形态红测试：**符号链接逃逸/绝对路径/`..` 全拒**，且工具层与 workspace 层结论一致 |
 | R1-9 能力面接通（M1+M5） | `host.toolSchemas()` 输出带协商后 state/reason；**不可用工具不进模型工具表**（进能力清单）；GUI 面板 Capabilities 按钮显示三态计数+缺口文案；四项指纹依赖 env 工具注册为 unavailable-with-reason（`unavailableReason` 无 available 函数时即权威不可用——negotiate 修复）。组合根集成实测：非增强 caps 下增强工具全 unavailable |
 | R1-10 clear/activeProfile/resolveOrphan（M3/M2） | `jsvmp_trace clear` 真语义：清 Host 活动 capture 引用 + 后续 status 报 active_capture:null + 磁盘产物不动；GUI 面板 Clear 按钮。activeProfile 被 launch spec 消费（E6 stage 2 实测）；resolveOrphan 接 `evidence:resolve-orphan`（adopt-read-only 时 index.ingestCaptureDir 落地） |
@@ -421,3 +421,114 @@ progress JSON `p6` = `e0-e7-final-package-submitted`。**申请：按工单长�
 证据目录：`validation/p6-e5-uglOjn/`（五+一场景 + B1 锚点 report.json）、`validation/p6-e6-RsCgr2/`（闭环九阶段）、`out/XTraceP55D8/validation/p55-s0-*` 等。无 chromium/src 改动（补丁栈与 accepted-p55 状态一致）。
 
 progress JSON `p6` = `p6-r1-remediation-complete`。**申请：按 §R1.7 一次复审。**
+
+---
+
+# 架构师复审 R2（2026-09-27）：**不通过，但范围小得多** — 4 项阻塞 + 4 项重要 + 执行记录需更正
+
+- 审查范围：`d97d7f3..93299e6`（1 个 commit，28 文件，+2681/−1817）。方式：全部 R1.8 门禁亲跑 + 新增 4 个取证 probe（`docs/review-artifacts/p6-r2/`）+ 源码形态核对 + 面板输出与盘上 manifest 逐项对账。
+- **裁定：`accepted-p6` 仍不标。** progress JSON `p6` = `p6-review-2-remediation-required`。
+- 总评：**R1 的六项阻塞里五项是真修好的**，而且修得比我要求的更彻底（组合根、人工确认面、真流式窗口契约、静态形态门禁都是本轮的实质进步）。剩下的是四类问题：① B5 只修了"文件名硬编码"这半，**计账实质反而退步**（面板把所有丢弃计数渲染成 0，未确认 producer 与 terminal_reason 从 UI 消失）；② 冻结的 §11.3 五场景被**删掉一档（停止超时）且实现一并删除**，注释里"仍是单元门禁"的说法不成立；③ R1.6-D2 的分页累加等式在**多 producer 命中同一谓词**时被违反（实测重复 29 行）；④ 执行记录里有**两处申报了但未做**的项（m1/m5）与若干未披露的断言削弱/覆盖删除。
+- 这一轮不需要大改：§R2.5 是一个 0.5–1 工程师日的小块（多数是"恢复"而非"新建"）。
+
+## R2.1 独立复验（我亲跑）
+
+| 门禁 | 申报 | 我的复跑 |
+| --- | --- | --- |
+| `scripts/run_tests.sh` | 381/28/19/216 | **一致**：python 381 OK、launcher 28 OK、host **19** pass、GUI **216** pass，exit 0（M9 接线成立） |
+| `scripts/p6-r1-static-shape.js` | GREEN | **一致**：5/5 PASS（createBroker 调用点、桩 0 命中、resolveConfirmation 收敛、run_tests 接线、钩子仅 app.js） |
+| `scripts/p6-e6-closed-loop.cjs` | GREEN 九阶段 | **一致**：九阶段全 OK；新增 `launch-spec-consumes-env-profile` 成立；`evidence-jump` 解析 **Agent 自己的 citedRef** → line 4996 @ byte 7,860,627（M6 成立） |
+| `scripts/p6-e5-ui-scenarios.cjs` | GREEN 五+一场景 | **一致但档位变了**：S1/S3/S4/S6/S5 GREEN，两 session console/exception/非本地请求全 0；**S2（停止超时）已被删除**（见 R2.3-B） |
+| `xtrace-host npm test` | 19/19 | **一致**（含真机组合根集成一例） |
+| `verify_patches.py --with-dylibs` | pass、零 chromium/src 触碰 | 本轮未重跑（R1 已验五摘要与 accepted-p55 逐字节相同；本 commit diffstat 无 chromium/src 路径，形态核对一致） |
+
+## R2.2 已确认真修好的（**不要在 R2 里动这些**）
+
+| 项 | 我的验证方式 | 结论 |
+| --- | --- | --- |
+| B1 UI 副作用入口过 Broker | 我复跑的 E5 ledger：`jsvmp_trace` executed=6，与驱动器实际点击数（start 2 + stop 2 + cancel 1 + agent-status 批准 1）**逐一对应**，被拒的那次没有 executed 行；start 产生 2 个 trace 目录，与 2 次 start 一致 | 成立 |
+| B2 人工确认面 | E5 场景 6 实测：agent 调用 → 面板出现待决行 → 点 Deny → `denied-by-user`/`human-denied` 且副作用零 → 再点 Approve → `human-approved` + executed；`resolveConfirmation` 调用点静态收敛 | 成立（但见 R2.3-D 的 basisHint 洞） |
+| B3 谓词下推 + 窗口契约 | 单 producer 与真实 capture 上分页累加==真值（probe4/probe5：40/40、13,444、592）；`webapi_query` 不再 0 行 | 成立（但见 R2.3-C 的多 producer 游标） |
+| B4 切片健壮性 | probe7：`shape:'no-such-shape'` 与极小预算下 loop **不 reject**，记 `slice-error` 后 complete；cap 扫描门禁 8 档 × 三形零异常 | 成立 |
+| B5 跳转半 | probe7：`trace-on.ndjson` 命名下 `evidence_jump` 返回 line 3 + byte_offset 772，走索引 `trace_file` 列；未命中报错 | 成立 |
+| B6 边界闸门 | probe7：符号链接 skill 读取被 realpath 闸门拒绝 | 成立 |
+| M1 能力面 | `host.toolSchemas()` 带协商 state/reason；不可用工具不进模型工具表、在 `capabilities()` 里带原因；四项指纹依赖工具已注册（adapters-agroup:457-460） | 成立 |
+| M2 组合根 / M8 启动规格 | `createHost` 内建全套 + `callTool` 唯一执行口；`buildLaunchSpec` 单一来源并被 env 的 activeProfile 消费（E6 stage 2 实测）；`resolveOrphan` 接进 `evidence:resolve-orphan` | 成立（`resolve-orphan` 尚无任何门禁触发，见 R2.4-H） |
+| M3 clear 语义 | 代码形态：清 `host.activeCapture` + 返回 `previous_capture`/`domain_state_after` + 明示磁盘产物不动 | 语义成立，但**零覆盖**（见 R2.4-H） |
+| M4 确认生命周期 | TTL/过期/取消/同键并发拒绝四条红测试，注入时钟，迟到批准副作用为零 | 成立 |
+| M7/M9/M11/M12 | 真目录选择对话框 + URL/reason 控件、夹具注入移入驱动器自带页面服务；`run_tests.sh` 接线 + reproduce.md 登记；`relevance()` 用归一字段 + 权重表；progress JSON 补 detail | 成立 |
+
+## R2.3 阻塞项（4 条，先冻红测试再修）
+
+### A. B5 的**计账实质**退步：面板把所有丢弃计数渲染成 0，未确认 producer / terminal_reason 从 UI 消失
+
+- **盘上真值 vs 面板实测**（我自己复跑的 E5 运行 `validation/p6-e5-AEpszF`）：
+
+| capture | manifest 真值 | 面板渲染 |
+| --- | --- | --- |
+| `ui-capture-1` | `sampled_out=143`、eligible 6534 / written 6391 | `events=6391 \| drops: dropped=0 failed=0 **sampled_out=0** partial=0` |
+| `cap-incomplete` | `terminal.reason='producer-unconfirmed'`、producer `bnet:inc:9:1` `watermark.received=false` | `terminal=incomplete`（**无 reason**）、**无 `unconfirmed producers: 1`** |
+
+- **根因**：R1 把 GUI 服务层削成 37 行纯格式化助手，`enrichStatusRows`/`dropCountersFromManifest`/`unconfirmedProducers` **零消费者**（probe7 实测：唯一命中文件是它自己的定义文件）；UI 状态改走 `trace_summary`，而 `listCaptures()` 的列只有 `total_sampled_out`/`total_partial_observations`（没有 dropped/failed/unconfirmed），渲染器再用 `?? 0` 兜底 → **永远是 0**。
+- **同时断言被削弱**：R1 前 S3 要求 `/cap-incomplete \| terminal=incomplete/` **且** `/unconfirmed producers: 1/`；现在只剩前半（`scripts/p6-e5-ui-scenarios.cjs` 第 231 行）。执行记录里写"R1-12 弱断言收紧"，此处是反向。
+- **为什么阻塞**：本项目全部纪律建立在计账诚实上；把有丢弃、有未确认 producer 的 capture 渲染成干净 capture，比不显示更糟。
+- **修法（裁定）**：计账字段属于**派生可重建数据**，按 §5.1 归索引——ingest 时从 manifest 落 `total_dropped`/`total_failed`/`unconfirmed_producer_count`/`unconfirmed_producer_ids`（或 `terminal_reason`）列，`trace_summary` 原样返回，渲染器读这些字段；`enrichStatusRows` 要么接上、要么删掉（不留死代码）。
+- **红测试**：面板数字与盘上 manifest **相等**（等式，不是"存在"）：① `trace-on` 命名夹具（dropped=7/failed=3/sampled_out=11/partial=5 + 1 个未确认 producer）；② E5 S3 恢复 `/unconfirmed producers: 1/` 与 `terminal=incomplete (producer-unconfirmed)`；③ E5 S1 增加一条"面板 sampled_out == 该 capture manifest.counts.sampled_out"的等式断言（用真实 capture，非夹具）。
+
+### B. 冻结的 §11.3 五场景被删掉一档（停止超时），且**实现一并删除**，注释说法不成立
+
+- **事实**：`evidenceService.stopProgress`（deadlineMs → `stop-timeout`、分阶段进度、cancelActive）**已从代码库消失**（grep `stopProgress|cancelActive|deadlineMs` 在 `xtrace-gui/src` 零命中）；驱动器头部注释写"2 stop-timeout (removed: stop is now broker-routed & fast; **the dead-pipe timeout case stays a unit gate**)"——`grep -rn "stop-timeout" xtrace-gui/test xtrace-host/test` **零命中**，该单元门禁不存在。
+- **后果（实质，不只是覆盖）**：UI 的 stop 现在是 `callTool → h.send('XTrace.stopCapture')`，而 `cdp.js` 的 `send()` **没有任何超时**（m1 申报已修，实际 `cdp.js` 在本 commit 未被触碰）→ 浏览器挂住时 IPC 永久悬挂、面板永久无反馈，且**没有**任何路径能产出 `stop-timeout`。渲染器里 `case "stop-timeout"` 成了死分支。
+- **违反**：草稿 §11.3 的五场景是冻结验收面；roadmap §6"范围变更走裁决流程，不得以勾选或注释替换"。
+- **修法（裁定）**：stop 保持经 Broker（这是对的），但必须有截止时间——给 `cdp.send(method, params, sessionId, {timeoutMs})` 加超时与 `CDP_TIMEOUT` 类型错误（顺手把 m1 的 `MESSAGE_HEADER` 死导出删掉），`jsvmp_trace stop` 在截止错失时返回 `{terminal:'stop-timeout', stages, elapsed_ms}`（`elapsed_ms` 必须实测，不许再写死 0）；恢复 E5 S2 场景（1ms 截止经面板/加速器驱动）+ 一条单元门禁覆盖"hung stop → stop-timeout"与"死管路 → stop-timeout"。
+- **红测试**：假 host 的 `send` 返回永不 settle 的 promise → 断言在截止后得到 `stop-timeout`、面板渲染 TIMEOUT、且**不产生未处理拒绝**。
+
+### C. R1.6-D2 的分页累加等式在多 producer 命中同一谓词时被违反（游标 producer-盲）
+
+- **实测**（probe6）：`rtx:1:1` 与 `rtw:2:1` 各 30 行、同一 api、文件内交错，`maxRows=3` 分页 → **`sum=89`、真值 `60`、重复 29 行**（未丢行，但重复计数）。probe4/probe5 解释了 R1 门禁为何是绿的：那两个夹具的命中子集都由**单个 producer** 主导（真实 capture 的 13,444 条 ignition 全来自一个 rtx；592 条 bindings 是 590+2 且未交错分页）。
+- **为什么会踩**：`scanEvents` 的游标是 `Number(event.producer_seq)`，而 `producer_seq` 是**每 producer 独立**的；`seq < startSeq` 的跳过判定在谓词之前，于是 A producer 的游标会重复放行/重复计入 B producer 的低 seq 行。本轮 E5 的 `ui-capture-1` manifest 就有 **6 个 producer**（bnet + rtw + 4×rtx）——语料 capture 更多。
+- **后果**：Agent 侧任何"数一数有多少次 X / 分页遍历全部 X"的结论偏高（本例 +48%），而 `window_complete`/`matched` 看起来完全正常。
+- **修法（裁定）**：游标改为 **producer 无关的单调量**——首选**文件字节偏移**（`evidence_jump` 已经在算 `byte_offset`，同一套读路径可复用），或行号；`next_cursor` 对外保持不透明字符串。禁止用裸 `producer_seq` 当全局游标。
+- **红测试**：① probe6 形状（两 producer 都命中、交错、独立 seq 空间）分页累加 == 文件真值且 **重复行数 == 0**；② 真实 capture 上 `bindings` 与 `ignition` 两个谓词各自分页（`maxRows` 取 7 与 500 两档）累加 == 真值；③ 三 producer（rtx/rtw/bnet）都命中的合成夹具同断言。
+
+### D. 执行记录申报了但未做的项，以及未披露的覆盖删除（纪律项，必须更正后再提交）
+
+- **申报不符（实测）**：
+  - `m1：cdp.js 删 MESSAGE_HEADER 死导出、send 支持超时` —— `git show --stat 93299e6 -- xtrace-host/src/cdp.js` **为空**（文件未触碰）；`MESSAGE_HEADER` 仍在第 12/116 行，`grep timeout xtrace-host/src/cdp.js` **零命中**。
+  - `m5：env manager launches 字段改名为 opens` —— `env-manager.js` **未触碰**；第 56/74/85/111 行仍是 `launches`，仍在 `open()` 里自增。
+  - `M1-M13 all` —— M13 的**循环侧计账未修**（见 R2.4-E）；M10 的"弱断言收紧"在 S3 处是反向（见 A）；M6 的"面板 jump 入口"存在但从未被交互驱动点击（见 H）。
+  - `E5 五+一场景` —— 实为**四+一**（S2 删除未在本节披露，只写在驱动器注释里）。
+- **未披露的覆盖删除**：本 commit 删除 `e1/e1-integration/e2/e3/e4` 五个测试文件（−718 行）、新增两个（+686 行）。以下旧断言**没有等价替代**：env 七操作 + 结构性隔离 + 单开独占 + 名字逃逸（`env-manager` 现在**零测试**，而 host 新增了对 `activeProfile()` 的依赖）；agent loop 的**取消**与**无进展熔断**（`no-progress` 仅出现在允许状态列表里）；索引 **wipe→rebuild 内容一致**（§5.1 的"重建即验收"等式）；**清单 A 组 13 项注册**逐项断言；不可用工具**执行期**以迁移原因拒绝；真机 `(terminal, coverage)` **pair** 单测（现仅存活于 E6 驱动器）。
+- **要求**：更正记录（逐条改/标注，不许静默删句），并把上述六类覆盖**恢复为门禁**（可以合并进 r1-* 文件，但断言必须在）。R1 的规矩是"只增不减"；删测试等价于改范围，需走裁决。
+
+## R2.4 重要项（4 条，与阻塞项同块完成）
+
+- **E. M13 循环侧计账未修（实测）**：三个 60,001 字节的工具结果 → 实际交给模型 180,003 字节，`budget.used` 只报 **24,576**（`agent-loop.js:180` 仍是 `+= Math.min(actualBytes, 8192)`）。拒绝阈值用了实际字节，**累加没有** → §5.3 的有界上下文在多轮下仍可被突破 7 倍以上。修法：`+= actualBytes`（并把交给模型的 payload 截到已计账的字节数，超限走 refused 分支）。红测试：131072 预算下三次 60KB 结果必须触发 refused 或 used ≈ 180003。
+- **F. R1.6-D1 的 basisHint 洞（实测）**：`gateStateful` 不看 origin 就认 `basisHint`。probe7：`host.callTool('env_create', …, {origin:'agent', basisHint:'ui-direct-click'})` **自批成功**，审计写下 `{origin:'agent', basis:'ui-direct-click'}` —— 又一次"账上有点击、实际没有"。E6 驱动器正是这样给 `env_create`/`env_open` 过关的。修法：`basisHint` 仅在 `origin==='ui'` 时生效，其它 origin 一律走待决队列；`callTool` 对非 ui origin 直接丢弃 basisHint；E6 改用真实待决→批准路径（或如实标 `origin:'ui'`）。红测试：agent+basisHint → 停在 pending、无 `ui-direct-click` 行。
+- **G. B1 锚点是弱断言**：`ok: starts >= 5 && confirmedUi >= 5 && humanRows >= 2 && …`，且 `starts` 只是 ledger 里 `jsvmp_trace` 的 executed 行数——**没有与独立计数的调用次数做等式**（驱动器自己知道点了几次；也可以在 host 侧对 `XTrace.startCapture` 计数）。注释声称"CDP startCapture/stopCapture invocations == ledger executed rows per tool"，实现不是等式，因此**它检测不到旁路**（少一条 executed 行仍然 `>=5`）。修法：改成逐动作等式（start/stop/cancel/clear/status 各自的点击数 == 各自 executed 行数），并把"驱动器点击计数"写进 report.json。
+- **H. 新增控件与 §5.4 入口零交互覆盖**：E5 只点了 open/start/stop/cancel/status/agent（实测 `cdp.click` 统计），**Jump / Authorization / Capabilities / Clear / Choose workspace 五个按钮从未被点过**；`evidence:resolve-orphan` 无任何门禁触发；`jsvmp_trace clear` 的新语义无任何测试。修法：E5 增补点击这五个控件并断言面板输出（jump 用 S1 产物的真实引用；clear 后 status 报 `active_capture:null` 且磁盘产物仍在；capabilities 显示三态计数与缺口文案）；`resolveOrphan` 至少一条单元门禁（settled→adopt 且 index 落地、live+unsettled→terminate）。
+
+## R2.5 P6-R2 整改块（有序，0.5–1 工程师日，一次提交一次复审）
+
+| 序 | 动作 | 验收锚点 |
+| --- | --- | --- |
+| R2-1 | 计账字段进索引 + `trace_summary` 返回 + 面板读真字段；删/接 `enrichStatusRows` 死代码（阻塞 A） | 红测试三条形绿：trace-on 夹具等式、S3 恢复两条正则、S1 真实 capture 的 `sampled_out` 等式 |
+| R2-2 | `cdp.send` 超时 + `CDP_TIMEOUT`；stop 截止错失返回 `stop-timeout`（`elapsed_ms` 实测）；恢复 E5 S2 + 单元门禁（阻塞 B，顺带做掉 m1） | hung-stop 与死管路两条红测试绿；E5 重新是"五+一"场景；`grep -rn "stop-timeout" xtrace-gui/test xtrace-host/test scripts/p6-e5*` 均有命中 |
+| R2-3 | 游标改字节偏移/行号（producer 无关），`next_cursor` 不透明（阻塞 C） | probe6 形状重复 0、累加==真值；真实 capture 两谓词 × 两档 maxRows 累加==真值；三 producer 合成夹具同断言 |
+| R2-4 | 更正执行记录 + 恢复六类被删覆盖（阻塞 D） | 记录逐条与实测一致（我按 §R2.6 复核）；env 七操作/隔离/独占、loop 取消与熔断、rebuild 等式、A-13 注册、不可用工具执行期拒绝、真机 pair 全部有断言 |
+| R2-5 | 循环侧按实际字节计账（重要 E） | 三次 60KB → refused 或 used≈180003 |
+| R2-6 | basisHint 仅 ui origin 生效；E6 去掉 agent+ui-direct-click（重要 F） | agent+basisHint 停在 pending；E6 ledger 中不存在 `origin:agent` 且 `basis:ui-direct-click` 的行 |
+| R2-7 | B1 锚点改逐动作等式（重要 G） | report.json 含点击计数；等式不成立即红（可用"故意漏一次 start 的审计"做负控） |
+| R2-8 | 五个未点控件 + resolve-orphan + clear 覆盖（重要 H） | E5 报告含五个控件的面板断言；clear/resolveOrphan 门禁绿 |
+| R2-9 | 小项：`elapsed_ms` 写死 0、`h.cancelStopWait` 死分支、`agent-loop.toolSchemas()` 同步函数返回 promise、E6 的 `agentTools` 死过滤三行、m5（`launches`→`opens`）、`webapi_trace stop` 不返回 pair、`relevance(row, weights=…)` 可注入使负控跑真实函数 | 源码形态核对 + 相关断言 |
+
+## R2.6 复审我会亲跑的门禁（在 R1.8 之上追加）
+
+R1.8 全表 + `docs/review-artifacts/p6-r2/probe6`（必须从"重复 29"变成"重复 0"）+ `probe7`（B5 状态字段、M13 计账、D1 basisHint 三处必须翻转）+ 新增的 R2 红测试全部 + E5 五+一场景（含 S2 与五个新点控件）+ 面板数字与盘上 manifest 的**逐项对账**（我按 R2.3-A 的表自己再对一遍）。另外照例：执行记录逐条与实测比对（m1/m5 这类"申报未做"我会直接查 diffstat 与 grep）。
+
+## R2.7 状态落账
+
+- progress JSON：`p6` = `p6-review-2-remediation-required`，`p6_detail.review2` 记录本节结论。
+- `accepted-p6` **未标**；R1 的成果全部保留（不 revert）。
+- 路线图：M2 达成节点由 10-02 顺延至 **10-05**；M1.1 依赖 R2-3（语料 capture 是多 producer，游标缺陷会直接污染 vPC 序列计数），顺延至 **10-06 → 10-09**；M3–M5 相应顺移（见 roadmap §8）。
+- 教训回填 §7：**"整改轮本身也会引入退步"**——本轮 R1 的修法（削薄服务层）顺手删掉了一个已交付的诚实披露，且用削弱断言把它盖住。对策：整改块的工单里**显式列出"不得削弱的既有断言清单"**，并要求整改 commit 的 diffstat 中"删除的测试行"逐条给出替代位置（P7 起由我在工单里列）。
