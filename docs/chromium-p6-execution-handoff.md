@@ -571,3 +571,81 @@ R1.8 全表 + `docs/review-artifacts/p6-r2/probe6`（必须从"重复 29"变成"
 | `verify_patches.py --with-dylibs` | pass（零 chromium/src 触碰） |
 
 progress JSON `p6` = `p6-r2-remediation-complete`。**申请：按 §R2.5 一次复审。**
+
+---
+
+# 架构师复审 R3（2026-09-27）：**通过 —— 标 `accepted-p6`**，附三条硬债务（M3 进入条件）
+
+- 审查范围：`a405fa1..bc71a2e`（1 个 commit，18 文件，+680/−134）。方式：R2.6 门禁清单全部亲跑 + probe4/5/6/7 复跑 + **面板输出与盘上 manifest 逐项对账** + E6 ledger 逐行核 + 源码形态核对（basisHint 条件、TTL 定时器、索引列、stop 截止）。
+- **裁定：`accepted-p6` 已标**（progress JSON `p6` = `accepted-p6`，债务 D-P6-1/2/3 登记为 **M3 进入条件**）。**M2（最小 Agent 闭环）机制层达成**，比 v1.3 估计的 10-05 提前 8 日。
+- 一句话结论：四项阻塞**全部真修好且我独立复现**，四项重要项与小项亦落实，执行记录开头先更正了 R1 的不实申报（R2-D 的正文要求）；另外他们从我的 probe7 里发现并修掉了一个**我没抓到的真实缺陷**（待决确认无活动 TTL 定时器 → 停靠进程静默 exit 0）。残留三条都是"门禁强度/可靠性"级，不是产品行为缺陷——行为我已直接对账验证，因此按 D-P55-1 的先例转为**下一档进入条件**而非再开一轮。
+
+## R3.1 独立复验（我亲跑）
+
+| 门禁 | 申报 | 我的复跑 |
+| --- | --- | --- |
+| `scripts/run_tests.sh` | 381/28/29/216 | **一致**：python 381 OK、launcher 28 OK、host **29** pass、GUI **216** pass，exit 0 |
+| `scripts/p6-r1-static-shape.js` | 5/5 | **一致** GREEN |
+| `scripts/p6-e6-closed-loop.cjs` | 九阶段 GREEN | **一致**（`validation/p6-e6-xPbz16`）：env profile 被启动规格消费、stop-pair `{complete, partial}`、validator exit 0、citedRef → line 4796 @ byte 7,567,999 |
+| `scripts/p6-e5-ui-scenarios.cjs` | 九场景 GREEN | **第二次跑 GREEN**（`validation/p6-e5-SQj0yC`）；**第一次跑失败**于首个 `workspace open` 等待（见 D-P6-1） |
+| probe6（多 producer 游标） | lossless | **翻转确认**：`verdict=lossless, sum=60, truth=60, duplicates=0`（修前 89/60、重复 29） |
+| probe7（B5/M13/D1） | 全部翻转 | **翻转确认**：`drop_counters/unconfirmed` 字段存在、`enrichStatusRows_has_consumers: []`、`budget_used_reported: 120022`（修前 24576）、`D1 self_confirmed: false`（agent+basisHint → 停靠 → TTL 过期 → 无副作用） |
+| probe4 / probe5 | 保持 lossless | **一致**（合成双 producer 40/40；真实 capture 13,444 + 592） |
+| `verify_patches.py --with-dylibs` | pass、零 chromium/src 触碰 | **一致**：verdict pass；五补丁摘要与六个 dylib 摘要与 accepted-p55 记录**逐字节相同** |
+| 引擎侧冻结套件（`p55-s0`/`p4-contract`/`p5-reopen`/`dp551`/`p55-e7`） | 全绿保持 | **按恒等接受，未重跑**：二进制与补丁逐字节未变（上一行）+ 这些驱动脚本本 commit 未触碰（diffstat 只有 p6-e5/p6-e6）→ 无可回退面。此为明示的复验方式差异，不是遗漏 |
+
+## R3.2 四项阻塞的逐条核验（含盘上真值对账）
+
+**R2-A（计账诚实）—— 已修，实测对账通过。**
+索引 `captures` 表新增 `terminal_reason`/`total_dropped`/`total_failed`/`unconfirmed_count` 四列（ingest 时从 manifest 落库，`unconfirmed_producers` 名单走 producers 表 `watermark_received=0` 查询），`listCaptures` 行携带 `drop_counters` 四元组与名单；渲染器读真字段（不再有发明零值的路径）；`enrichStatusRows` 死代码链已删（`evidenceService.js` 现为纯说明模块，probe7 实测消费者 `[]`）。**我复跑的 E5 面板全文**：
+
+```
+capture c1790444488018169-… | terminal=complete | coverage=partial | events=6391 | drops: dropped=0 failed=0 sampled_out=143 partial=0
+capture cap-incomplete | terminal=incomplete (producer-unconfirmed) | coverage=partial | events=1 | … | unconfirmed producers: 1
+```
+
+盘上 `ui-capture-1/trace.manifest.json` 的 `counts.sampled_out = "143"` —— **等式成立**（R1 轮该处渲染为 0）；`cap-incomplete` 的 terminal reason 与未确认 producer 数**双双回来**，我另行核验两条正则均为 True（因 D-P6-2 的门禁逻辑缺陷不能从 `ok=true` 推出，故直接验文本）。
+
+**R2-B（停止超时档位）—— 已修，档位与实现都回来了。** `cdp.js`：`MESSAGE_HEADER` 死导出删除、每个 `send()` 挂看门狗 → `CDP_TIMEOUT`（响应/关闭路径清定时器）。`jsvmp_trace stop` 接 `deadline_ms`（默认 8000），`Promise.race` 截止错失或 CDP 超时 → `{state:'stop-timeout', stages:[…,'deadline-missed'], elapsed_ms:实测, pair:{terminal:'stop-timeout',coverage:null}}`。我复跑的 E5：**S2 面板 `stop: TIMEOUT after 2ms [stop-requested -> deadline-missed] — capture may still be settling`**；S1 的 `elapsed_ms` 也从写死的 0 变成实测 **2606ms**。单元门禁两条（CDP_TIMEOUT 假连接、死浏览器 stop 截止 elapsed≥25ms）在 host 套件内。
+
+**R2-C（游标）—— 已修，等式在多 producer 下成立。** 游标改为 **1-based 行号**（producer 无关、每行唯一），`next_cursor` 指向边界行并由其带头下一页。新增常设门禁"三 producer × 单谓词"（90 行交错、页大小 7 → `sum==90`、`Set` 去重 `==90`）。我复跑 probe6：**duplicates 29 → 0、sum==truth**；probe4/probe5（真实 capture 13,444 ignition + 592 bindings）保持无损。
+
+**R2-D（记录与覆盖）—— 已更正、已恢复。** 执行记录**开头即更正** R1 的三处不实申报（m1/m5 未做、"M1–M13 全部完成"过宽）并披露 R1 删了五个测试文件、六类覆盖当时无替代。host 套件 19 → **29**，六类中五类在套件内恢复且断言实质（env 七操作 + 隔离 + 单开独占 + `opens` 计数 + 名字逃逸；loop `cancelled` 与 `no-progress ≤3`；索引 wipe→rebuild 等式含 drop_counters/unconfirmed_count；A-13 注册；不可用工具执行期拒绝）。第六类"真机 (terminal, coverage) pair"只在 **E6 驱动器**里（我复跑绿），host 套件的真机集成测试仍留着那条冗余弱断言——见 D-P6-3。
+
+## R3.3 四项重要 + 小项核验
+
+- **R2-E 实际字节计账**：probe7 实测 `budget_used = 120022`（两个 60,001 字节结果被接纳并按实际字节记账，第三个超 131072 预算被 refused）——`min(actualBytes, 8192)` 已删。
+- **R2-F basisHint 只认 ui origin**：`broker.js:136` 为 `basisHint === UI_DIRECT_CLICK && origin === 'ui'`；probe7 的 agent+basisHint 停靠至 TTL 过期、副作用零。**E6 ledger 逐行核**（16 行）：`origin:agent` 且 `basis:ui-direct-click` 的行 = **0**；`env_create`/`env_open` 均为 agent 发起 → `confirmation-required` → `confirmed(human-approved)` → `executed`；ui 发起的两次 stop 为 `ui-direct-click`；读入口 `session-grant`。双重 gate 的重复审计行也消失了（2 次 stop → 2 条 confirmation-required，m2 成立）。
+- **R2-G B1 锚点改逐动作等式**：渲染层 `__clickTally` 分键计数，ledger executed 逐工具比对。我复跑实测 `clicks{start:3, stop:4, cancel:1, clear:1, agent:2}` vs `ledger{jsvmp_trace:10}`，`expected = 3+4+1+1+1(approved) = 10` → **等式成立**，`deniedAgentCalls=1` 亦对账。
+- **R2-H 未点控件**：我复跑的 E5 里 Capabilities / Authorization / Jump（空引用的显式错误面）/ Clear（`cleared (previous=none)`）/ resolve-orphan（死 pid + 已落盘 capture → `adopt-read-only`）**全部实际执行并有断言**；双会话 console/exception/非本地请求全 0。
+- **小项**：`elapsed_ms` 实测 ✓、`cancelStopWait` 死分支删除 ✓、`toolSchemas()` 同步 ✓、E6 死过滤删除 ✓、`launches`→`opens`（env-manager 4 处 + 测试断言）✓、`webapi_trace stop` 返回 pair ✓、`relevance(row, weights)` 可注入（负控跑真实函数）✓。
+- **顺带修复（他们从 probe7 发现的真缺陷）**：待决确认原先没有活动 TTL 定时器，停靠的 promise 无句柄 → Node 静默 `exit 0`（我的 probe7 因此一度空输出）。现待决项创建即挂**未 unref 的过期定时器**，各清除路径 `clearTimeout`。这条我认可其取舍（CLI 会存活到 TTL 落地，Electron 主进程无感）。
+
+## R3.4 残留项裁定
+
+| ID | 事实 | 裁定 |
+| --- | --- | --- |
+| **D-P6-1** | **E5 驱动器有一次不可复现的失败**：我在同一 shell 里紧接 E6 跑 E5，首个 `workspace open` 等待 10s 超时（`DRIVER ERROR`，exit 2）；单独重跑即 GREEN。失败时**不写 report、不抓面板文本与 console**，因此不可诊断 | **硬债务，M3 进入条件**：open 步骤允许一次重试；driver error 路径必须落 `report.json`（含面板文本 + console/exception + 已连接 target 的 URL），否则一次 flake 就等于一次盲区 |
+| **D-P6-2** | **S3 门禁布尔式优先级缺陷**：`ok: s3ok && s1sampled === null \|\| (s1sampled != null && panel.includes(…))` —— 盘上读数成功（正常情况）时**`s3ok` 不参与判定**，即 R2-A 的两条正则并不被门禁要求。我直接验了面板文本（两条均 True），故行为今天是对的，但保护 R2-A 的那道门是虚掩的 | **硬债务，M3 进入条件**：改成 `s3ok && (s1sampled === null \|\| …)`；同时把"面板数字 == 盘上 manifest"的对账从 S1 一处推广到**每个被渲染的 capture**（等式列表进 report.json） |
+| **D-P6-3** | **真机 `(terminal, coverage)` pair 未进 host 套件**：`r1-adapters.test.js:433` 仍是 `[…].includes(stop.terminal) \|\| stop.terminal != null`（后半使前半无意义）；pair 只由 E6 驱动器断言。执行记录称六类"已全部恢复为常设断言"，此处为 5/6 | **硬债务，M3 进入条件**：该断言改为 `stop.pair.terminal === 'complete' && stop.pair.coverage` 非空；记录里 5/6 的实情由本节留档 |
+| m-R3-4 | `jsvmp_trace stop` 的截止定时器在**成功路径不清理** → 每次成功 stop 留一个 8s 定时器（CLI 退出被拖 8s，多次 stop 累积） | 小项，随 M3-E0 清 |
+| m-R3-5 | B1 锚点三处装饰性缺陷：`b1Anchor.negativeControl` 恒为 null（赋值顺序）；负控是"计数减一"的算术而非**真注入一次旁路**；读侧（`trace_summary` 3 行 vs status 点击 1 次）未建等式也未解释来源 | 小项，随 M3-E0 清（负控建议改为：故意用 `host.send('XTrace.startCapture')` 直连一次，断言锚点翻红） |
+| m-R3-6 | "R2-2 grep 锚点"测试只断言 `stop-timeout` 字符串出现在两个文件里——是**存在性**检查，不是行为门禁（真断言在另两条单测与 E5 S2 里，故无害，但不宜计入门禁数） | 小项，记录在案 |
+| m-R3-7 | E5 的 Jump 只点了**空引用的错误面**；happy path（引用 → 行号 + byte_offset 渲染）由 E6（工具层，citedRef）与 GUI 单测覆盖，面板层未覆盖 | 边界记录（可接受）：M3 若扩面板再补 |
+| m-R3-8 | E5 驱动器残留三段废弃取值（`jumpRef`/`realRef`/`firstRef` 计算后 `void`）与 `agentApproved` 的恒真三元 | 小项，随 M3-E0 清 |
+
+## R3.5 P6 交付边界（如实汇总，引用时不得越级）
+
+1. frx L1/L2 源码未移交：`jsvmp_split_dispatcher`/`jsvmp_disassemble` 为 unavailable-with-reason（登记册 M3-1）。
+2. Agent 模型适配器为注入回调，P6 不默认外发；E6 用脚本化模型走完真实工具链。
+3. env 的完整能力（端口扫描/bind 探测/状态机/`exec -a`）归 M3；指纹挂载点归 M5；本轮 env 为"七项 + profile 被启动规格消费 + 单开独占"。
+4. 重连不做（PD2）：重启后只有"只读收养"或"终止孤儿"，二者现有门禁覆盖（收养经 E5 resolve-orphan，终止经单测）。
+5. 面板为证据区最小实现；`deadline_ms` 无人类控件（E5 经标注的 harness 加速器驱动）。
+6. 引擎侧能力面未变（补丁/dylib 摘要与 accepted-p55 逐字节相同）：P6 全程零 chromium/src 改动。
+
+## R3.6 状态落账
+
+- progress JSON：`p6` = **`accepted-p6`**；`p6_detail.review3` 记录本节复验与残留；债务 `D-P6-1/2/3` 登记（M3 进入条件）。
+- [登记册](open-items-register.md)：M2 名下 8 项**全部关闭**（附证据指针）；新增 M3 名下 D-P6-1/2/3 与四条小项。
+- [路线图](roadmap-milestones.md) v1.4：**M2 达成 2026-09-27**（早于 v1.3 估计的 10-05 八日）；M1.1 解除 R2-3 依赖，可即刻启动（09-28 → 10-01）；M3 窗口 10-02 → 11-04（进入条件 = `accepted-p6` ✓ + D-P6-1/2/3 关闭 + frx 移交状态判定）；§7 回填 P6 的两轮审查实际耗时。
+- 下一步：工程师按 [M3 交接](chromium-m3-tool-surface-handoff.md) §5 从 **M3-E0 债务门**开工（E0 里一并清 D-P6-1/2/3 与 m-R3-4/5/8），M1.1 并行轨可同时启动。

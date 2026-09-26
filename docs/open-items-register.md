@@ -1,20 +1,20 @@
 # 开放项登记册（债务 / 边界 / 设计 IOU / 外部依赖 / 授权门槛）
 
-- 版本：v1.0（2026-09-27，项目架构师）。**唯一跨阶段汇总处**：各阶段的细节仍以其交接文档为准（本册只登记"归谁、在哪一档关、证据在哪"），避免同一债务在多处漂移。
+- 版本：v1.1（2026-09-27，项目架构师；P6 R3 复审后更新：M2 名下 8 项全部关闭，新增 3 条 M3 进入条件债务）。**唯一跨阶段汇总处**：各阶段的细节仍以其交接文档为准（本册只登记"归谁、在哪一档关、证据在哪"），避免同一债务在多处漂移。
 - 维护规则：① 每轮终审由架构师更新本册（新增/关闭/改归属）；② 关闭一项必须有证据指针（门禁名 + 证据目录），不许以"已修"字样关闭；③ 类型分五种——**债务**（必须修）、**边界**（不修，但引用结论时不得越级）、**设计 IOU**（欠一份设计文档）、**外部依赖**（不在我们手里）、**授权门槛**（需用户显式授权）；④ 归属里程碑变更走裁决。
 
-## 1. M2 名下（P6-R2，阻塞项，必须在 `accepted-p6` 前关闭）
+## 1. M2 名下（P6-R2）—— **全部关闭**（2026-09-27，R3 复审，`accepted-p6`）
 
 | ID | 项 | 类型 | 状态 | 证据/指针 |
 | --- | --- | --- | --- | --- |
-| R2-A | UI 计账披露退步：面板丢弃计数恒为 0、未确认 producer/terminal_reason 不再渲染；`enrichStatusRows` 零消费者；S3 断言被削弱 | 债务 | 开放 | [P6 交接 §R2.3-A](chromium-p6-execution-handoff.md)；`docs/review-artifacts/p6-r2/probe7-*.cjs`；对账证据 `validation/p6-e5-AEpszF` |
-| R2-B | 冻结的 §11.3"停止超时"档位连同 `stopProgress` 实现被删；`cdp.send` 无超时 → 挂住的浏览器使 UI stop 永久悬挂；注释声称的单元门禁不存在 | 债务 | 开放 | §R2.3-B；`grep -rn stop-timeout xtrace-gui/test xtrace-host/test` 零命中 |
-| R2-C | 分页游标 producer-盲：两个 producer 命中同一谓词时重复计数（实测 sum=89 / 真值 60，重复 29） | 债务 | 开放 | §R2.3-C；`probe6-cursor-page-sum-violation.cjs` |
-| R2-D | 执行记录申报不符（m1 `cdp.js`、m5 `env-manager.js` 均未触碰）+ 未披露的覆盖删除（env 七操作/隔离、loop 取消与熔断、索引重建等式、A-13 注册、不可用工具执行期拒绝、真机 pair） | 债务（纪律） | 开放 | §R2.3-D；`git show --stat 93299e6` |
-| R2-E | 循环侧上下文计账仍 `min(actualBytes,8192)`：三个 60,001 字节结果实付 180,003、账面 24,576 | 债务 | 开放 | §R2.4-E；probe7 |
-| R2-F | `basisHint` 不看 origin：agent 调用可自批并写下 `basis:ui-direct-click`（E6 驱动器依赖此洞） | 债务 | 开放 | §R2.4-F；probe7 |
-| R2-G | B1 审计锚点是 `>=` 阈值而非等式，检测不到旁路 | 债务 | 开放 | §R2.4-G |
-| R2-H | Jump / Authorization / Capabilities / Clear / Choose-workspace 五个控件从未被点击；`evidence:resolve-orphan` 与 `jsvmp_trace clear` 新语义零覆盖 | 债务 | 开放 | §R2.4-H（`resolveOrphan` 的门禁归 M3-E6，见下） |
+| R2-A | UI 计账披露退步：面板丢弃计数恒为 0、未确认 producer/terminal_reason 不再渲染；`enrichStatusRows` 零消费者；S3 断言被削弱 | 债务 | **关闭 09-27** | [P6 交接 §R2.3-A](chromium-p6-execution-handoff.md)；`docs/review-artifacts/p6-r2/probe7-*.cjs`；修前对账 `validation/p6-e5-AEpszF`、**修后对账 `validation/p6-e5-SQj0yC`（面板 sampled_out=143 == 盘上 143；cap-incomplete 两条正则亲验为真）** |
+| R2-B | 冻结的 §11.3"停止超时"档位连同 `stopProgress` 实现被删；`cdp.send` 无超时 → 挂住的浏览器使 UI stop 永久悬挂；注释声称的单元门禁不存在 | 债务 | **关闭 09-27** | §R2.3-B；修后：E5 S2 面板 `TIMEOUT after 2ms [stop-requested -> deadline-missed]`、host 套件两条 stop-timeout 单测、`cdp.js` CDP_TIMEOUT |
+| R2-C | 分页游标 producer-盲：两个 producer 命中同一谓词时重复计数（实测 sum=89 / 真值 60，重复 29） | 债务 | **关闭 09-27** | §R2.3-C；修后：`probe6` = lossless（duplicates 0）、三 producer 常设门禁（90 行 sum==90） |
+| R2-D | 执行记录申报不符（m1 `cdp.js`、m5 `env-manager.js` 均未触碰）+ 未披露的覆盖删除（env 七操作/隔离、loop 取消与熔断、索引重建等式、A-13 注册、不可用工具执行期拒绝、真机 pair） | 债务（纪律） | **关闭 09-27**（记录已更正；六类覆盖中五类回套件，真机 pair 仍只在 E6 → 转 D-P6-3） | §R2.3-D；`git show --stat 93299e6` |
+| R2-E | 循环侧上下文计账仍 `min(actualBytes,8192)`：三个 60,001 字节结果实付 180,003、账面 24,576 | 债务 | **关闭 09-27**（实测账面 120022 = 两个接纳 + 第三个 refused） | §R2.4-E；probe7 |
+| R2-F | `basisHint` 不看 origin：agent 调用可自批并写下 `basis:ui-direct-click`（E6 驱动器依赖此洞） | 债务 | **关闭 09-27**（`broker.js:136` 加 origin 条件；E6 ledger 该类行 = 0） | §R2.4-F；probe7 |
+| R2-G | B1 审计锚点是 `>=` 阈值而非等式，检测不到旁路 | 债务 | **关闭 09-27**（逐动作等式：clicks{3,4,1,1,+1 approved} == ledger 10） | §R2.4-G |
+| R2-H | Jump / Authorization / Capabilities / Clear / Choose-workspace 五个控件从未被点击；`evidence:resolve-orphan` 与 `jsvmp_trace clear` 新语义零覆盖 | 债务 | **关闭 09-27**（caps/auth/jump/clear/resolve-orphan 均实测；Choose-workspace 属人工对话框，以静态门禁 + S5 覆盖，如实记为边界） | §R2.4-H（`resolveOrphan` 的门禁归 M3-E6，见下） |
 
 ## 2. M1.1 名下（语料尾件，并行轨）
 
@@ -38,6 +38,10 @@
 | M3-6 | **可重连控制面设计文档**（传输选型/capture 状态恢复/与 `resolveOrphan` 的关系/失败模式表）——本轮只设计不实现 | 设计 IOU | 未启动 | PD2、E6；IOU 源自 P3 终审记录与草稿 §362 |
 | M3-7 | `resolveOrphan` 与只读收养两路径的门禁（P6-R2 H 项的一半归此） | 债务 | 未启动 | E6 |
 | M3-8 | C 组 14 项 CDP 映射 + `page_automation_scan` 的 Chromium 环境面适配（字段面差异逐项披露） | 债务 | 未启动 | §3.1、E3 |
+| **D-P6-1** | E5 驱动器曾一次不可复现失败（首个 workspace-open 等待超时），且 driver-error 路径不落 report/面板/console → flake 即盲区。**M3 进入条件** | 债务 | 开放 | [P6 交接 §R3.4](chromium-p6-execution-handoff.md)；失败运行 `validation/p6-e5-n5OkSm`、通过运行 `validation/p6-e5-SQj0yC` |
+| **D-P6-2** | S3 门禁布尔式优先级缺陷：盘上读数成功时 `s3ok` 不参与判定（R2-A 的两条正则实际未被要求）。**M3 进入条件** | 债务 | 开放 | §R3.4；行为本身已亲验正确，缺陷在门禁 |
+| **D-P6-3** | 真机 `(terminal, coverage)` pair 只在 E6 驱动器断言；`r1-adapters.test.js:433` 仍留冗余弱断言 `\|\| stop.terminal != null`。**M3 进入条件** | 债务 | 开放 | §R3.4 |
+| M3-9 | P6-R3 的四条小项：stop 成功路径不清截止定时器（8s 滞留）、B1 锚点三处装饰缺陷（negativeControl 恒 null / 负控是算术非真注入 / 读侧无等式）、grep 锚点仅存在性检查、E5 残留死取值与恒真三元 | 债务（小） | 开放 | §R3.4 m-R3-4…8；随 M3-E0 一并清 |
 
 ## 4. M4 名下（观测面扩展）
 
