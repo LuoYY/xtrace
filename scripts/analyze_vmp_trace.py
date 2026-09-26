@@ -1680,14 +1680,37 @@ def first_marker_event(
     return min(matches, key=event_order) if matches else None
 
 
+def _normalized_causality(event: dict[str, Any]) -> dict[str, Any]:
+    """Unified causality view for v2 (flat fields) and v3 (object form,
+    schema doc: v2 contract carried over verbatim)."""
+    causality = event.get("causality")
+    if isinstance(causality, dict):
+        return {
+            "kind": causality.get("kind"),
+            "call_id": causality.get("call_id"),
+            "parent_id": causality.get("parent_id"),
+            "depth": causality.get("depth"),
+            "duration_us": causality.get("duration_us"),
+        }
+    return {
+        "kind": event.get("causality_kind"),
+        "call_id": event.get("call_id"),
+        "parent_id": event.get("parent_id"),
+        "depth": event.get("depth"),
+        "duration_us": event.get("duration_us"),
+    }
+
+
 def build_causality_summary(
     events: list[dict[str, Any]],
     *,
     max_depth: int = 4,
     max_nodes: int = 80,
 ) -> dict[str, Any]:
-    """Return a bounded schema-v2 causality view without changing v1 analysis."""
-    causal_events = [event for event in events if event.get("schema_version") == 2]
+    """Bounded causality tree over v2 AND v3 traces (P6-E0 debt: the
+    v2-only filter made every v3 capture report available=False)."""
+    causal_events = [event for event in events
+                     if event.get("schema_version") in (2, 3)]
     if not causal_events:
         return {
             "available": False,
@@ -1712,11 +1735,12 @@ def build_causality_summary(
     max_seen_depth = 0
     root_ids: list[str] = []
     for event in causal_events:
-        kind = event.get("causality_kind")
+        view = _normalized_causality(event)
+        kind = view["kind"]
         if kind == "external":
             external_nodes += 1
             continue
-        call_id = event.get("call_id")
+        call_id = view["call_id"]
         if not isinstance(call_id, str) or not call_id:
             continue
         if kind == "paired" and event.get("phase") in {"return", "exception"}:
@@ -1728,10 +1752,10 @@ def build_causality_summary(
             singleton_nodes += 1
         if kind == "paired":
             paired_calls[call_id] = event
-        depth = event.get("depth") if isinstance(event.get("depth"), int) else 0
+        depth = view["depth"] if isinstance(view["depth"], int) else 0
         max_seen_depth = max(max_seen_depth, depth)
         nodes[call_id] = event
-        parent_id = event.get("parent_id")
+        parent_id = view["parent_id"]
         if isinstance(parent_id, str) and parent_id:
             children.setdefault(parent_id, []).append(call_id)
         else:
@@ -1747,12 +1771,14 @@ def build_causality_summary(
         if event is None:
             return None
         emitted += 1
+        view = _normalized_causality(event)
         record = {
             "call_id": call_id,
             "api": event.get("api"),
             "phase": event.get("phase"),
-            "kind": event.get("causality_kind"),
-            "depth": event.get("depth"),
+            "kind": view["kind"],
+            "depth": view["depth"],
+            "duration_us": view["duration_us"],
             "children": [],
         }
         if depth < max_depth:

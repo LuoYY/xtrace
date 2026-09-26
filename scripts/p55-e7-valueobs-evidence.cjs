@@ -23,7 +23,8 @@ const server = spawn('python3', ['-u', '-c', source], { stdio: ['ignore', 'pipe'
 async function launch(opts) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('XTRACE_')));
   const argv = ['--headless=new','--remote-debugging-pipe','--no-first-run',
-    `--user-data-dir=${path.join(runDir,'p'+opts.tag)}`, 'about:blank'];
+    `--user-data-dir=${path.join(runDir,'p'+opts.tag)}`, 'about:blank',
+    '--js-flags=--allow-natives-syntax --max-opt=0'];
   if (opts.capture) {
     argv.push('--xtrace-enable', `--xtrace-file=${opts.trace}`,
       '--xtrace-categories=reverse', '--xtrace-causality=sync',
@@ -53,8 +54,9 @@ async function launch(opts) {
     return window.__e7;})()`;
 
   // --- state 1: capture OFF (no launch-time capture -> controller
-  // absent; startCapture would fail): plain JS semantics, no taps.
-  const PLAIN = `(()=>{var acc=0;for(var i=0;i<200000;i++){acc=(acc+i*7)%4096;if(acc>2048)acc-=11;}return {allFinite:Number.isFinite(acc),last:acc};})()`;
+  // absent; startCapture would fail). D-P55-1 fix: the OFF side runs
+  // the IDENTICAL program source as the ON side (the old PLAIN/LOOP
+  // pair compared two different programs and proved nothing).
   {
     const s = await launch({ tag: 'off' });
     const r = {};
@@ -62,7 +64,7 @@ async function launch(opts) {
       const { targetId } = await s.c.send('Target.createTarget', { url: `http://127.0.0.1:${port}/causality-smoke.html` });
       const { sessionId } = await s.c.send('Target.attachToTarget', { targetId, flatten: true });
       await s.c.send('Runtime.enable', {}, sessionId);
-      const page = await s.c.send('Runtime.evaluate', { expression: PLAIN, returnByValue: true }, sessionId);
+      const page = await s.c.send('Runtime.evaluate', { expression: LOOP, returnByValue: true }, sessionId);
       r.page = page.result?.value ?? (page.result?.description
         ? { evalError: page.result.description.slice(0, 120) } : undefined);
       await s.c.send('Browser.close');
@@ -100,10 +102,15 @@ async function launch(opts) {
       r.captureState = start.state;
       const page = await s.c.send('Runtime.evaluate', { expression: LOOP, returnByValue: true }, sessionId);
       r.page = page.result?.value;
+      // D-P55-1: SAME program, deep-equal against the capture-OFF run.
+      assert.deepEqual(r.page, report.stateOff.page,
+        'same program diverged between capture off and on');
       const stop = await s.c.send('XTrace.stopCapture');
       r.terminal = stop.state;
       const after = await s.c.send('Runtime.evaluate', { expression: LOOP, returnByValue: true }, sessionId);
       r.afterStop = after.result?.value;
+      assert.deepEqual(r.afterStop, report.stateOff.page,
+        'same program diverged after stopCapture');
       await s.c.send('Browser.close');
     } catch (e) { r.error = e.stack; }
     const ended = await Promise.race([s.exit, new Promise(res => setTimeout(res, 4000))]);

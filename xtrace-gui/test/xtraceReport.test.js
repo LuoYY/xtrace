@@ -17446,3 +17446,71 @@ test("generateReportForTrace defaults to retrieving external stack scripts", () 
     process.env.PATH = previousPath;
   }
 });
+
+// P6-E0 debt: representative schema-v3 capture through the report path
+// (readable, no crash, key v3 surfaces present), plus v1/v2 legacy
+// regression — the P2 handoff left analyzer/GUI v3 adaptation undone.
+test("buildLocalReport reads a representative schema-v3 capture (causality object, value_tap, identity)", () => {
+  const events = [
+    {schema_version: 3, producer_id: "rtx:t:1:1", process_epoch: "1", producer_seq: "1",
+     writer_seq: "1", config_generation: "1", category: "reverse", phase: "call",
+     api: "Document.cookie.set", args: [{name: "sess", value: "abc123"}], stack: [],
+     attribution: {status: "unresolved"},
+     causality: {kind: "paired", call_id: "s:1", parent_id: null, depth: 0, duration_us: null}},
+    {schema_version: 3, producer_id: "rtx:t:1:1", process_epoch: "1", producer_seq: "2",
+     writer_seq: "1", config_generation: "1", category: "reverse", phase: "return",
+     api: "Document.cookie.set", args: [], stack: [],
+     attribution: {status: "unresolved"},
+     causality: {kind: "paired", call_id: "s:1", parent_id: null, depth: 0, duration_us: "12"}},
+    {schema_version: 3, producer_id: "rtx:t:1:1", process_epoch: "1", producer_seq: "3",
+     writer_seq: "1", config_generation: "1", category: "reverse", phase: "call",
+     api: "ValueTap.observe", args: [], stack: [],
+     attribution: {status: "unresolved"},
+     causality: {kind: "singleton", call_id: "s:2", parent_id: "s:1", depth: 1, duration_us: null},
+     value_tap: {channel: "impl", value_role: "unclassified", slot: "accumulator",
+                 timepoint: "pre-dispatch", instance: "9/5", offset: "22",
+                 window_id: "0", object_token: "19", plan_serial: "1",
+                 value: {t: "object", state: "ref-only", token: 19}}},
+    {schema_version: 3, producer_id: "bnet:t:2:1", process_epoch: "1", producer_seq: "1",
+     writer_seq: "1", config_generation: "1", category: "reverse", phase: "call",
+     api: "BrowserNetwork.response", args: [{url: "http://127.0.0.1:1/x.js", status_code: 200}],
+     stack: [], attribution: {status: "unresolved"},
+     causality: {kind: "external", call_id: null, parent_id: null, depth: 0, duration_us: null}},
+    {schema_version: 3, producer_id: "rtx:t:1:1", process_epoch: "1", producer_seq: "4",
+     writer_seq: "1", config_generation: "1", category: "reverse", phase: "call",
+     api: "Ignition.execute", args: [], stack: [],
+     attribution: {status: "unresolved"},
+     causality: {kind: "singleton", call_id: "s:3", parent_id: null, depth: 0, duration_us: null},
+     ignition: {script_id: "9", bytecode_version: "5", bytecode_offset: "0",
+                opcode: "GetNamedProperty", tier: "ignition", activation_ref: "s:2"}}
+  ];
+
+  const report = buildLocalReport({tracePath: "/tmp/xtrace/logs/trace_v3.ndjson", events, assets: []});
+  assert.ok(report, "v3 report builds");
+  assert.equal(report.trace.event_count, events.length, "all v3 events counted");
+  const apis = events.map(e => e.api);
+  for (const api of apis) {
+    assert.ok(JSON.stringify(report).includes(api), `api ${api} surfaces`);
+  }
+  // value taps and ignition rows ride through without breaking the pack
+  const pack = buildAgentInputPack(events, {assets: []});
+  assert.ok(pack, "agent input pack builds from v3 events");
+});
+
+test("buildLocalReport legacy v1/v2 events still build unchanged (regression)", () => {
+  const v1 = [
+    {category: "reverse", api: "eval", args: ["1"]},
+    {category: "fingerprint", api: "Navigator.userAgent"}
+  ];
+  const v2 = [
+    {schema_version: 2, category: "reverse", phase: "call", api: "Document.cookie.set",
+     args: [], stack: [], causality_kind: "paired", call_id: "s:1",
+     parent_id: null, depth: 0, duration_us: null}
+  ];
+  const r1 = buildLocalReport({tracePath: "/tmp/xtrace/logs/trace_v1.ndjson", events: v1, assets: []});
+  const r2 = buildLocalReport({tracePath: "/tmp/xtrace/logs/trace_v2.ndjson", events: v2, assets: []});
+  assert.equal(r1.trace.event_count, 2, "v1 events counted");
+  assert.equal(r2.trace.event_count, 1, "v2 events counted");
+  assert.ok(JSON.stringify(r1).includes("Navigator.userAgent"), "v1 api surfaces");
+  assert.ok(JSON.stringify(r2).includes("Document.cookie.set"), "v2 api surfaces");
+});
