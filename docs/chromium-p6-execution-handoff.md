@@ -34,3 +34,31 @@
 进入条件达成（工单 §1.2：两者不清不进 E2）。E0 未触碰 chromium/src（无补丁重生成需求）。
 
 progress JSON `p6` = `e0-debt-cleared`（下一步：E1 Host 骨架 + Broker 核心，长块 E1→E7 开始）。
+
+## E1：Host 骨架 + Broker 核心（2026-09-26）
+
+新包 `xtrace-host/`（Node，CommonJS，`npm test` = node --test）。
+
+### 实现
+
+| 模块 | 内容 |
+| --- | --- |
+| `src/workspace.js` | 工作区布局（traces/ledger/index/profiles）+ **realpath 包含性检查**（符号链接逃逸=界外；字符串前缀检查明确不用于信任判定）——`assertInside` 是所有读写的单一闸门 |
+| `src/broker.js` | **唯一执行入口**（Agent/UI/MCP 皆同径，无旁路形态）；三档冻结语义：read-evidence=会话级授权不逐次弹窗、stateful-control=逐次确认+理由串+审计、host-exec=默认拒绝+不注册（P6 形状预留）；确认流（gate→confirmation-required→resolveConfirmation 一次）；审计 ledger 追加式 JSONL 落工作区，每个决定（granted/denied/confirmation-required/confirmed/denied-by-user/executed/execution-failed）均入账 |
+| `src/capabilities.js` | 三态清单（available/degraded 显式披露缺口/unavailable 带原因）；**非增强浏览器（无 XTrace 域）→ 增强工具全部 unavailable**，绝无静默弱替 |
+| `src/cdp.js` | Host 级 CDP pipe 客户端（fd3 写/fd4 读约定；pipe 断开→CDP_PIPE_CLOSED、pending 全部拒绝、closed 事件） |
+| `src/host.js` | 浏览器所有权：launch→getCapabilities 握手（消费全字段）→适配器协商；close 语义；**无重连**（§5.4 冻结）；孤儿解析 `resolveOrphan`：settled manifest→只读收养、live+unsettled→终止、dead pid→收养 |
+
+### 门禁（`xtrace-host` npm test，7/7 GREEN）
+
+| 案例 | 断言 |
+| --- | --- |
+| symlink 逃逸拒绝（实测） | 界外符号链接 contains=false、assertInside 抛 WORKSPACE_BOUNDARY；合法嵌套路径通过 |
+| Broker 单入口 | agent/ui/mcp 三来源同径执行，ledger 中三来源 granted 各一条 |
+| stateful 确认流 | 无理由拒绝→确认请求→批准执行/用户拒绝异常；pending 计数 |
+| host-exec 默认拒绝 | register 抛 + gate denied |
+| 三态协商 | 非增强全 unavailable（带原因）；degraded 显式披露 |
+| 孤儿二选一 | settled(incomplete 亦算 settled)→adopt、live+无 manifest→terminate、dead→adopt |
+| **真实浏览器集成** | ChromiumX 经 pipe：getVersion 握手、`XTrace.getCapabilities` 全字段消费、适配器 available、close 后 send 拒绝（无重连） |
+
+无 chromium/src 触碰（无补丁重生成需求）。progress JSON `p6` = `e1-host-broker-landed`。
