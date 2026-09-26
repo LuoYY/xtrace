@@ -62,3 +62,23 @@ progress JSON `p6` = `e0-debt-cleared`（下一步：E1 Host 骨架 + Broker 核
 | **真实浏览器集成** | ChromiumX 经 pipe：getVersion 握手、`XTrace.getCapabilities` 全字段消费、适配器 available、close 后 send 拒绝（无重连） |
 
 无 chromium/src 触碰（无补丁重生成需求）。progress JSON `p6` = `e1-host-broker-landed`。
+
+## E2：证据索引 + A 组适配器（2026-09-26）
+
+### 实现
+
+| 模块 | 内容 |
+| --- | --- |
+| `src/evidence-index.js` | **派生索引**（§5.1 冻结形态）：better-sqlite3、独立 index.db；表：captures（terminal/coverage/计数汇总）、producers（逐 producer 计数）、api_counts（api 聚合）、assets（资产登记）；**事件级查询永不走索引**——`streamEvents` 直读 NDJSON 流并给每行盖 capture+producer+seq 引用；`rebuildFromDir` 从 traces 根全量重建（**重建即验收用例**） |
+| `src/adapters-agroup.js` | **A 组 13 项**（清单 §2/A 冻结名单：code_search/scripts_list/jsvmp_query/webapi_query/find_param_entry/crypto_scan/jsvmp_split_dispatcher/jsvmp_disassemble/skill_list/skill_get/skill_read_resource/notes_get/recall）+ Host 内部查询原语（trace_query/trace_summary/api_top/assets_list/asset_read）。jsvmp_query/webapi_query 以 P4/P5 事件面为限并**显式披露缺口**（degradedReason）；frx 依赖两项（split_dispatcher/disassemble）**unavailable 带迁移原因**（代码未迁入，绝不静默替代）；recall 首版从 Broker 审计 JSONL 召回（degraded 披露）；资产读取经 workspace.assertInside（realpath 边界） |
+
+### 门禁（`xtrace-host` npm test 9/9 GREEN）
+
+| 案例 | 断言 |
+| --- | --- |
+| 重建即验收 | 夹具 capture 目录 → rebuildFromDir 全量入索引；**清空后重建内容一致**（派生非第二真源）；terminal/coverage/sampled 计数入行 |
+| 引用纪律 | streamEvents 每行携带 capture_id+producer_id+producer_seq |
+| 13 项经 Broker | 清单 13 项全注册；trace_query/jsvmp_query/code_search/crypto_scan/find_param_entry 经 agent/ui/mcp 三来源执行成功且行带引用；**unavailable 项以迁移原因拒绝** |
+| 真实 capture | E7 真实目录（13,919 事件、124 API、9 资产、terminal=complete/coverage=full）rebuild+topApis+assetRows 全通 |
+
+无 chromium/src 触碰。progress JSON `p6` = `e2-index-agroup-landed`。
