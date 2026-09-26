@@ -564,7 +564,7 @@ progress JSON `p55` = `s0-counterexamples-frozen`（下一阶段 S1：dump 请�
 | `scripts/p55-s1-browser-evidence.cjs`（新） | **GREEN**：Worker 线程 tap 的 token 经路由表**跨线程定点投递**并 saved；**两并发 requestDump 各自 saved、资产定位符/requestId 互异、资产在 asset manifest 落盘且 envelope 带 token anchor**；错误 producer=unknown-producer；stop 后=stopped；无崩溃 |
 | S0 python 套件回归 | `s0.no-timedwait-stack-capture` **转绿**（TimedWait/WaitableEvent 在 bridge 中为 0 处）；其余 7 项保持红（分属 S2–S5，符合"修一项绿一项"纪律） |
 | `p55-e7-valueobs-evidence.cjs` | PASS（tap 通路/预算/validator 无回归；terminal=incomplete 为 RR3 未修，如实） |
-| 补丁栈 | 重生成 chromium **133**/V8 **137** 文件，`verify_patches.py` **pass**（0 mismatch、0 清单外漂移��双 HEAD pin）——证据 `validation/p55-s1-patch-verify.json` |
+| 补丁栈 | 重生成 chromium **133**/V8 **137** 文件，`verify_patches.py` **pass**（0 mismatch、0 清单外漂移、双 HEAD pin）——证据 `validation/p55-s1-patch-verify.json` |
 
 证据目录：`chromium/src/out/XTraceP55D8/validation/p55-s1-20260926-014858/`（d8 矩阵）、`chromium/src/out/XTraceIntegration/validation/p55-s1-strF2E/`（浏览器并发/Worker）、`p55-s0-*/`（浏览器反例）。
 
@@ -764,7 +764,40 @@ progress JSON `p55` = `s5-golden-perf-landed`（下一阶段 S6：最终验收�
 
 ### 20.4 诚实边界（汇总）
 
-- S1 §15.3：假 runner 单测以真实线程浏览器证据替代（偏差记录）；frame-slot 根类别不可寻址；S2 §16.3：嵌套激活重置语义、分代矩阵深度、mid-capture 计划通道；S3 §17.3：Room 松弛上界、EncodeTapValue 未触碰；S4 §18.3：事件行无 isolate_epoch（歧义报告制）、语料 412 属 README 级；S5 §19.3：匹配器中段单点篡改不敏感、相位成本标注、S6 前未重建项已由本��重建补齐。
+- S1 §15.3：假 runner 单测以真实线程浏览器证据替代（偏差记录）；frame-slot 根类别不可寻址；S2 §16.3：嵌套激活重置语义、分代矩阵深度、mid-capture 计划通道；S3 §17.3：Room 松弛上界、EncodeTapValue 未触碰；S4 §18.3：事件行无 isolate_epoch（歧义报告制）、语料 412 属 README 级；S5 §19.3：匹配器中段单点篡改不敏感、相位成本标注、S6 前未重建项已由本轮重建补齐。
 - E6 重采集夹具 terminal=incomplete（未确认 producer，旧夹具序列）——S0/S2 门禁拥有 terminal 证据，如实保留。
 
 progress JSON `p55` = `s0-s6-final-package-submitted`。**申请：按工单 §12.4-7 一次终审；accepted-p55 由架构师在终审后标记。** 在此之前 P6/报告/Agent 不引用 P5.5 结论为已验证事实（§13.4 约束维持）。
+
+---
+
+## 21. 项目架构师终审（2026-09-26）：accepted-p55，附一项硬债务
+
+**结论：P5.5 通过终审，标记 accepted-p55。** RR1–RR6 六项阻塞的修复经我独立复验成立（源码形态 + 冻结反例 + 全门禁亲跑）；S0–S6 的反例先红后绿纪律执行到位（S0 套件在缺陷树全红、逐项转绿且互不回归）。
+
+### 21.1 独立复验记录（全部本人亲跑/亲验）
+
+| 项 | 结果 |
+| --- | --- |
+| S0 冻结反例 | python 8/8 GREEN + 浏览器 2/2 GREEN（dump 哨兵 reads/microtasks=0、正向闭环 saved+locator、unknown/stopped 拒绝、sampled capture complete+coverage partial） |
+| RR1/RR2 源码形态 | bridge 零 TimedWait/WaitableEvent/Script::Compile/kRunMicrotasks；handler `requestDump(token, producerId, path, label)`；controller 零广播；堆拥有+共享所有权超时 |
+| RR3 | controller:1161 等式含 sampled_out（旧二项式删除）；validator `validate_v3_accounting_model_2`（coverage partial 规则 + 逐 producer 等式）；每激活重置（observer:774/1184）；`valueObservation` 需 ignition-precise（handler:398–400） |
+| RR4 | accessor 跳过记录计入编码字节预算（observer:534）；RAB 用 `GetByteLength()`（:720）；hole 先判（:583/632/674/692）；S3 矩阵 GREEN |
+| RR5 | join 键五元组 + 摘要边界先验 + 歧义显式报告（p55_t3_t7.py:7–8,122–145）；T7 facts 全 observed、family 无 oracle 至多 hypothesis（:332–344）；S0 错连/假阳性案例转绿 |
+| RR6 | synvm 逐值保序 golden + head/tail/注入/跨实例四篡改负例全拒（驱动 96–205 行 + 亲跑 PASS）；perfbench 零逐事件打印、分项 363.6/2.1/365.7 ns、transport 归因浏览器门（亲跑 GREEN） |
+| 全门禁 | 回归 381/28/211；契约 21/21；P5 反例 12/12；矩阵 12/12 off + 12/12 observer；故障注入 pass；observer smoke（validator true）；controller 9/9 + producer 9/9；bindings 57/57（S6/总审记录）；verify_patches pass |
+
+### 21.2 残留项裁定
+
+| 项 | 裁定 |
+| --- | --- |
+| **R-F1：E7 的 off/on 语义对照仍用两个不同程序（PLAIN vs LOOP）且只断言 allFinite**（F7 首子项未冻进 R0 故存活） | **硬债务 D-P55-1**：冻结红测试（同确定性程序跨四态 deep-equal 全结果对象）并修 E7；作为 **P6 进入条件**（A.2 先例）。不构成产品缺陷声明——观测语义中立另有 E3（837 tap base==tapped）与 synvm golden 证明；但"四态语义全等"的声明不得继续建立在双程序对照上 |
+| R-F2：假 runner 单测未落地，以真实线程浏览器证据替代（S1 并发双请求 + Worker 跨线程 + 共享所有权超时；S2 四 Worker 交错） | 接受并记录：证据形态强于字面要求 |
+| R-F3：事件行无 isolate_epoch，同进程跨 isolate 冲突按歧义报告不猜 | 接受（正确纪律；实测 0 歧义） |
+| R-F4：根类别 (b)（frame/register slot）本期不可寻址 | 接受为显式延期（§15.3 记录，无当前需求；不得以只读 dump 名义日后偷扩） |
+| R-F5：E6 复采夹具 terminal=incomplete 保留 | 接受（如实；terminal 证据由 S0/S2 门禁持有） |
+| R-F6：perf 相位归因（gate+lookup 在 d8、transport 归浏览器门） | 接受（诚实归因） |
+
+### 21.3 状态
+
+progress JSON `p55 = accepted-p55`，债务 `D-P55-1` 登记。**M1（路线图）分层校准**：机制层达成（accepted-p55）；语料层四类产物中"proven 读取清单"已达成，**vPC 序列/dump 资产/两段式锚点的语料级实证为 M1.1 短尾**（一次带 tap+dump 的语料复跑 + 本地 412→200 重放服务，估计 1–2 工程师日，无需新引擎工作）。P6 可在 D-P55-1 冻结红测试后启动。
