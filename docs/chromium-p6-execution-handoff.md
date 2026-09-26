@@ -101,3 +101,29 @@ progress JSON `p6` = `e0-debt-cleared`（下一步：E1 Host 骨架 + Broker 核
 | **jsvmp_trace 集成（真实浏览器）** | max_taps=5 启动→页面 tap 运行→stop：**pair={terminal:'complete', coverage:'partial'}**（真实预算跳过 sampled_out>0）；trace_file 回传；status 可查；审计含 grant+confirmation-required+confirmed+executed 全迹（≥6 条） |
 
 无 chromium/src 触碰。progress JSON `p6` = `e3-bgroup-env-landed`。
+
+## E4：Agent loop + 三形切片（2026-09-26）
+
+### 实现
+
+| 模块 | 内容 |
+| --- | --- |
+| `src/slicer.js` | **三形切片**（§5.3 冻结，唯一 trace 派生上下文通道）：manifest-summary（capture/coverage/计数/top-api）、evidence-slice（相关性排序 top-K，**值边界事件优先**——value_tap/dump 加权，每行带 `capture|producer|seq` 引用）、index-results；超限**截断+标记+trace_query 指针**（要更多走工具，绝不 dump） |
+| `src/agent-loop.js` | **可取消**工具调用循环：模型为注入适配器（循环纯逻辑，无模型外发默认开启）；上下文预算（切片字节总量上限，超限切片拒收并向模型报告）；**无进展熔断**（连续失败 N 次停）；每次调用看门狗超时；**工具错误/拒绝/超时一律报告给模型不崩溃**（仅取消向上传播）；工具 schema 映射（name/tier/io/state） |
+
+### 门禁（`xtrace-host` npm test 14/14 GREEN）
+
+| 案例 | 断言 |
+| --- | --- |
+| 切片上限实测 | 三形在默认/极小预算下均在界内；极小预算强制截断且 truncation_note 指向 trace_query；**每行引用匹配 `capture|producer|seq` 正则**；值边界行优先入片 |
+| 循环完整路径 | slice→tool→final：唯一 trace 上下文=切片、工具经 Broker、迭代/日志如实 |
+| 取消 | 迭代间取消 → status=cancelled |
+| 无进展熔断 | 重复未知工具 → no-progress 提前停（≤3 而非 50） |
+| 拒绝不致命 | stateful 工具在无 UI 附着时进入待确认→看门狗超时→**报告给模型、循环存活**（诚实语义：agent 无 UI 附件不能推进有状态控制） |
+
+### 边界（如实）
+
+- frx L1 源码尚未迁入仓库（清单 §4：未迁入任何代码）——循环按工单 §7“护栏按 frx 原语义移植不削弱”实现（熔断/预算/取消/超时全在）；frx 源逐项许可核对后如形态有出入，以对照补齐。
+- 模型适配器为注入回调：P6 不默认外发（工单非目标），E6 闭环用脚本化模型。
+
+无 chromium/src 触碰。progress JSON `p6` = `e4-agent-loop-landed`。
