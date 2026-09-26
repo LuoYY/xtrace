@@ -56,6 +56,37 @@ const GATES = {
   'env_open': 'xtrace-host/test/r1-core.test.js',
   'env_close': 'xtrace-host/test/r1-core.test.js',
   'env_delete': 'xtrace-host/test/r1-core.test.js',
+  'page_navigate': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_elements': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_click': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_type': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_scroll': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_screenshot': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_info': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_eval': 'xtrace-host/test/e3-cgroup.test.js',
+  'hook_inject': 'xtrace-host/test/e3-cgroup.test.js',
+  'cookies': 'xtrace-host/test/e3-cgroup.test.js',
+  'net_capture': 'xtrace-host/test/e3-cgroup.test.js',
+  'net_list': 'xtrace-host/test/e3-cgroup.test.js',
+  'net_get': 'xtrace-host/test/e3-cgroup.test.js',
+  'page_automation_scan': 'xtrace-host/test/e3-cgroup.test.js',
+  'fs_list': 'xtrace-host/test/e2-dgroup.test.js',
+  'fs_read': 'xtrace-host/test/e2-dgroup.test.js',
+  'fs_write': 'xtrace-host/test/e2-dgroup.test.js',
+  'fs_mkdir': 'xtrace-host/test/e2-dgroup.test.js',
+  'fs_copy': 'xtrace-host/test/e2-dgroup.test.js',
+  'scripts_save': 'xtrace-host/test/e2-dgroup.test.js',
+  'notes_add': 'unavailable-with-reason — no gate required',
+  'remember': 'unavailable-with-reason — no gate required',
+  'wasm_probe': 'unavailable-with-reason — no gate required',
+  'wasm_disasm': 'unavailable-with-reason — no gate required',
+  'js_trace': 'unavailable-with-reason — no gate required',
+  'signer_trace': 'M4 observation expansion — unavailable-with-reason',
+  'closure_read': 'M4 observation expansion — unavailable-with-reason',
+  'whitebox_diff': 'M4/M5 — unavailable-with-reason',
+  'run_node': 'xtrace-host/test/e1-host-exec.test.js (with policy)',
+  'run_python': 'xtrace-host/test/e1-host-exec.test.js (with policy)',
+  'npm_install': 'policy-gated default-deny — no standalone gate',
 };
 
 async function main() {
@@ -64,7 +95,13 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm3-matrix-'));
   const traceFile = path.join(root, 'traces', 'matrix', 'trace.ndjson');
   const host = await createHost({ executable: exe, workspaceRoot: root,
-      traceFile, browserArgs: ['about:blank'] });
+      traceFile, browserArgs: ['about:blank'],
+      // M3-E1: the executors ride the surface only under a policy —
+      // the matrix negotiates WITH one (that is the shipped shape the
+      // gate map references).
+      policy: { hostExecPolicy: {
+        paths: { read: [], write: [path.join(root, 'out')] },
+        network: { allow: [] }, deps: { npm: [] } } } });
   try {
     const negotiated = await host.capabilities();
     const rows = negotiated.tools.map((t) => {
@@ -112,16 +149,34 @@ async function main() {
         json, md: mdPath }, null, 1));
     // consistency: every inventory A-13 + B-5+7 first-batch tool present
     const required = [
+      // A-group inventory 13
       'code_search', 'scripts_list', 'jsvmp_query', 'webapi_query',
       'find_param_entry', 'crypto_scan', 'jsvmp_split_dispatcher',
       'jsvmp_disassemble', 'skill_list', 'skill_get', 'skill_read_resource',
       'notes_get', 'recall',
+      // B-group five + env seven
       'jsvmp_trace', 'jsvmp_status', 'webapi_trace', 'scripts_capture_all',
       'env_create', 'env_list', 'env_status', 'env_update', 'env_open',
       'env_close', 'env_delete',
       // M5-disclosed four
       'env_current_process', 'env_read_current_process_config',
       'env_write_current_process_config', 'env_reset_current_process_default',
+      // M3 C-group 14 (IN; signer_trace/closure_read OUT to M4)
+      'page_navigate', 'page_elements', 'page_click', 'page_type',
+      'page_scroll', 'page_screenshot', 'page_info', 'page_eval',
+      'hook_inject', 'cookies', 'net_capture', 'net_list', 'net_get',
+      'page_automation_scan',
+      // M3 D-group native six + scripts_save
+      'fs_list', 'fs_read', 'fs_write', 'fs_mkdir', 'fs_copy',
+      'scripts_save',
+      // M3 D-group frx track five (not-transferred -> unavailable)
+      'notes_add', 'remember', 'wasm_probe', 'wasm_disasm', 'js_trace',
+      // M4/M5 OUT (disclosed unavailable)
+      'signer_trace', 'closure_read', 'whitebox_diff',
+      // M3-E1 executors (unavailable without a policy object)
+      'run_node', 'run_python',
+      // M3 policy gate (default-deny)
+      'npm_install',
     ];
     const absent = required.filter((n) => !rows.some((r) => r.name === n));
     if (absent.length) {

@@ -41,7 +41,7 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
                         confirmationTtlMs = DEFAULT_CONFIRMATION_TTL_MS }) {
   const effectivePolicy = {
     allowUnconfirmedReads: true,
-    hostExecWhitelist: { paths: [], network: [], deps: [] },
+    hostExecPolicy: null,   // null = the whole tier default-denied
     ...(policy || {}),
   };
 
@@ -49,6 +49,9 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
                                `broker-${clock()}.jsonl`);
   // entryKey `${tool}|${origin}|${reason}` -> entry
   const pending = new Map();
+  // confirmationId -> { kill, toolName, origin } for RUNNING host-exec
+  // children (cancelExecution fires the kill handle)
+  const activeExecutions = new Map();
 
   function audit(entry) {
     const row = JSON.stringify({ ...entry, wall_ms: clock() }) + '\n';
@@ -63,9 +66,16 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
       throw new Error(`tool ${tool.name} has unknown tier ${tool.tier}`);
     }
     if (tool.tier === TIERS.HOST_EXEC) {
-      throw new Error(
-          `tool ${tool.name}: host-exec tier is reserved and not ` +
-          `registrable in P6 (default-deny)`);
+      // M3-E1 (PD1): registration is DISCLOSURE, not permission —
+      // tools explicitly built to disclose a default-deny (e.g.
+      // npm_install) register WITHOUT a policy; general host-exec
+      // executors still require one so they cannot silently appear.
+      const discloseOnly = tool.discloseOnly === true;
+      if (!discloseOnly && !effectivePolicy.hostExecPolicy) {
+        throw new Error(
+            `tool ${tool.name}: host-exec tier requires a policy object ` +
+            `(default-deny without one)`);
+      }
     }
     return tool;
   }
@@ -90,6 +100,110 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
   /** Stateful-tier gate: create (or reuse) the confirmation entry with
    * a real lifetime. UI-direct clicks may self-confirm via basisHint
    * (R1.6-D1); agent/mcp origins never self-confirm here. */
+  /** M3-E1 (PD1): the host-exec gate. Default-deny without a policy;
+   * with one, EVERY action must carry a concrete payload (argv or path
+   * or domain) which is policy-evaluated (hit/miss recorded), shown in
+   * the confirmation, and audited in full. Wildcards like '*' in
+   * network.allow trip the too-wide guard (never silently accepted). */
+  function gateHostExec(toolName, origin, reason, action) {
+    const pol = effectivePolicy.hostExecPolicy;
+    if (!pol) {
+      audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+              decision: 'denied',
+              policy_verdict: 'no-policy:tier-default-deny' });
+      return { decision: 'denied',
+               reason: 'host-exec tier disabled (no policy object)' };
+    }
+    if (typeof reason !== 'string' || reason.trim().length < 3) {
+      audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+              decision: 'denied', reason: 'missing-reason-string' });
+      return { decision: 'denied',
+               reason: 'host-exec requires a reason string' };
+    }
+    // too-wide guard: '*' entries defeat the policy's purpose
+    const net = (pol.network && pol.network.allow) || [];
+    if (net.includes('*')) {
+      audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+              decision: 'denied',
+              policy_verdict: 'policy-too-wide:network.allow contains *' });
+      return { decision: 'denied',
+               reason: 'policy too wide: network.allow must not contain *' };
+    }
+    if (!(action && typeof action === 'object')) {
+      audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+              decision: 'denied', reason: 'missing-action-payload' });
+      return { decision: 'denied',
+               reason: 'host-exec requires a concrete action payload ' +
+                       '(argv / path / domain)' };
+    }
+    // policy evaluation: argv entries outside paths.write, or domains
+    // outside network.allow, deny with the exact hit recorded
+    const verdicts = [];
+    const writeRoots = (pol.paths && pol.paths.write) || [];
+    const argv = action.argv || [];
+    for (const arg of argv) {
+      // A network reference is an explicit http(s) URL — plain argv
+      // tokens (flags like -e, script text, numbers) are NEVER domains.
+      if (/^https?:\/\//i.test(arg)) {
+        const host = arg.replace(/^https?:\/\//i, '').split(/[/:?#]/)[0];
+        if (host && !net.includes(host)) {
+          verdicts.push(`network-miss:${host}`);
+        }
+      }
+    }
+    if (action.writePath) {
+      const inside = writeRoots.some((root) =>
+          action.writePath === root ||
+          action.writePath.startsWith(root.replace(/\/$/, '') + '/'));
+      if (!inside) {
+        verdicts.push(`write-outside-policy:${action.writePath}`);
+      }
+    }
+    if (verdicts.length) {
+      audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+              decision: 'denied', policy_verdict: verdicts.join(';'),
+              argv: argv.join(' ') || action.writePath || '' });
+      return { decision: 'denied',
+               reason: `policy denied: ${verdicts.join(';')}` };
+    }
+    // allowed by policy — still needs the per-call human confirmation
+    // with the CONCRETE payload disclosed
+    const key = entryKey(toolName, origin, reason);
+    const existing = pending.get(key);
+    if (existing) {
+      if (clock() >= existing.expires_ms) {
+        retireExpired(existing, key);
+      } else {
+        audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+                decision: 'denied',
+                reason: 'duplicate-confirmation-pending',
+                confirmation_id: existing.id });
+        return { decision: 'denied',
+                 reason: 'a confirmation for this action is already pending' };
+      }
+    }
+    const entry = {
+      id: `confirm-${toolName}-${clock()}-${pending.size}`,
+      resolve: null,
+      created_ms: clock(), expires_ms: clock() + confirmationTtlMs,
+      toolName, toolTier: TIERS.HOST_EXEC, origin, reason,
+      action,   // the pending queue surface renders this payload
+    };
+    pending.set(key, entry);
+    entry.expiryTimer = setTimeout(() => {
+      if (pending.get(key) === entry) {
+        retireExpired(entry, key);
+      }
+    }, Math.max(1, entry.expires_ms - clock()));
+    audit({ tool: toolName, tier: TIERS.HOST_EXEC, origin,
+            decision: 'confirmation-required', reason,
+            confirmation_id: entry.id, expires_ms: entry.expires_ms,
+            policy_verdict: 'allowed',
+            argv: argv.join(' ') || action.writePath || '' });
+    return { decision: 'confirmation-required', id: entry.id, reason,
+             action, expires_ms: entry.expires_ms };
+  }
+
   function gateStateful(toolName, origin, reason, basisHint) {
     if (typeof reason !== 'string' || reason.trim().length < 3) {
       audit({ tool: toolName, tier: TIERS.STATEFUL_CONTROL, origin,
@@ -222,6 +336,23 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     return ids;
   }
 
+  /** M3-E1: cancel a RUNNING host-exec child — the kill handle the
+   * executor registered fires, the child dies, the audit records it. */
+  function cancelExecution(id) {
+    const record = activeExecutions.get(id);
+    if (!record) {
+      return false;
+    }
+    activeExecutions.delete(id);
+    if (record.kill) {
+      record.kill();
+    }
+    audit({ tool: record.toolName, tier: TIERS.HOST_EXEC,
+            origin: record.origin, decision: 'execution-cancelled',
+            confirmation_id: id });
+    return true;
+  }
+
   /** Snapshot of the pending queue for the human confirmation surface. */
   function pendingList() {
     return [...pending.values()].map((e) => ({
@@ -237,7 +368,10 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     const basisHint = context && context.basisHint;
     const g = tool.tier === TIERS.READ_EVIDENCE
         ? gateRead(tool.name, origin)
-        : gateStateful(tool.name, origin, reason, basisHint);
+        : tool.tier === TIERS.HOST_EXEC
+            ? gateHostExec(tool.name, origin, reason,
+                           args && args.__action)
+            : gateStateful(tool.name, origin, reason, basisHint);
     if (g.decision === 'denied') {
       const err = new Error(`broker denied ${tool.name}: ${g.reason}`);
       err.code = 'BROKER_DENIED';
@@ -261,6 +395,16 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
           /* observer failures never block execution */
         }
       }
+      // M3-E1: host-exec executions register a kill handle so
+      // cancelExecution() can terminate the RUNNING child. The broker
+      // INJECTS the registration callback (the caller never has to
+      // provide one); the entry is inert until the child spawns.
+      if (tool.tier === TIERS.HOST_EXEC) {
+        const record = { toolName: tool.name, origin, kill: null };
+        activeExecutions.set(entry.id, record);
+        const ctxRef = context || (args.__context = {});
+        ctxRef.onKill = (fn) => { record.kill = fn; };
+      }
       const answer = await new Promise((resolve) => {
         entry.resolve = resolve;
       });
@@ -283,12 +427,34 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     const started = clock();
     try {
       const result = await tool.run(args, context);
+      if (tool.tier === TIERS.HOST_EXEC && context &&
+          typeof context.onConfirmation === 'function') {
+        // best-effort registry cleanup (the id is opaque here)
+        for (const [id, record] of activeExecutions) {
+          if (record.toolName === tool.name && record.origin === origin) {
+            activeExecutions.delete(id);
+          }
+        }
+      }
+      const extra = tool.tier === TIERS.HOST_EXEC ? {
+        argv: (args && args.__action && args.__action.argv || [])
+            .join(' '),
+        exit_code: result && result.exit_code,
+        output_bytes: result && result.output_bytes,
+        timed_out: Boolean(result && result.timed_out),
+        cancelled: Boolean(result && result.cancelled),
+      } : {};
       audit({ tool: tool.name, tier: tool.tier, origin,
-              decision: 'executed', duration_ms: clock() - started });
+              decision: 'executed', duration_ms: clock() - started,
+              ...extra });
       return result;
     } catch (error) {
       audit({ tool: tool.name, tier: tool.tier, origin,
-              decision: 'execution-failed', error: String(error.message) });
+              decision: 'execution-failed',
+              error: String(error.message),
+              ...(tool.tier === TIERS.HOST_EXEC ? {
+                argv: (args && args.__action && args.__action.argv || [])
+                    .join(' ') } : {}) });
       throw error;
     }
   }
@@ -296,14 +462,22 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
   return {
     TIERS, BASES,
     register,
-    gate: (toolName, toolTier, context) => toolTier === TIERS.READ_EVIDENCE
-        ? gateRead(toolName, (context && context.origin) || 'unknown')
-        : gateStateful(toolName, (context && context.origin) || 'unknown',
-                       context && context.reason,
-                       context && context.basisHint),
+    gate: (toolName, toolTier, context) => {
+      const origin = (context && context.origin) || 'unknown';
+      if (toolTier === TIERS.READ_EVIDENCE) {
+        return gateRead(toolName, origin);
+      }
+      if (toolTier === TIERS.HOST_EXEC) {
+        return gateHostExec(toolName, origin, context && context.reason,
+                            context && context.action);
+      }
+      return gateStateful(toolName, origin, context && context.reason,
+                          context && context.basisHint);
+    },
     execute,
     resolveConfirmation,
     cancelPending,
+    cancelExecution,
     cancelAllPending,
     pendingList,
     pendingIds: () => [...pending.values()].map((e) => e.id),

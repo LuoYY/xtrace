@@ -22,6 +22,12 @@ const { createEnvManager } = require('./env-manager');
 const { createEvidenceIndex } = require('./evidence-index');
 const { createAGroupAdapters } = require('./adapters-agroup');
 const { createBGroupAdapters } = require('./adapters-bgroup');
+const { createDGroupNativeAdapters } = require('./adapters-dgroup');
+const { createCGroupAdapters } = require('./adapters-cgroup');
+const { createFrxTrackAdapters } = require('./adapters-frx-track');
+const { createDisclosedUnavailableAdapters }
+  = require('./adapters-disclosed');
+const { createExecutors } = require('./executors');
 const { negotiate } = require('./capabilities');
 
 /** THE launch spec (single source, M8): every browser this Host owns
@@ -88,6 +94,7 @@ async function createHost({
     workspace, broker, envs, index,
     executable,
     version: launched ? launched.version : null,
+    browserPid: launched ? launched.child.pid : null,   // M3-E4
     traceFile: resolvedTrace,
     profileDir,
     closed: false,
@@ -174,18 +181,33 @@ async function createHost({
 
   // Registered adapter set — built AFTER `host` exists so B-group tools
   // can hold the live host reference.
+  // M3-E6 (PD4): the adapter set handed OUT of the composition root
+  // is BROKER-BOUND — negotiation/matrix consumers see descriptor rows
+  // WITHOUT a callable .run. The only execution path is callTool.
   host.adapters = (() => {
     const adapters = [
       ...createAGroupAdapters({ workspace, index, host }),
       ...createBGroupAdapters({ workspace, host, envs }),
+      ...createCGroupAdapters({ workspace, host }),
+      ...createDGroupNativeAdapters({ workspace, host }),
+      ...createFrxTrackAdapters(),
+      ...createDisclosedUnavailableAdapters(),
+      ...(policy && policy.hostExecPolicy
+          ? createExecutors({ workspace }) : []),
     ];
     host.tools = new Map();
     for (const adapter of adapters) {
       host.tools.set(adapter.name, broker.register(adapter));
     }
+    const bound = (adapter) => {
+      // strip every callable: the returned row is a DESCRIPTOR
+      const { run, available, ...rest } = adapter;
+      void run; void available;
+      return rest;
+    };
     return {
-      all: () => adapters,
-      get: (name) => host.tools.get(name),
+      all: () => adapters.map(bound),
+      get: (name) => host.tools.get(name),   // internal use only
     };
   })();
 

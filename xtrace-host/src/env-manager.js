@@ -9,7 +9,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function createEnvManager({ workspace }) {
+// M3-E4: an instance row tracks ONE owned browser process per env —
+// pid, port, state (launching|running|stopped|port-conflict), and the
+// exec -a process title. Fingerprint mounting is M5: the field is
+// RESERVED (recorded, never interpreted here).
+function createEnvManager({ workspace,
+                           killImpl = (p, s) => process.kill(p, s),
+                           pidAliveImpl = (p) => {
+                             try { process.kill(p, 0); return true; }
+                             catch { return false; }
+                           } }) {
   const root = workspace.dir('profiles');
   const statePath = path.join(root, 'env-state.json');
   let openEnv = null;
@@ -18,6 +27,8 @@ function createEnvManager({ workspace }) {
   } catch {
     openEnv = null;
   }
+  // envName -> instance row (M3-E4: instance ownership)
+  const instances = new Map();
 
   function persist() {
     fs.writeFileSync(statePath, JSON.stringify({ open: openEnv }));
@@ -54,6 +65,9 @@ function createEnvManager({ workspace }) {
         name, created_ms: Date.now(),
         notes: opts.notes || '',
         opens: 0,
+        // M5 mount point RESERVED: recorded verbatim, never
+        // interpreted by M3 (fingerprint semantics land in M5).
+        fingerprint: opts.fingerprint || null,
       });
       return { name, dir };
     },
@@ -141,6 +155,92 @@ function createEnvManager({ workspace }) {
       return openEnv ? envDir(openEnv) : null;
     },
     openName: () => openEnv,
+
+    // ---- M3-E4: instance ownership + port lifecycle -----------------
+
+    /** Probe whether a TCP port is bindable RIGHT NOW (real bind
+     * attempt on 127.0.0.1; closed immediately). */
+    async probePort(port) {
+      const net = require('node:net');
+      return await new Promise((resolve) => {
+        const srv = net.createServer();
+        srv.once('error', () => resolve(false));
+        srv.listen(port, '127.0.0.1', () => srv.close(
+            () => resolve(true)));
+      });
+    },
+
+    /** Claim a free port for an env instance (scan from `from`).
+     * Returns { port, conflict } — a conflict row names the env that
+     * already holds the port (state machine: port-conflict). */
+    async claimPort(envName, { from = 9300, tries = 40 } = {}) {
+      for (const [name, inst] of instances) {
+        if (inst.port && !inst.stopped) {
+          return { port: null,
+                   conflict: { env: name, port: inst.port },
+                   state: 'port-conflict' };
+        }
+        void envName;
+      }
+      for (let p = from; p < from + tries; p++) {
+        if (await this.probePort(p)) {
+          return { port: p, conflict: null, state: 'port-reserved' };
+        }
+      }
+      return { port: null, conflict: null, state: 'no-free-port' };
+    },
+
+    /** Register the RUNNING instance for an env (idempotent per env:
+     * a second registration for a live env is rejected). */
+    registerInstance(envName, { pid, port, argv0 }) {
+      const existing = instances.get(envName);
+      if (existing && !existing.stopped && pidAliveImpl(existing.pid)) {
+        return { ok: false,
+                 reason: 'env already owns a live instance',
+                 pid: existing.pid };
+      }
+      instances.set(envName, { pid, port, argv0,
+                               stopped: false,
+                               registered_ms: Date.now() });
+      return { ok: true,
+               instance: { pid, port, argv0 } };
+    },
+
+    /** Instance row incl. live process check. */
+    instanceStatus(envName) {
+      const inst = instances.get(envName);
+      if (!inst) {
+        return { env: envName, state: 'no-instance' };
+      }
+      const alive = pidAliveImpl(inst.pid);
+      return { env: envName, pid: inst.pid, port: inst.port,
+               argv0: inst.argv0,
+               state: inst.stopped ? 'stopped'
+                   : alive ? 'running' : 'stopped(dead-process)',
+               alive };
+    },
+
+    /** Terminate the env's instance (SIGTERM then SIGKILL). The state
+     * machine transition is recorded whether or not the pid answers. */
+    terminateInstance(envName) {
+      const inst = instances.get(envName);
+      if (!inst) {
+        return { ok: false, reason: 'no-instance' };
+      }
+      if (!inst.stopped && pidAliveImpl(inst.pid)) {
+        try { killImpl(inst.pid, 'SIGTERM'); } catch { /* racing exit */ }
+        if (pidAliveImpl(inst.pid)) {
+          try { killImpl(inst.pid, 'SIGKILL'); } catch { /* exited */ }
+        }
+      }
+      inst.stopped = true;
+      return { ok: true, state: 'stopped', pid: inst.pid };
+    },
+
+    /** All instance rows (the parallel-env gate iterates this). */
+    allInstances() {
+      return [...instances.keys()].map((n) => this.instanceStatus(n));
+    },
   };
 }
 

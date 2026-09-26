@@ -20,6 +20,7 @@ const LAYOUT = {
   ledger: 'ledger',
   index: 'index',
   profiles: 'profiles',
+  scripts: 'scripts',   // M3-E2: Debugger.getScriptSource drops
 };
 
 function createWorkspace(root) {

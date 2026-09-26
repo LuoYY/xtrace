@@ -170,14 +170,21 @@ test('R1-4: cancelPending retires a request; late resolution is inert', async ()
   assert.equal(sideEffects, 0, 'late resolution after cancel is inert');
 });
 
-test('host-exec tier stays default-deny and non-registrable', () => {
+test('host-exec tier: default-deny without a policy (M3-E1 shape)', () => {
   const ws = createWorkspace(tmp());
-  const broker = createBroker({ workspace: ws });
+  const broker = createBroker({ workspace: ws });   // NO policy object
   assert.throws(() => broker.register({
     name: 'run_node', tier: TIERS.HOST_EXEC, run: async () => {} }),
-      /host-exec tier is reserved/);
-  const g = broker.gate('run_node', TIERS.HOST_EXEC, { origin: 'agent' });
+      /host-exec tier requires a policy object/);
+  const g = broker.gate('run_node', TIERS.HOST_EXEC, {
+    origin: 'agent', reason: 'probe', action: { argv: ['-e', '1'] } });
   assert.equal(g.decision, 'denied');
+  // with a policy the tier registers (the E1 gates cover the rest)
+  const broker2 = createBroker({ workspace: ws, policy: {
+    hostExecPolicy: { paths: { read: [], write: [] },
+                      network: { allow: [] }, deps: { npm: [] } } } });
+  broker2.register({ name: 'run_node', tier: TIERS.HOST_EXEC,
+                     run: async () => ({}) });   // does not throw
 });
 
 test('R1-1 source-shape: launch spec is the precise contract (M8)', () => {

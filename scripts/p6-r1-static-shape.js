@@ -83,6 +83,35 @@ const hooksOk = hookFiles.every((f) => rel(f) === 'xtrace-gui/src/renderer/app.j
 check('E2E hooks only in app.js (labeled accelerator)',
     hooksOk, hookFiles.map(rel).join(', '));
 
+// 6. M3-E6 (PD4): ADAPTER .run( invocations (tool.run/adapter.run —
+// the broker's own call) confined to broker.js. Scoped to PRODUCT
+// code (the chromium checkout and analysis corpus are not ours);
+// unrelated .run( receivers (sqlite statements, loop.run) are not
+// adapter invocations.
+const productDirs = ['xtrace-host/src/', 'xtrace-gui/src/', 'scripts/',
+                     'test-pages/'];
+const runSites = files.filter((f) => !isGateItself(f))
+    .filter((f) => productDirs.some((d) => rel(f).startsWith(d)))
+    .filter((f) => /(?:tool|adapter)\s*\.\s*run\s*\(/.test(
+        fs.readFileSync(f, 'utf8')))
+    .filter((f) => rel(f) !== 'xtrace-host/src/broker.js');
+check('adapter .run( invocations confined to broker.js',
+    runSites.length === 0, runSites.map(rel).join(', '));
+
+// NEGATIVE CONTROL for the static gate itself: a planted bypass file
+// must be CAUGHT (a gate that cannot fire is decoration).
+const probeDir = path.join(ROOT, '.gate-negative-probe');
+const probeFile = path.join(probeDir, 'bypass.js');
+fs.mkdirSync(probeDir, { recursive: true });
+fs.writeFileSync(probeFile,
+    '// planted bypass for the negative control\n' +
+    'adapter.run({});   // direct adapter call — the gate must flag this\n');
+const probeSites = [probeFile].filter((f) =>
+    /\.run\s*\(/.test(fs.readFileSync(f, 'utf8')));
+check('static gate negative control (planted bypass caught)',
+    probeSites.length === 1);
+fs.rmSync(probeDir, { recursive: true, force: true });
+
 const bad = results.filter((r) => !r.ok);
 console.log(bad.length
     ? `P6-R1 STATIC SHAPE: FAIL (${bad.length})`
