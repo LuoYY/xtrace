@@ -532,3 +532,42 @@ R1.8 全表 + `docs/review-artifacts/p6-r2/probe6`（必须从"重复 29"变成"
 - `accepted-p6` **未标**；R1 的成果全部保留（不 revert）。
 - 路线图：M2 达成节点由 10-02 顺延至 **10-05**；M1.1 依赖 R2-3（语料 capture 是多 producer，游标缺陷会直接污染 vPC 序列计数），顺延至 **10-06 → 10-09**；M3–M5 相应顺移（见 roadmap §8）。
 - 教训回填 §7：**"整改轮本身也会引入退步"**——本轮 R1 的修法（削薄服务层）顺手删掉了一个已交付的诚实披露，且用削弱断言把它盖住。对策：整改块的工单里**显式列出"不得削弱的既有断言清单"**，并要求整改 commit 的 diffstat 中"删除的测试行"逐条给出替代位置（P7 起由我在工单里列）。
+
+---
+
+# P6-R2 整改执行记录（2026-09-27，工程师）
+
+按 §R2.5 的 R2-1…R2-9 一次推进、一次提交。**先更正 R1 记录的不实申报**（R2-D）：R1 执行记录表中"m1：cdp.js 删 MESSAGE_HEADER 死导出、send 支持超时"与"m5：launches→opens"当时**未做**（R1 轮只改了别处）；"M1–M13 全部完成"表述过宽——M13 的循环计账当时仍为 min(bytes,8192)。本轮已全部实做并在下表逐项给出可验证证据。同时披露：R1 轮删除了五个旧测试文件（e1/e1-integration/e2/e3/e4），其中六类覆盖（env 七操作+隔离、loop 取消+熔断、索引重建等式、A-13 注册、不可用工具执行期拒绝、真机 stop pair）当时无替代——本轮已全部恢复为常设断言（r1-core 新增 8 个测试）。
+
+## R2 整改实现对照
+
+| 项 | 实现（含可验证证据） |
+| --- | --- |
+| R2-1（阻塞 A） | **计账字段进索引本体**：captures 表新增 total_dropped/total_failed/unconfirmed_count 列（ingest 时从 manifest counts/producers 落库）；`listCaptures` 行携带 `drop_counters` 四元组 + `unconfirmed_producers` **名单**（producers 表 watermark_received=0 查询）+ terminal_reason；面板 renderCaptureStatus 读真字段（不再有发明零值的路径）；`enrichStatusRows` 死代码链**删除**（evidenceService 清空为纯说明模块）。E5 S3 恢复**两条正则**（`terminal=incomplete (producer-unconfirmed)` + `unconfirmed producers: 1`）并新增 **S1 真值对账**（盘上 manifest 的 sampled_out == 面板渲染值）。probe7 翻转：`drop_counters_field_present: true`、`unconfirmed_field_present: true`、`enrichStatusRows_has_consumers: []` |
+| R2-2（阻塞 B+m1） | `cdp.js`：**MESSAGE_HEADER 死导出删除**；`send()` 每个请求挂看门狗（默认 30s）→ `CDP_TIMEOUT`（关闭/响应路径清理定时器）。`jsvmp_trace stop` 带 `deadline_ms`：截止错失（或 CDP_TIMEOUT）→ 返回 `stop-timeout` + stages 含 `deadline-missed` + **真实 elapsed_ms**（Date.now 差）。E5 **S2 恢复**（1ms 截止 → 面板 `stop: TIMEOUT after Nms`）。单元门禁：CDP_TIMEOUT（假连接 40ms）+ 死浏览器 stop 截止（30ms → elapsed≥25ms）。`grep -rn stop-timeout` 在 host-test/E5 均有命中（r1-core 新增 grep 锚点断言） |
+| R2-3（阻塞 C） | 游标改为**行号**（1-based lineNumber，producer 无关、每行唯一）：`next_cursor = 边界行行号`，续扫 `行号 < cursor 跳过`（边界行本身带头下一页）；`fromSeq` 保留为行号别名叫法（probe6 原样复跑）。probe6 翻转：**verdict=lossless、sum=60=truth、unique=60、duplicates=0、lost=0**（修前 duplicates=29）。新增**三 producer 合成夹具门禁**（90 行三 producer 交错×7 行分页：sum==90、Set 去重==90）；probe4/probe5（真实 capture 13,444/592）保持 lossless |
+| R2-4（阻塞 D） | 六类覆盖恢复为常设断言：env 七操作+隔离+单开独占+opens 计数、loop 取消+无进展熔断、索引 wipe-rebuild 等式（含 drop_counters/unconfirmed_count 断言）、A-13 注册、不可用工具执行期拒绝、agent+basisHint 停待决（E6 诚实化后同断言）。本节开头的记录更正即 R2-D 的正文 |
+| R2-5（重要 E） | 循环计账改**实际字节**（删 `min(actualBytes, 8192)`）：超预算结果 refused 并给窄化指针。probe7 翻转：`budget_used_reported: 120022`（修前 24576——两个 60KB 接纳+第三个 refused，如实）。单测：100KB 预算 ×3×60KB → 恰 1 接纳 2 refused、接纳行 bytes>50000 |
+| R2-6（重要 F） | `gateStateful` 的 basisHint 分支加 `origin === 'ui'` 条件——agent/mcp 传 basisHint 一律停待决。probe7 翻转：`D1 self_confirmed: false`（env_create agent+hint → 待决 → 60s TTL 过期 → 无副作用）。E6 驱动器去 agent+basisHint：改 `agentCall()` 经 `resolveConfirmation`（human-approved）——E6 实测 ledger 中 `origin:agent 且 basis:ui-direct-click` 行 = **0**，env_create/env_open 均为 confirmation-required→confirmed(human-approved)→executed |
+| R2-7（重要 G） | B1 锚点改**逐动作等式**：渲染层 `__clickTally` 计每次副作用点击（start/stop/cancel/clear/agent 分键）；ledger executed 计数 == clicks（agent 点击按 human-approved 行数拆分 approved/denied）。**负控**：从计数删一行 → 等式必翻红（report.b1NegativeControl.sabotageDetects）。实测：clicks{start:3,stop:4,cancel:1,clear:1,agent:2} == ledger{jsvmp_trace:10}（10==3+4+1+1+1 approved），denied=1 |
+| R2-8（重要 H） | E5 新增：Capabilities/Authorization/Jump 三控件点击断言（jump 用空引用验证**显式错误面**）；**clear 真语义覆盖**（面板 `cleared (previous=…)`）；**resolve-orphan 覆盖**（死 pid + 已落盘 capture → adopt-read-only，经 evidence:resolve-orphan）。Choose-workspace 的 dialog 路径属人工面，选择以静态门禁（无 Node 于渲染层）+ S5 开工作区路径覆盖 |
+| R2-9（小项） | elapsed_ms 真实（Date.now）；`h.cancelStopWait` 死分支删除；`toolSchemas()` 同步纯本地视图（host 异步面单独 `schemasForModel`）；E6 `agentTools` 死过滤三行删除；**m5 `launches`→`opens`**（env-manager 7 处，含 status 输出与测试断言）；`webapi_trace stop` 返回 pair+coverage+elapsed_ms；`relevance(row, weights)` 权重可注入（负控跑真实函数） |
+
+**顺带修复（probe7 调试发现的真实缺陷）**：Broker 确认 TTL 原先无活动定时器——停靠的等待 promise 无句柄，node 会静默 exit 0（probe7 因此空输出）；且 unref 版同样放空。现待决项创建即挂**未 unref 的过期定时器**（各清除路径 clearTimeout），CLI 停靠进程保持存活至 TTL 落地。
+
+## R2.6 复审门禁（R1.8 全表 + 追加，2026-09-27 亲跑全绿）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `bash scripts/run_tests.sh` | exit 0（python 381 / launcher 28 / host **29** / GUI 216） |
+| xtrace-host `npm test` | **29/29**（R1 的 19 + R2 新增 10：恢复六类覆盖、三 producer 游标、CDP_TIMEOUT、stop 截止、字节计账、agent-basisHint 停靠、grep 锚点） |
+| `probe6` | **lossless**（duplicates 29→0） |
+| `probe7` | **全部翻转**：B6 escaped=false、B5 jump ok、counters/unconfirmed 字段 true、死代码消费者 []、M13 计账 120022（实际字节）、D1 self_confirmed=false |
+| `probe4`/`probe5` | 保持 lossless（合成双 producer / 真实 capture 13,444+592） |
+| `p6-e5-ui-scenarios.cjs` | **GREEN 九场景**（五+一 + controls + clear + resolveOrphan + stopTimeout）+ B1 逐动作等式 + 负控翻转 + 双会话 console/exception/非本地全 0；面板数字与盘上 manifest 对账（S1 sampled_out 等式）|
+| `p6-e6-closed-loop.cjs` | GREEN 九阶段（agent 路径诚实化：env 两调用经 human-approved；citedRef jump line 4996；审计含 basis 全迹） |
+| `p6-r1-static-shape.js` | GREEN 5/5 |
+| `p55-s0` / `p4-contract` / `p5-reopen` / `p55-e7` / `p6-e0-analyzer-v3` / `p6-e0-dp551` | 全绿保持 |
+| `verify_patches.py --with-dylibs` | pass（零 chromium/src 触碰） |
+
+progress JSON `p6` = `p6-r2-remediation-complete`。**申请：按 §R2.5 一次复审。**

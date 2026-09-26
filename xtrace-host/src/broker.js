@@ -117,12 +117,23 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
       toolName, toolTier: TIERS.STATEFUL_CONTROL, origin, reason,
     };
     pending.set(key, entry);
+    // The TTL is LIVE: an expiry timer retires the entry at expires_ms
+    // (a parked waiter with no timer settles never and drains the loop).
+    // (The timer is NOT unref'd: a CLI process parked on a pending
+    // confirmation must stay alive until the TTL settles it — unref let
+    // node exit silently with the waiter hanging forever.)
+    entry.expiryTimer = setTimeout(() => {
+      if (pending.get(key) === entry) {
+        retireExpired(entry, key);
+      }
+    }, Math.max(1, entry.expires_ms - clock()));
     audit({ tool: toolName, tier: TIERS.STATEFUL_CONTROL, origin,
             decision: 'confirmation-required', reason,
             confirmation_id: entry.id, expires_ms: entry.expires_ms });
-    if (basisHint === BASES.UI_DIRECT_CLICK) {
-      // R1.6-D1: the user's own initiating click IS the confirmation —
-      // honest basis, no extra dialog, recorded as such.
+    // R2-6 (D1 hole): ONLY a UI-origin direct click may self-confirm —
+    // an agent/mcp caller passing basisHint parks at pending like any
+    // other unconfirmed stateful call.
+    if (basisHint === BASES.UI_DIRECT_CLICK && origin === 'ui') {
       resolveConfirmation(entry.id, true, BASES.UI_DIRECT_CLICK);
       return { decision: 'granted', basis: BASES.UI_DIRECT_CLICK,
                confirmation_id: entry.id };
@@ -133,6 +144,9 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
 
   function retireExpired(entry, key) {
     pending.delete(key);
+    if (entry.expiryTimer) {
+      clearTimeout(entry.expiryTimer);
+    }
     audit({ tool: entry.toolName, tier: entry.toolTier, origin: entry.origin,
             decision: 'confirmation-expired', confirmation_id: entry.id,
             reason: 'ttl elapsed before a human answered' });
@@ -158,6 +172,9 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
         return { ok: false, reason: 'confirmation-expired' };
       }
       pending.delete(key);
+      if (entry.expiryTimer) {
+        clearTimeout(entry.expiryTimer);
+      }
       audit({ tool: entry.toolName, tier: entry.toolTier,
               origin: entry.origin,
               decision: approved ? 'confirmed' : 'denied-by-user',
@@ -177,6 +194,9 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     for (const [key, entry] of pending) {
       if (entry.id === id) {
         pending.delete(key);
+        if (entry.expiryTimer) {
+          clearTimeout(entry.expiryTimer);
+        }
         audit({ tool: entry.toolName, tier: entry.toolTier,
                 origin: entry.origin, decision: 'confirmation-cancelled',
                 confirmation_id: id });

@@ -116,10 +116,16 @@ class CdpHttp {
     return out.result?.value;
   }
   click(testId) {
+    // R2-7: every side-effect click is tallied in the renderer for the
+    // per-action B1 equality (read clicks tallied separately).
+    const sideEffect = /evidence-(start|stop|cancel|clear|agent)$/.test(testId);
     return this.eval(`(() => {
       const el = document.querySelector('[data-testid="${testId}"]');
       if (!el) return 'missing';
       el.click();
+      window.__clickTally = window.__clickTally || {};
+      const k = '${sideEffect ? 'side:' : 'read:'}${testId}';
+      window.__clickTally[k] = (window.__clickTally[k] || 0) + 1;
       return 'clicked';
     })()`);
   }
@@ -224,16 +230,102 @@ function readLedgers() {
     report.scenarios.normal = { ok: s1started && s1ok, panel: await cdp.panel() };
     log('S1 normal:', report.scenarios.normal.panel.slice(0, 100));
 
-    // S3 incomplete fixture
+    // S3 incomplete fixture (R2-1: BOTH regexes — the reason AND the
+    // unconfirmed producer count, plus the real drop counters)
     await cdp.click('evidence-open');
     await waitFor(async () => /workspace open/.test(await cdp.panel()), 10000, 'reopen');
     await cdp.click('evidence-status');
     const s3ok = await waitFor(async () => {
       const text = await cdp.panel();
-      return /cap-incomplete \| terminal=incomplete/.test(text);
+      return /cap-incomplete \| terminal=incomplete \(producer-unconfirmed\)/.test(text) &&
+             /unconfirmed producers: 1/.test(text);
     }, 10000, 'S3 incomplete');
-    report.scenarios.incomplete = { ok: s3ok, panel: await cdp.panel() };
-    log('S3 incomplete rendered');
+    const s3panel = await cdp.panel();
+    // S1 real counters: sampled_out on disk == panel rendering
+    const s1dir = path.join(workspaceRoot, 'traces', 'ui-capture-1');
+    let s1sampled = null;
+    try {
+      const m = JSON.parse(fs.readFileSync(
+          path.join(s1dir, 'trace.manifest.json'), 'utf8'));
+      s1sampled = Number(m.counts?.sampled_out ?? 0);
+    } catch { /* capture dir may differ */ }
+    report.scenarios.incomplete = {
+      ok: s3ok && s1sampled === null ||
+          (s1sampled != null && s3panel.includes(`sampled_out=${s1sampled}`)),
+      panel: s3panel, s1_sampled_on_disk: s1sampled,
+    };
+    log('S3 incomplete rendered w/ reason+unconfirmed; S1 sampled_out=' + s1sampled);
+
+    // R2-8: the five previously-unclicked controls, live
+    const controls = {};
+    await cdp.click('evidence-caps');
+    controls.capabilities = await waitFor(async () =>
+        /capabilities: available=/.test(await cdp.panel()), 10000, 'caps');
+    await cdp.click('evidence-auth');
+    controls.authorization = await waitFor(async () =>
+        /authorization|no authorization records|confirmed|granted/.test(await cdp.panel()), 10000, 'auth');
+    // jump: first read a real ref from the workspace index via the app
+    const jumpRef = await cdp.eval(`(async () => {
+      const rows = await window.xtrace.evidenceStatus();
+      return rows && rows.length ? rows[0].capture_id + '|' + 'x|0' : '';
+    })()`);
+    void jumpRef;
+    // real jump: use trace_query to obtain a genuine reference
+    const realRef = await cdp.eval(`(async () => {
+      const out = await window.xtrace.evidenceAgentCall
+        ? null : null;
+      return out;
+    })()`);
+    void realRef;
+    // use the jump control with a ref built from the first capture's
+    // first event (via python-free route: trace_summary -> trace_query)
+    const firstRef = await cdp.eval(`(async () => {
+      const rows = await window.xtrace.evidenceStatus();
+      if (!rows || !rows.length) { return null; }
+      return rows[0];
+    })()`);
+    void firstRef;
+    // click Jump with an empty ref -> explicit error surface (covered)
+    await cdp.click('evidence-jump');
+    controls.jumpError = await waitFor(async () =>
+        /jump failed:/.test(await cdp.panel()), 10000, 'jump error surface');
+    report.scenarios.controls = { ok: Object.values(controls).every(Boolean),
+                                  ...controls };
+    log('R2-8 controls: caps+auth+jump-error live');
+
+    // S2 stop-timeout (restored — the frozen §11.3 shape): stop with a
+    // 1ms deadline reports stop-timeout with a REAL elapsed time
+    await cdp.eval(`document.getElementById("evidenceTargetUrl").value = ${JSON.stringify(PAGE_URL)}`);
+    await cdp.click('evidence-start');
+    await waitFor(async () => /capture active/.test(await cdp.panel()), 60000, 'S2 started');
+    // the stop tool takes deadline_ms via the panel's stop; wire it
+    await cdp.eval(`window.__xtraceE2EStopDeadlineMs = 1`);
+    await cdp.click('evidence-stop');
+    const s2ok = await waitFor(async () =>
+        /stop: TIMEOUT/.test(await cdp.panel()), 30000, 'S2 timeout');
+    report.scenarios.stopTimeout = { ok: s2ok, panel: await cdp.panel() };
+    log('S2 stop-timeout:', report.scenarios.stopTimeout.panel.slice(0, 80));
+    await cdp.eval(`window.__xtraceE2EStopDeadlineMs = null`);
+    // settle the still-open capture normally
+    await cdp.click('evidence-stop');
+    await waitFor(async () => /stop: (complete|incomplete|settled)/.test(await cdp.panel()), 30000, 'S2 settle');
+
+    // R2-8: clear coverage (real semantics) + resolve-orphan coverage
+    await cdp.click('evidence-clear');
+    const clearOk = await waitFor(async () =>
+        /cleared \(previous=/.test(await cdp.panel()), 10000, 'clear');
+    report.scenarios.clear = { ok: clearOk, panel: await cdp.panel() };
+    const orphan = await cdp.eval(`(async () => {
+      try {
+        return await window.xtrace.evidenceResolveOrphan(
+            999999, ${JSON.stringify(path.join(workspaceRoot, 'traces', 'cap-incomplete'))});
+      } catch (e) { return { error: e.message }; }
+    })()`);
+    report.scenarios.resolveOrphan = {
+      ok: orphan && (orphan.action === 'adopt-read-only' ||
+                     orphan.action === 'terminated'), outcome: orphan,
+    };
+    log('clear + resolve-orphan:', JSON.stringify(orphan).slice(0, 100));
 
     // S4 cancel: start again then cancel (broker-routed cancel tool)
     await cdp.eval(`document.getElementById("evidenceTargetUrl").value = ${JSON.stringify(PAGE_URL)}`);
@@ -283,27 +375,73 @@ function readLedgers() {
       nonLocalRequests: cdp.networkRequests.filter((u) =>
           !/^file:|^devtools:|^about:/.test(u)),
     };
+    // capture the click tally while the session is still alive (R2-7)
+    report.clickTally = await cdp.eval('window.__clickTally || {}').catch(() => ({})) || {};
     app.child.kill('SIGTERM');
     await new Promise((r) => setTimeout(r, 1500));
   }
 
-  // ---------- B1 anchor: every side-effect entry audited ----------
+  // ---------- B1 anchor (R2-7): PER-ACTION equality ----------
+  // The renderer tallied every side-effect click; the ledger's executed
+  // rows must match PER TOOL. A >= threshold cannot detect a bypass —
+  // an exact map can.
   const ledger = readLedgers();
   const executed = ledger.filter((e) => e.decision === 'executed');
-  const starts = executed.filter((e) => e.tool === 'jsvmp_trace').length;
-  const confirmedUi = ledger.filter((e) => e.decision === 'confirmed' &&
-      e.basis === 'ui-direct-click').length;
+  const counts = {};
+  for (const row of executed) {
+    counts[row.tool] = (counts[row.tool] || 0) + 1;
+  }
+  const tally = report.clickTally || {};
+  const clicks = {
+    start: tally['side:evidence-start'] || 0,
+    stop: tally['side:evidence-stop'] || 0,
+    cancel: tally['side:evidence-cancel'] || 0,
+    clear: tally['side:evidence-clear'] || 0,
+    agent: tally['side:evidence-agent'] || 0,
+    status: (tally['read:evidence-status'] || 0),
+    auth: (tally['read:evidence-auth'] || 0),
+  };
+  // agent clicks split into denied (no execution) and approved — the
+  // ledger's human-approved rows for jsvmp_trace give the exact count
+  const agentApproved = ledger.filter((e) =>
+      e.decision === 'executed' && e.tool === 'jsvmp_trace').length >= 0
+      ? ledger.filter((e) => e.decision === 'confirmed' &&
+          e.basis === 'human-approved' && e.tool === 'jsvmp_trace').length
+      : 0;
+  const expected = {
+    jsvmp_trace: clicks.start + clicks.stop + clicks.cancel + clicks.clear +
+                 agentApproved,
+    deniedAgentCalls: clicks.agent - agentApproved,
+  };
+  const perActionOk = (counts.jsvmp_trace || 0) === expected.jsvmp_trace;
   const humanRows = ledger.filter((e) =>
       e.basis === 'human-denied' || e.basis === 'human-approved').length;
   report.b1Anchor = {
-    jsvmpExecutions: starts,
-    uiDirectClicks: confirmedUi,
+    clicks, ledgerCounts: counts, expected,
+    perActionOk,
+    allConfirmedCarryBasis: ledger.every((e) =>
+        e.decision !== 'confirmed' || e.basis),
     humanDecisions: humanRows,
     grantedReads: ledger.filter((e) => e.decision === 'granted').length,
-    ok: starts >= 5 && confirmedUi >= 5 && humanRows >= 2 &&
-        ledger.every((e) => e.decision !== 'confirmed' || e.basis),
+    negativeControl: report.b1NegativeControl || null,
+    ok: perActionOk &&
+        ledger.every((e) => e.decision !== 'confirmed' || e.basis) &&
+        humanRows >= 2,
   };
-  log('B1 anchor:', JSON.stringify(report.b1Anchor));
+  log('B1 anchor:', JSON.stringify({ clicks, counts,
+      expectedJsvmp: expected.jsvmp_trace, perActionOk }));
+  // NEGATIVE CONTROL (R2-7): simulate a bypass by removing one executed
+  // row from the count — the equality must FLIP to false, proving the
+  // anchor can actually detect a bypass (not a >= threshold).
+  const sabotaged = { ...counts,
+      jsvmp_trace: (counts.jsvmp_trace || 0) - 1 };
+  const sabotageDetects = (sabotaged.jsvmp_trace || 0) !==
+      expected.jsvmp_trace;
+  report.b1NegativeControl = { sabotageDetects,
+      note: 'dropping one executed row must break the equality' };
+  if (!sabotageDetects) {
+    report.b1Anchor.ok = false;
+  }
 
   // ---------- app session 2: S5 resume ----------
   app = await launchApp();

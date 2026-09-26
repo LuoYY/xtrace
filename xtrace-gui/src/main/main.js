@@ -130,7 +130,8 @@ ipcMain.handle("evidence:stop", (_e, options = {}) => {
   const host = requireHost();
   // UI direct click = the confirmation; reason comes from the panel's
   // editable control (renderer passes it), never a hardcoded string.
-  return host.callTool("jsvmp_trace", { action: "stop" },
+  return host.callTool("jsvmp_trace",
+      { action: "stop", deadline_ms: options.deadline_ms },
       { origin: "ui",
         reason: options.reason || "stop via evidence panel",
         basisHint: BASES.UI_DIRECT_CLICK });

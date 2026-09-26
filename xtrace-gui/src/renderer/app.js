@@ -354,9 +354,16 @@ boot().catch((error) => {
 
   $("btnEvidenceStop").addEventListener("click", async () => {
     try {
-      const out = await window.xtrace.evidenceStop({
+      const options = {
         reason: $("evidenceReason").value.trim() || "stop via evidence panel",
-      });
+      };
+      // harness accelerator (labeled): the E2E driver lowers the stop
+      // deadline to exercise the frozen stop-timeout scenario; humans
+      // get the product default.
+      if (window.__xtraceE2EStopDeadlineMs) {
+        options.deadline_ms = window.__xtraceE2EStopDeadlineMs;
+      }
+      const out = await window.xtrace.evidenceStop(options);
       setPanel(lib.renderStopProgress(out));
     } catch (error) {
       setPanel(`stop failed: ${error.message || error}`);

@@ -59,14 +59,14 @@ function createAGroupAdapters({ workspace, index, host }) {
   // ---- event-level queries (D2 contract everywhere) --------------------
   a.push({
     name: 'trace_query', tier: TIERS.READ_EVIDENCE,
-    input: { capture_id: 'string', api: 'string?', from_seq: 'int?',
+    input: { capture_id: 'string', api: 'string?', from_line: 'int?',
              limit: 'int?' },
     output: 'rows + window contract (scanned/matched/total/complete/cursor)',
     scope: 'workspace traces',
     run: async (args) => {
       const captureId = requireString(args, 'capture_id');
       const scan = index.scanEvents(captureId, {
-        fromSeq: args.from_seq ?? null,
+        fromLine: args.from_line ?? null,
         maxRows: clampInt(args.limit, 1, 1000, 100),
         maxBytes: MAX_RETURN_BYTES,
         predicates: args.api ? { api: args.api } : {},
@@ -199,13 +199,13 @@ function createAGroupAdapters({ workspace, index, host }) {
     degradedReason: 'first-batch event surface only: Ignition pre-events ' +
                     '(script/offset/opcode); vpc/locals/env fields await ' +
                     'later observer versions',
-    input: { capture_id: 'string', script_id: 'string?', from_seq: 'int?',
+    input: { capture_id: 'string', script_id: 'string?', from_line: 'int?',
              limit: 'int?' },
     output: 'ignition rows + window contract',
     run: async (args) => {
       const captureId = requireString(args, 'capture_id');
       const scan = index.scanEvents(captureId, {
-        fromSeq: args.from_seq ?? null,
+        fromLine: args.from_line ?? null,
         maxRows: clampInt(args.limit, 1, 1000, 100),
         maxBytes: MAX_RETURN_BYTES,
         predicates: { ignition: true },
@@ -224,13 +224,13 @@ function createAGroupAdapters({ workspace, index, host }) {
     degradedReason: 'first-batch WebIDL interface set only (P5 frozen ' +
                     'scope); URL/Body/Element/Performance families beyond ' +
                     'the set are not captured',
-    input: { capture_id: 'string', api: 'string?', from_seq: 'int?',
+    input: { capture_id: 'string', api: 'string?', from_line: 'int?',
              limit: 'int?' },
     output: 'WebIDL rows + window contract',
     run: async (args) => {
       const captureId = requireString(args, 'capture_id');
       const scan = index.scanEvents(captureId, {
-        fromSeq: args.from_seq ?? null,
+        fromLine: args.from_line ?? null,
         maxRows: clampInt(args.limit, 1, 1000, 100),
         maxBytes: MAX_RETURN_BYTES,
         predicates: { bindings: true },

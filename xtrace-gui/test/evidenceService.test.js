@@ -7,8 +7,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { enrichStatusRows, dropCountersFromManifest,
-        unconfirmedProducers } = require('../src/main/evidenceService');
+// R2-1: the enrichment helper is GONE — the index rows carry the
+// fields natively; this test asserts them directly.
 const panel = require('../src/renderer/evidencePanel');
 const { createHost } = require('../../xtrace-host/src/host');
 
@@ -69,20 +69,12 @@ test('B5 gate: trace-on naming — counters equal disk truth via the composition
     const rows = await host.callTool('trace_summary', {},
         { origin: 'ui' });
     assert.equal(rows.length, 1);
-    // enrich through the SAME manifest-reading path the panel uses
-    const readManifest = (row) => {
-      const manifestName = 'trace-on.manifest.json';
-      const p = path.join(row.dir, manifestName);
-      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8'))
-          : null;
-    };
-    const enriched = enrichStatusRows(rows, readManifest)[0];
-    assert.equal(enriched.terminal, 'complete');
-    assert.deepEqual(enriched.drop_counters,
+    const row = rows[0];
+    assert.equal(row.terminal, 'complete');
+    assert.deepEqual(row.drop_counters,
         { dropped: 7, failed: 3, sampled_out: 11, partial_observations: 5 });
-    assert.deepEqual(enriched.unconfirmed_producers, ['bnet:z:9:1']);
-    assert.equal(dropCountersFromManifest(null).dropped, 0);
-    assert.deepEqual(unconfirmedProducers(null), []);
+    assert.deepEqual(row.unconfirmed_producers, ['bnet:z:9:1']);
+    assert.equal(row.terminal_reason, null);
   } finally {
     host.close();
   }

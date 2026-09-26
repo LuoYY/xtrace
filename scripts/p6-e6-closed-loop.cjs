@@ -32,13 +32,24 @@ const stage = (name, ok, detail) => {
   // env manager FIRST (host consumes its active profile in the spec)
   const host0 = await createHost({ executable: EXE,
       workspaceRoot, skipBrowserLaunch: true });
-  const envCreated = await host0.callTool('env_create',
+  // R2-6: agent-origin calls PARK at the pending queue — the driver
+  // answers them through the SAME resolveConfirmation path the UI's
+  // human surface uses (never a basisHint self-confirm).
+  async function agentCall(host, tool, args, reason) {
+    const exec = host.callTool(tool, args, { origin: 'agent', reason });
+    for (let i = 0; i < 600 && host.broker.pendingCount() > 0; i++) {
+      await new Promise((r2) => setTimeout(r2, 5));
+      for (const id of host.broker.pendingIds()) {
+        host.broker.resolveConfirmation(id, true);   // human-approved
+      }
+    }
+    return exec;
+  }
+  const envCreated = await agentCall(host0, 'env_create',
       { name: 'e6-env', notes: 'closed-loop isolated env' },
-      { origin: 'agent', basisHint: BASES.UI_DIRECT_CLICK,
-        reason: 'create the isolated env for the closed loop' });
-  const opened = await host0.callTool('env_open', { name: 'e6-env' },
-      { origin: 'agent', basisHint: BASES.UI_DIRECT_CLICK,
-        reason: 'activate the env so the launch spec consumes its profile' });
+      'create the isolated env for the closed loop');
+  const opened = await agentCall(host0, 'env_open', { name: 'e6-env' },
+      'activate the env so the launch spec consumes its profile');
   stage('env-isolated', opened.open === true &&
       opened.profile_dir.startsWith(host0.workspace.dir('profiles')),
       `profile=${opened.profile_dir}`);
@@ -119,9 +130,6 @@ const stage = (name, ok, detail) => {
     }
     return { type: 'final', answer: {} };
   };
-  const agentTools = [...host.adapters.all()]
-      .filter((t) => host.capabilitySnapshot === undefined || true);
-  void agentTools;
   const loop = createAgentLoop({ broker: host.broker,
       tools: [...host.tools.values()], index: host.index,
       workspace: host.workspace, model, host,

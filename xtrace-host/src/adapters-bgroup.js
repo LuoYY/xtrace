@@ -87,8 +87,36 @@ function createBGroupAdapters({ workspace, host, envs }) {
         }
       }
       if (action === 'stop') {
+        // R2-2: the frozen §11.3 stop-timeout scenario. A deadline miss
+        // (or a hung browser surfacing as CDP_TIMEOUT) settles as
+        // stop-timeout with the REAL elapsed time — the caller keeps
+        // polling Status for the eventual terminal.
+        const started = Date.now();
+        const deadlineMs = Number(args.deadline_ms) > 0
+            ? Number(args.deadline_ms) : 8000;
         const stages = ['stop-requested'];
-        const out = await h.send('XTrace.stopCapture');
+        let out;
+        try {
+          out = await Promise.race([
+            h.send('XTrace.stopCapture'),
+            new Promise((_, reject) => setTimeout(() => {
+              const e = new Error('stop deadline elapsed');
+              e.code = 'STOP_DEADLINE';
+              reject(e);
+            }, deadlineMs)),
+          ]);
+        } catch (error) {
+          if (error.code === 'STOP_DEADLINE' || error.code === 'CDP_TIMEOUT') {
+            stages.push('deadline-missed');
+            return { action, state: 'stop-timeout', terminal: 'stop-timeout',
+                     stages, elapsed_ms: Date.now() - started,
+                     reason: error.code === 'CDP_TIMEOUT'
+                         ? 'browser did not answer (CDP timeout)'
+                         : 'stop deadline elapsed; capture may still settle',
+                     pair: { terminal: 'stop-timeout', coverage: null } };
+          }
+          throw error;
+        }
         stages.push('stop-answered');
         const traceFile = h.traceFile;
         let coverage = null;
@@ -102,7 +130,7 @@ function createBGroupAdapters({ workspace, host, envs }) {
         h.activeCapture = null;
         return { action, terminal: out.state, reason: out.reason || null,
                  coverage, counts, trace_file: traceFile || null,
-                 stages, elapsed_ms: 0,
+                 stages, elapsed_ms: Date.now() - started,
                  pair: { terminal: out.state, coverage } };
       }
       if (action === 'status') {
@@ -115,9 +143,6 @@ function createBGroupAdapters({ workspace, host, envs }) {
         // this host and abandon any in-flight wait. The Broker rows say
         // 'confirmation-cancelled'; the wait resolves cancelled.
         const retired = h.broker ? h.broker.cancelAllPending() : [];
-        if (h.cancelStopWait) {
-          h.cancelStopWait();
-        }
         return { action, cancelled: true,
                  retired_confirmations: retired.length };
       }
@@ -188,9 +213,17 @@ function createBGroupAdapters({ workspace, host, envs }) {
         }
       }
       if (action === 'stop') {
+        const started = Date.now();
         const out = await h.send('XTrace.stopCapture');
+        const traceFile = h.traceFile;
+        let coverage = null;
+        if (traceFile) {
+          coverage = manifestAt(traceFile)?.observation_coverage ?? null;
+        }
         h.activeCapture = null;
-        return { action, terminal: out.state };
+        return { action, terminal: out.state, coverage,
+                 elapsed_ms: Date.now() - started,
+                 pair: { terminal: out.state, coverage } };
       }
       if (action === 'status') {
         return { action, ...(await h.send('XTrace.getCaptureStatus')) };

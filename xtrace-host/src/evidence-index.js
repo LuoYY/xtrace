@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS captures (
   total_eligible INTEGER NOT NULL DEFAULT 0,
   total_sampled_out INTEGER NOT NULL DEFAULT 0,
   total_partial_observations INTEGER NOT NULL DEFAULT 0,
+  total_dropped INTEGER NOT NULL DEFAULT 0,
+  total_failed INTEGER NOT NULL DEFAULT 0,
+  unconfirmed_count INTEGER NOT NULL DEFAULT 0,
   indexed_ms INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS producers (
@@ -80,11 +83,13 @@ function createEvidenceIndex(dbPath) {
       db.prepare('DELETE FROM api_counts WHERE capture_id = ?').run(captureId);
       db.prepare('DELETE FROM assets WHERE capture_id = ?').run(captureId);
 
+      const producerRows = manifest?.producers ?? [];
       db.prepare(`INSERT INTO captures
         (capture_id, dir, trace_file, terminal, terminal_reason, coverage,
          accounting_model, schema_version, event_count, total_eligible,
-         total_sampled_out, total_partial_observations, indexed_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         total_sampled_out, total_partial_observations, total_dropped,
+         total_failed, unconfirmed_count, indexed_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(captureId, dir, traceFile,
                manifest?.terminal?.state ?? null,
                manifest?.terminal?.reason ?? null,
@@ -95,6 +100,10 @@ function createEvidenceIndex(dbPath) {
                Number(manifest?.counts?.eligible ?? 0),
                Number(manifest?.counts?.sampled_out ?? 0),
                Number(manifest?.counts?.partial_observations ?? 0),
+               Number(manifest?.counts?.dropped ?? 0),
+               Number(manifest?.counts?.failed ?? 0),
+               producerRows.filter((p2) => p2.watermark?.received === false)
+                   .length,
                Date.now());
 
       const insProducer = db.prepare(`INSERT OR REPLACE INTO producers
@@ -156,10 +165,26 @@ function createEvidenceIndex(dbPath) {
 
   // ---- queries (references ALWAYS carry capture + producer + seq) ----
   function listCaptures() {
+    const unconfirmedStmt = db.prepare(
+        `SELECT producer_id FROM producers
+         WHERE capture_id = ? AND watermark_received = 0`);
     return db.prepare(`SELECT capture_id, dir, trace_file, terminal,
-        coverage, event_count, total_sampled_out,
-        total_partial_observations
-        FROM captures ORDER BY indexed_ms DESC`).all();
+        terminal_reason, coverage, event_count, total_sampled_out,
+        total_partial_observations, total_dropped, total_failed,
+        unconfirmed_count
+        FROM captures ORDER BY indexed_ms DESC`).all()
+        .map((row) => ({
+          ...row,
+          drop_counters: {
+            dropped: row.total_dropped,
+            failed: row.total_failed,
+            sampled_out: row.total_sampled_out,
+            partial_observations: row.total_partial_observations,
+          },
+          unconfirmed_count: row.unconfirmed_count,
+          unconfirmed_producers: unconfirmedStmt.all(row.capture_id)
+              .map((r2) => r2.producer_id),
+        }));
   }
 
   function topApis(captureId, limit = 20) {
@@ -182,8 +207,10 @@ function createEvidenceIndex(dbPath) {
    * the capture row) / window_complete / next_cursor. Every row carries
    * its capture + producer + seq reference. */
   function scanEvents(captureId, {
-    fromSeq = null, maxRows = 100, maxBytes = 262144,
+    fromLine = null, maxRows = 100, maxBytes = 262144,
     predicates = {},   // { api, ignition: bool, bindings: bool, param }
+    fromSeq = null,    // legacy alias (DEPRECATED: producer-blind
+                       // line cursors are the contract — R2.3)
   } = {}) {
     const capture = db.prepare(
         'SELECT trace_file, event_count FROM captures WHERE capture_id = ?')
@@ -199,10 +226,21 @@ function createEvidenceIndex(dbPath) {
     let windowComplete = true;
     let nextCursor = null;
     let stopped = false;
-    const startSeq = fromSeq == null ? -Infinity : Number(fromSeq);
+    let lineNumber = 0;
+    // R2-3: the cursor is the 1-based LINE NUMBER of the boundary row —
+    // producer-agnostic, unique per row, so multi-producer page sums
+    // equal the file truth with zero duplicates and zero loss.
+    const cursorValue = fromLine != null ? fromLine : fromSeq;
+    const startLine = cursorValue == null ? 0 : Number(cursorValue);
 
     const emit = (line) => {
+      lineNumber += 1;
       scanned += 1;
+      if (lineNumber < startLine) {
+        return;   // continuation: lines strictly BEFORE the cursor row
+                  // are already delivered (the boundary row itself is
+                  // line == startLine and heads this page)
+      }
       if (!line.trim()) {
         return;
       }
@@ -213,11 +251,7 @@ function createEvidenceIndex(dbPath) {
         return;
       }
       const seq = Number(event.producer_seq);
-      if (seq < startSeq) {
-        return;   // cursor: inclusive revisit — the boundary row is the
-                  // FIRST row of the next page, so page row-sums equal
-                  // the file truth exactly (no off-by-one skips)
-      }
+      void seq;
       if (predicates.api && event.api !== predicates.api) {
         return;
       }
@@ -246,7 +280,7 @@ function createEvidenceIndex(dbPath) {
       const rowBytes = line.length;
       if (rows.length >= maxRows || bytesOut + rowBytes > maxBytes) {
         windowComplete = false;
-        nextCursor = seq;
+        nextCursor = lineNumber;   // the boundary row heads the next page
         stopped = true;   // early stop: continuation via next_cursor
         return;
       }

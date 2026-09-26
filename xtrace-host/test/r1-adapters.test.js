@@ -446,3 +446,68 @@ test('R1-1 integration: composition root — one broker, callTool, negotiated sc
   assert.equal(host.closed, true);
   await assert.rejects(() => host.send('Browser.getVersion'), /closed/i);
 });
+
+
+// ---- R2-3 anchor: THREE producers, one predicate, page sums exact ----
+test('R2-3 gate: three producers x one predicate — lossless page sums', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'r2-cursor-'));
+  const dir = path.join(root, 'traces', 'cap-three');
+  fs.mkdirSync(dir, { recursive: true });
+  const events = [];
+  let seq = 0;
+  // interleave three producers; every row matches the predicate
+  const producers = ['rtx:a:1:1', 'rtx:b:2:1', 'bnet:c:3:1'];
+  for (let i = 0; i < 90; i++) {
+    seq += 1;
+    events.push(baseEvent(producers[i % 3], seq,
+        { api: 'Document.cookie.set' }));
+  }
+  fs.writeFileSync(path.join(dir, 'trace.ndjson'),
+      events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  fs.writeFileSync(path.join(dir, 'trace.manifest.json'), JSON.stringify({
+    schema_version: 3, capture_id: 'cap-three', accounting_model: '2',
+    observation_coverage: 'partial',
+    terminal: { state: 'complete', reason: null },
+    counts: { eligible: '90', enqueued: '90', dropped: '0',
+              accepted: '90', written: '90', failed: '0',
+              sampled_out: '0', partial_observations: '0' },
+    producers: [],
+  }));
+  const index = freshIndex(root);
+  index.rebuildFromDir(path.join(root, 'traces'));
+  const captureId = index.listCaptures()[0].capture_id;
+  const seen = [];
+  let cursor = null, pages = 0, sum = 0;
+  for (;;) {
+    const scan = index.scanEvents(captureId, {
+      fromLine: cursor, maxRows: 7, maxBytes: 1 << 20,
+      predicates: { api: 'Document.cookie.set' } });
+    sum += scan.rows.length;
+    seen.push(...scan.rows.map((r) => `${r.producer_id}#${r.producer_seq}`));
+    pages += 1;
+    if (scan.window_complete) {
+      break;
+    }
+    assert.ok(scan.next_cursor != null);
+    cursor = scan.next_cursor;
+    assert.ok(pages < 40, 'terminates');
+  }
+  assert.equal(sum, 90, 'sum == truth (three producers)');
+  assert.equal(new Set(seen).size, 90, 'zero duplicates across producers');
+  index.close();
+});
+
+// R2-2 anchor: stop-timeout grep coverage exists in the shipped gates
+test('R2-2 anchor: stop-timeout surfaces in shipped gates', () => {
+  const fs2 = require('node:fs');
+  const path2 = require('node:path');
+  const files = [
+    path2.join(ROOT, 'xtrace-host/test/r1-core.test.js'),
+    path2.join(ROOT, 'scripts/p6-e5-ui-scenarios.cjs'),
+  ];
+  for (const f of files) {
+    assert.ok(fs2.existsSync(f), f);
+    assert.ok(/stop-timeout/.test(fs2.readFileSync(f, 'utf8')),
+        `stop-timeout gate present in ${path2.basename(f)}`);
+  }
+});

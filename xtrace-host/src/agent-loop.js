@@ -23,10 +23,10 @@ function createAgentLoop({ broker, tools, index, workspace, model,
   const slicer = createSlicer({ index, budget: limits?.slice_budget });
   const byName = new Map(tools.map((t) => [t.name, t]));
 
-  /** Tool schema mapping for the model surface (R1-9: negotiated state
-   * rides along when the host provides toolSchemas). */
+  /** Tool schema mapping for the model surface — SYNCHRONOUS local
+   * view (R2-9: a sync function must not return a promise). */
   function toolSchemas() {
-    const base = tools.map((t) => ({
+    return tools.map((t) => ({
       name: t.name,
       tier: t.tier,
       input: t.input || {},
@@ -34,13 +34,9 @@ function createAgentLoop({ broker, tools, index, workspace, model,
       state: t.state || undefined,
       reason: t.reason || t.degradedReason || undefined,
     }));
-    if (host && typeof host.toolSchemas === 'function') {
-      // the composition root's negotiated surface wins when present
-      return host.toolSchemas();   // async at the call site
-    }
-    return base;
   }
 
+  /** Negotiated schemas when the composition root is present (async). */
   async function schemasForModel() {
     if (host && typeof host.toolSchemas === 'function') {
       return host.toolSchemas();
@@ -167,17 +163,19 @@ function createAgentLoop({ broker, tools, index, workspace, model,
         const outcome = await runToolCall(decision, ctx);
         // M13: account by ACTUAL bytes; over-budget results are refused
         // with a narrower-query pointer (raw traces never ride along).
+        // R2-5: charge ACTUAL bytes (never min(bytes, 8192)) — three
+        // 60KB results must exhaust a 128KB budget, not report 24KB.
         const actualBytes = outcome.error
             ? outcome.error.length
             : JSON.stringify(outcome.result || {}).length;
-        if (actualBytes > lim.context_bytes) {
+        if (ctx.contextBytes + actualBytes > lim.context_bytes) {
           ctx.log.push({ iteration, type: 'tool-result-refused',
                          name: decision.name, bytes: actualBytes });
           last = { error: 'tool result exceeded the context budget — ' +
-                          'narrow the query (limit/from_seq)' };
+                          'narrow the query (limit/from_line)' };
           noProgress += 1;
         } else {
-          ctx.contextBytes += Math.min(actualBytes, 8192);
+          ctx.contextBytes += actualBytes;
           ctx.log.push({ iteration, type: 'tool', name: decision.name,
                          ok: !outcome.error, bytes: actualBytes });
           last = outcome;

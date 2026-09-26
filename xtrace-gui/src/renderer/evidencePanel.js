@@ -12,8 +12,16 @@
       return "no captures in workspace";
     }
     return status.map((c) => {
-      const drops = c.drop_counters || {};
-      const unconfirmed = (c.unconfirmed_producers || []).length;
+      // R2-1: the index rows carry the REAL counters (dropped/failed/
+      // sampled_out/partial + unconfirmed_count) — the panel never
+      // invents zeros.
+      const drops = c.drop_counters || {
+        dropped: c.total_dropped, failed: c.total_failed,
+        sampled_out: c.total_sampled_out,
+        partial_observations: c.total_partial_observations,
+      };
+      const unconfirmed = c.unconfirmed_count ??
+          (c.unconfirmed_producers || []).length;
       return [
         `capture ${c.capture_id}`,
         `terminal=${c.terminal || "unknown"}${c.terminal_reason ? ` (${c.terminal_reason})` : ""}`,

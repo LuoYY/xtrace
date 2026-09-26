@@ -53,7 +53,7 @@ function createEnvManager({ workspace }) {
       writeMeta(name, {
         name, created_ms: Date.now(),
         notes: opts.notes || '',
-        launches: 0,
+        opens: 0,
       });
       return { name, dir };
     },
@@ -71,7 +71,7 @@ function createEnvManager({ workspace }) {
             return {
               name: n, open: openEnv === n,
               created_ms: meta.created_ms, notes: meta.notes,
-              launches: meta.launches,
+              opens: meta.opens,
             };
           });
     },
@@ -82,7 +82,7 @@ function createEnvManager({ workspace }) {
       }
       const meta = readMeta(name);
       return { name, exists: true, open: openEnv === name,
-               created_ms: meta.created_ms, launches: meta.launches,
+               created_ms: meta.created_ms, opens: meta.opens,
                notes: meta.notes || '',
                profile_dir: envDir(name) };
     },
@@ -108,7 +108,7 @@ function createEnvManager({ workspace }) {
       }
       openEnv = name;
       const meta = readMeta(name);
-      writeMeta(name, { ...meta, launches: (meta.launches || 0) + 1 });
+      writeMeta(name, { ...meta, opens: (meta.opens || 0) + 1 });
       persist();
       return this.status(name);
     },

@@ -9,18 +9,14 @@
 const { spawn } = require('node:child_process');
 const EventEmitter = require('node:events');
 
-const MESSAGE_HEADER = Object.freeze({
-  id: 'number',
-  method: 'string',
-  params: 'object',
-});
-
 class CdpConnection extends EventEmitter {
-  constructor(child) {
+  constructor(child, { sendTimeoutMs = 30000 } = {}) {
     super();
     this.child = child;
     this.nextId = 1;
     this.pending = new Map();
+    this.timers = new Map();
+    this.sendTimeoutMs = sendTimeoutMs;
     this.buffer = '';
     this.closed = false;
     // --remote-debugging-pipe convention: fd 3 = commands IN (we
@@ -44,6 +40,10 @@ class CdpConnection extends EventEmitter {
     for (const { reject } of this.pending.values()) {
       reject(error);
     }
+    for (const timer of this.timers.values()) {
+      clearTimeout(timer);
+    }
+    this.timers.clear();
     this.pending.clear();
     this.emit('closed', error);
   }
@@ -68,6 +68,11 @@ class CdpConnection extends EventEmitter {
         const waiter = this.pending.get(message.id);
         if (waiter) {
           this.pending.delete(message.id);
+          const timer = this.timers.get(message.id);
+          if (timer) {
+            clearTimeout(timer);
+            this.timers.delete(message.id);
+          }
           if (message.error) {
             waiter.reject(new Error(
                 `${message.error.message || 'CDP error'}` +
@@ -93,6 +98,16 @@ class CdpConnection extends EventEmitter {
       payload.sessionId = sessionId;
     }
     return new Promise((resolve, reject) => {
+      // m1 (R2-2): every pending send carries a watchdog — a hung
+      // browser can no longer hang the caller forever.
+      this.timers.set(id, setTimeout(() => {
+        this.pending.delete(id);
+        this.timers.delete(id);
+        const error = new Error(
+            `CDP send timeout after ${this.sendTimeoutMs}ms: ${method}`);
+        error.code = 'CDP_TIMEOUT';
+        reject(error);
+      }, this.sendTimeoutMs));
       this.pending.set(id, { resolve, reject });
       this.outbound.write(JSON.stringify(payload) + '\0');
     });
@@ -113,4 +128,4 @@ async function launchBrowser({ executable, args = [], env = process.env,
   return { child, connection, version };
 }
 
-module.exports = { CdpConnection, launchBrowser, MESSAGE_HEADER };
+module.exports = { CdpConnection, launchBrowser };

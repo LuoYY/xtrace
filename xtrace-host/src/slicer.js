@@ -25,20 +25,22 @@ const RELEVANCE_WEIGHTS = Object.freeze({
   paired_return: 10,
 });
 
-function relevance(row) {
+function relevance(row, weights = RELEVANCE_WEIGHTS) {
+  // weights are injectable so negative controls exercise the REAL
+  // function (R2-9) rather than a copy.
   const e = row.event || {};
   let score = 0;
   if (e.value_tap) {
-    score += RELEVANCE_WEIGHTS.value_tap;
+    score += weights.value_tap;
   }
   if (/dump/i.test(String(e.api || ''))) {
-    score += RELEVANCE_WEIGHTS.dump_api;
+    score += weights.dump_api;
   }
   if (e.ignition) {
-    score += RELEVANCE_WEIGHTS.ignition;
+    score += weights.ignition;
   }
   if (row.causality === 'paired' && row.phase === 'return') {
-    score += RELEVANCE_WEIGHTS.paired_return;
+    score += weights.paired_return;
   }
   return score;
 }
