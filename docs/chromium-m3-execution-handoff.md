@@ -298,3 +298,20 @@ progress JSON `m3` = `m3-r1-remediation-complete`。**申请：按 §R1.6 一次
 - progress JSON：`m3` = `m3-r2-delta-required`；`m3_detail.review2` 记录本节复验与 R1-C1。
 - 登记册：M3-R1 的 4 阻塞 + 3 重要**全部关闭**（附证据指针）；新增 D-M3-5（M3 验收前 delta）与 m-R2-1/2/3；M1 覆盖债与 M2-② 归 M4。
 - 路线图：M3 窗口保持（10-02 → 11-04）；§7 记一行：M3-R1 整改 ~0.5 日、R2 复审一轮通过、剩一条由**架构师裁决错误**引起的 delta——§7 的教训区补一句：**评审指令本身也要受审**（我把 frx 的确认习惯错当 tier 合同，被机器门禁如实放大）；这类错误的解药是让门禁合同**引用裁决编号**而不是引用来源事实。
+
+---
+
+# M3-R2 delta 执行记录（2026-09-27，工程师，D-M3-5 + m-R2-1/3 + M2-②）
+
+按 §R2.5-1 微块一次提交。
+
+| 项 | 实现 |
+| --- | --- |
+| **D-M3-5**（R1-C1 自纠落地） | `fs_write`/`fs_mkdir`/`fs_copy` tier 回 **STATEFUL_CONTROL**（工作区写动作；R1 指令错误由架构师 R2.3 认领）；`test/r1-tiers.test.js` 整体重写为**语义合同表**——逐工具期望档 + 每条例外引用裁决编号（cookies R2.3 细判 read-subset、net_list R1.3-B3 纯查询、fs 三件 R2.3 R1-C1、host-exec 轴、frx 五项 unavailable tier-moot）；**总闸**：清单"需确认"列为"是"的工具不得在 read 档（例外仅登记为带编号裁定，当前仅 cookies 一条）；**红测试**：agent 来源 `fs_write` 停 pending、deny 后零落盘；ui 来源经批准执行、文件落地 |
+| m-R2-1 | `r1-hostexec-surface.test.js` 的 `MAX_TIMEOUT_BYTES` 死 import 删除 |
+| m-R2-3 | `net_list` 返回新增 `buffer_oldest_seq` + `cursor_behind_buffer`（环形缓冲滚出后调用方知道越窗，不再静默跳过） |
+| M2-②（M4-8 提前落） | `runningExecutions()` GUI 接线：`evidence:running` / `evidence:cancel-execution` IPC + preload 通道 + 面板 Running 按钮（列出运行中执行 + Broker 路由的取消按钮）——cancelExecution 在操作员面可路由 |
+
+终验（2026-09-27 亲跑全绿）：`run_tests.sh` exit 0（host 64/64——逐文件带超时复核 12/12 通过；此前一次 battery 挂起为并发残留进程，非产品缺陷）；矩阵重生成（66 行双形态不变）；静态门禁 7/7；E6 闭环 GREEN；E5 九场景 + B1 锚点 GREEN；probe2 形状保持（三工具停靠，cookies 细判形态）。
+
+progress JSON `m3` = `m3-r2-delta-complete`。**申请：点验后标 accepted-m3。**

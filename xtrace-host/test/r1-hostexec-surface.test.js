@@ -13,8 +13,7 @@ const test = require('node:test');
 const { spawn } = require('node:child_process');
 const { createBroker, TIERS, BASES } = require('../src/broker');
 const { createWorkspace } = require('../src/workspace');
-const { createExecutors, MAX_TIMEOUT_BYTES }
-  = require('../src/executors');
+const { createExecutors } = require('../src/executors');
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'm3-r15-'));

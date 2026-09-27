@@ -346,8 +346,13 @@ function createCGroupAdapters({ workspace, host }) {
           .slice(0, limit);
       const lastSeq = snapshot.length ? snapshot[snapshot.length - 1].seq
                                       : cursor;
+      // m-R2-3: after ring rollover the oldest rows are GONE — the
+      // caller learns the window boundary instead of silently skipping
+      const oldestSeq = netBuffer.length ? netBuffer[0].seq : 0;
       return { total: netBuffer.length,
                buffer_sequence: netSequence,
+               buffer_oldest_seq: oldestSeq,
+               cursor_behind_buffer: cursor > 0 && cursor < oldestSeq,
                cursor,
                window_complete: netBuffer.every((r) => r.seq <= lastSeq),
                next_cursor: netBuffer.some((r) => r.seq > lastSeq)

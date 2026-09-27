@@ -93,7 +93,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_write', tier: TIERS.READ_EVIDENCE,
+    name: 'fs_write', tier: TIERS.STATEFUL_CONTROL,   // R2/R1-C1: workspace WRITE actions
     input: { path: 'string', content: 'string', append: 'bool?' },
     output: 'bytes written + mode',
     sideEffects: 'workspace-bound file write',
@@ -121,7 +121,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_mkdir', tier: TIERS.READ_EVIDENCE,
+    name: 'fs_mkdir', tier: TIERS.STATEFUL_CONTROL,   // R2/R1-C1: workspace WRITE actions
     input: { path: 'string' },
     output: 'created dir',
     sideEffects: 'workspace-bound directory creation',
@@ -135,7 +135,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_copy', tier: TIERS.READ_EVIDENCE,
+    name: 'fs_copy', tier: TIERS.STATEFUL_CONTROL,   // R2/R1-C1: workspace WRITE actions
     input: { from: 'string', to: 'string' },
     output: 'bytes copied',
     sideEffects: 'workspace-bound copy',

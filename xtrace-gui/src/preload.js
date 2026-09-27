@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld("xtrace", {
   evidenceAuthRecords: () => ipcRenderer.invoke("evidence:auth-records"),
   evidenceCapabilities: () => ipcRenderer.invoke("evidence:capabilities"),
   evidencePending: () => ipcRenderer.invoke("evidence:pending"),
+  evidenceRunning: () => ipcRenderer.invoke("evidence:running"),
+  evidenceCancelExecution: (id) => ipcRenderer.invoke("evidence:cancel-execution", {id}),
   evidenceConfirmation: (id, approved) => ipcRenderer.invoke("evidence:confirmation", {id, approved}),
   evidenceResolveOrphan: (pid, traceDir) => ipcRenderer.invoke("evidence:resolve-orphan", {pid, traceDir}),
   evidenceAgentCall: (tool, args, reason) => ipcRenderer.invoke("evidence:agent-call", {tool, args, reason})

@@ -442,6 +442,30 @@ boot().catch((error) => {
     refreshPending();
   });
 
+  $("btnEvidenceRunning").addEventListener("click", async () => {
+    try {
+      const rows = await window.xtrace.evidenceRunning();
+      if (!rows.length) {
+        setPanel("running executions: none");
+        return;
+      }
+      // surface each row with its cancel control (Broker-routed)
+      setPanel(rows.map((r2) =>
+          `RUNNING ${r2.tool} id=${r2.id} kill=${r2.kill_registered}`)
+          .join("\n") + " — use Cancel execution below");
+      const btn = document.createElement("button");
+      btn.dataset.testid = "cancel-execution";
+      btn.textContent = "Cancel first execution";
+      btn.addEventListener("click", async () => {
+        const out = await window.xtrace.evidenceCancelExecution(rows[0].id);
+        setPanel(`cancelExecution(${rows[0].id}) -> ${out}`);
+      });
+      pendingBox.appendChild(btn);
+    } catch (error) {
+      setPanel(`running failed: ${error.message || error}`);
+    }
+  });
+
   // keep the pending queue fresh while the panel is alive
   setInterval(refreshPending, 800);
 })();

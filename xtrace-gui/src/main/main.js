@@ -81,6 +81,17 @@ ipcMain.handle("evidence:pending", () => {
   return host.broker.pendingList();
 });
 
+// M4-8 / M2-②: running host-exec executions are listable and
+// cancellable from the panel (cancelExecution finally routable).
+ipcMain.handle("evidence:running", () => {
+  const host = requireHost();
+  return host.broker.runningExecutions();
+});
+ipcMain.handle("evidence:cancel-execution", (_e, { id }) => {
+  const host = requireHost();
+  return host.broker.cancelExecution(String(id));
+});
+
 // ---- THE confirmation handler (the ONLY resolveConfirmation caller) --
 ipcMain.handle("evidence:confirmation", (_e, { id, approved }) => {
   const host = requireHost();
