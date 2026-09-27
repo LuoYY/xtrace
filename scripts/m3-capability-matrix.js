@@ -64,16 +64,20 @@ const GATES = {
   'skill_get': 'xtrace-host/test/r1-core.test.js',
   'skill_read_resource': 'xtrace-host/test/r1-adapters.test.js',
   'jsvmp_trace': 'xtrace-host/test/r1-core.test.js (composition root)',
-  'jsvmp_status': null,   // disclosed gap
-  'webapi_trace': null,   // disclosed gap
-  'scripts_capture_all': null,   // disclosed gap
+  // M4-E0 top-up (register M4-7, MD4): the ten formerly-gapped
+  // available/degraded tools now carry REAL product-path gates in the
+  // E0 coverage file (live browser / live control domain / real FS).
+  'jsvmp_status': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'webapi_trace': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'scripts_capture_all': 'xtrace-host/test/e0-coverage-topup.test.js',
   'env_create': 'scripts/p6-e6-closed-loop.cjs',
-  'env_list': null,   // disclosed gap
-  'env_status': null,   // disclosed gap
-  'env_update': null,   // disclosed gap
+  'env_list': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'env_status': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'env_update': 'xtrace-host/test/e0-coverage-topup.test.js',
   'env_open': 'xtrace-host/test/r1-core.test.js',
-  'env_close': null,   // disclosed gap
-  'env_delete': null,   // disclosed gap
+  'env_close': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'env_delete': 'xtrace-host/test/e0-coverage-topup.test.js',
+  'env_current': 'xtrace-host/test/e0-coverage-topup.test.js',
   'page_navigate': 'xtrace-host/test/e3-cgroup.test.js',
   'page_elements': 'xtrace-host/test/e3-cgroup.test.js',
   'page_click': 'xtrace-host/test/e3-cgroup.test.js',
@@ -91,7 +95,7 @@ const GATES = {
   'fs_list': 'xtrace-host/test/e2-dgroup.test.js',
   'fs_read': 'xtrace-host/test/e2-dgroup.test.js',
   'fs_write': 'xtrace-host/test/e2-dgroup.test.js',
-  'fs_mkdir': null,   // disclosed gap
+  'fs_mkdir': 'xtrace-host/test/e0-coverage-topup.test.js',
   'fs_copy': 'xtrace-host/test/e2-dgroup.test.js',
   'scripts_save': 'xtrace-host/test/e2-dgroup.test.js',
   'notes_add': 'unavailable-with-reason — no gate required',
@@ -106,6 +110,67 @@ const GATES = {
   'run_python': 'xtrace-host/test/e1-host-exec.test.js (with policy)',
   'npm_install': 'policy-gated default-deny — no standalone gate',
 };
+
+// ---- pure core, exported for the LIVE negative control (m-R2-2:
+// the planted-absence control feeds a real host's negotiated surface
+// with one registration deleted, instead of doctoring output JSON) ----
+function buildRows(negotiated) {
+  return negotiated.tools.map((t) => {
+    const gate = GATES[t.name] || null;
+    // gate provenance must point at a real file (or be an explicit
+    // unavailable/placeholder note) — missing files fail the run
+    if (gate && /\.cjs|\.js|\.py/.test(gate)) {
+      const rel = gate.split(' ')[0];
+      if (!fs.existsSync(path.join(ROOT, rel))) {
+        throw new Error(`gate file missing for ${t.name}: ${rel}`);
+      }
+      // R1-4/M1: the named file must EXERCISE the tool — it has to
+      // contain the tool name string (machine check, no prose
+      // exemptions for available tools)
+      const body = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      const exercised = body.includes(t.name);
+      if (t.state === 'available' && !exercised) {
+        throw new Error(`gate does not exercise ${t.name}: ${rel} ` +
+            `carries no reference to the tool`);
+      }
+      if (!exercised) {
+        return {
+          name: t.name, tier: t.tier, state: t.state,
+          reason: t.reason || null,
+          gate: `(no direct gate — gap: ${rel} never names the tool)`,
+        };
+      }
+    }
+    if (gate && t.state === 'available' &&
+        /sibling|文案|—/.test(gate)) {
+      throw new Error(`available tool ${t.name} has a prose gate ` +
+          `exemption: "${gate}" — a real gate file is required`);
+    }
+    return {
+      name: t.name, tier: t.tier, state: t.state,
+      reason: t.reason || null, gate: gate || '(none — disclosed gap)',
+    };
+  });
+}
+
+// R1-4: the coverage check is against the INVENTORY set, not the
+// hand-written GATES table — every inventory tool must appear as a
+// matrix row (registered adapter or disclosed-unavailable). THROWS on
+// any absent tool (the silent-absence kill switch).
+function reconcileAgainstInventory(rows) {
+  const inventory = parseInventory();
+  const rowNames = new Set(rows.map((r) => r.name));
+  const absent = [...inventory].filter((n) => !rowNames.has(n));
+  if (absent.length) {
+    throw new Error('inventory tools absent from the matrix (silent ' +
+        'absence): ' + absent.join(','));
+  }
+  // internal primitives (matrix extras not in the inventory) are
+  // listed separately, not mixed into the inventory count
+  const internalPrimitives = rows.filter(
+      (r) => !inventory.has(r.name)).map((r) => r.name);
+  return { inventory, internalPrimitives };
+}
 
 async function main() {
   const exe = path.join(ROOT,
@@ -148,42 +213,7 @@ async function main() {
   })();
   try {
     void negotiated;
-    const rows = negotiated.tools.map((t) => {
-      const gate = GATES[t.name] || null;
-      // gate provenance must point at a real file (or be an explicit
-      // unavailable/placeholder note) — missing files fail the run
-      if (gate && /\.cjs|\.js|\.py/.test(gate)) {
-        const rel = gate.split(' ')[0];
-        if (!fs.existsSync(path.join(ROOT, rel))) {
-          throw new Error(`gate file missing for ${t.name}: ${rel}`);
-        }
-        // R1-4/M1: the named file must EXERCISE the tool — it has to
-        // contain the tool name string (machine check, no prose
-        // exemptions for available tools)
-        const body = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-        const exercised = body.includes(t.name);
-        if (t.state === 'available' && !exercised) {
-          throw new Error(`gate does not exercise ${t.name}: ${rel} ` +
-              `carries no reference to the tool`);
-        }
-        if (!exercised) {
-          return {
-            name: t.name, tier: t.tier, state: t.state,
-            reason: t.reason || null,
-            gate: `(no direct gate — gap: ${rel} never names the tool)`,
-          };
-        }
-      }
-      if (gate && t.state === 'available' &&
-          /sibling|文案|—/.test(gate)) {
-        throw new Error(`available tool ${t.name} has a prose gate ` +
-            `exemption: "${gate}" — a real gate file is required`);
-      }
-      return {
-        name: t.name, tier: t.tier, state: t.state,
-        reason: t.reason || null, gate: gate || '(none — disclosed gap)',
-      };
-    });
+    const rows = buildRows(negotiated);
     const counts = {
       available: rows.filter((r) => r.state === 'available').length,
       degraded: rows.filter((r) => r.state === 'degraded').length,
@@ -191,20 +221,8 @@ async function main() {
     };
     const missing = Object.keys(GATES).filter((name) =>
         !rows.some((r) => r.name === name));
-    // R1-4: the coverage check is against the INVENTORY set, not the
-    // hand-written GATES table — every inventory tool must appear as a
-    // matrix row (registered adapter or disclosed-unavailable).
-    const inventory = parseInventory();
-    const rowNames = new Set(rows.map((r) => r.name));
-    const absent = [...inventory].filter((n) => !rowNames.has(n));
-    if (absent.length) {
-      throw new Error('inventory tools absent from the matrix (silent ' +
-          'absence): ' + absent.join(','));
-    }
-    // internal primitives (matrix extras not in the inventory) are
-    // listed separately, not mixed into the inventory count
-    const internalPrimitives = rows.filter(
-        (r) => !inventory.has(r.name)).map((r) => r.name);
+    const { inventory, internalPrimitives } =
+        reconcileAgainstInventory(rows);
     const matrix = { generated_ms: Date.now(), enhanced: negotiated.enhanced,
                      counts, missing_gates_for: missing,
                      inventory_total: inventory.size,
@@ -246,19 +264,17 @@ async function main() {
         mdTable + '\n' + internalSection);
     console.log(JSON.stringify({ counts, missing,
         json, md: mdPath }, null, 1));
-    // R1-4: the required set IS the inventory parse above (absent
-    // check already enforced); the old hand-maintained list is gone.
-    void require;
-    if (missing.length) {
-      console.error('WARNING: gate-map entries with no tool: ' + missing);
-    }
     console.log('M3 CAPABILITY MATRIX: GENERATED (live host)');
   } finally {
     // hosts are closed per-form above; nothing leaks
   }
 }
 
-main().then(() => process.exit(0)).catch((e) => {
-  console.error('M3 CAPABILITY MATRIX: FAIL —', e.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().then(() => process.exit(0)).catch((e) => {
+    console.error('M3 CAPABILITY MATRIX: FAIL —', e.message);
+    process.exit(1);
+  });
+}
+// live-host negative control surface (r1-matrix m-R2-2)
+module.exports = { parseInventory, buildRows, reconcileAgainstInventory };

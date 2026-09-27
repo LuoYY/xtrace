@@ -1,17 +1,21 @@
 'use strict';
 // M3-R1-4 gate: the matrix generator's coverage check must FAIL on a
-// planted-missing registration (stub host with one tool removed) — the
-// negative control for the "silent absence" defect class — then pass
-// again with the full set. Plus: the inventory parse is 66 tools and
-// every unavailable row carries a reason.
+// planted-missing registration — the negative control for the "silent
+// absence" defect class. m-R2-2/M4-9: the plant is now made against a
+// LIVE host's negotiated surface (one registration deleted before the
+// check), not against doctored output JSON — the control drives the
+// generator's own buildRows/reconcileAgainstInventory over the real
+// composition root. Plus: the inventory parse is 66 tools and every
+// unavailable row carries a reason.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { execFileSync } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+const EXE = path.join(ROOT,
+    'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
 
 function parseInventoryCount() {
   const text = fs.readFileSync(
@@ -47,22 +51,34 @@ test('R1-4: inventory parse = 66; shipped matrix rows cover it fully', () => {
   }
 });
 
-test('R1-4 negative control: planted-missing registration flips the generator red', () => {
-  // stub: simulate a composition root missing one registration by
-  // running the generator's coverage logic over a doctored row set.
-  // The shipped generator derives rows from the LIVE host; here we
-  // doctor the SHIPPED matrix JSON and run the same reconciliation the
-  // generator performs (inventory set == row set) — it must fail.
-  const inventory = parseInventoryCount();
-  const matrix = JSON.parse(fs.readFileSync(path.join(ROOT,
-      'chromium/src/out/XTraceIntegration/validation',
-      'm3-capability-matrix.json'), 'utf8'));
-  // plant: drop the env_current row (the M3-scope family member)
-  const doctored = matrix.tools.filter((t) => t.name !== 'env_current');
-  assert.equal(doctored.length + 1, matrix.tools.length, 'planted');
-  const names = new Set(doctored.map((t) => t.name));
-  const absent = [...inventory].filter((n) => !names.has(n));
-  assert.deepEqual(absent, ['env_current'],
-      'the reconciliation catches the planted absence — the same check ' +
-      'the generator runs against the live host');
+test('R1-4 negative control (LIVE host): a registration deleted from ' +
+    'the real negotiated surface flips the generator red',
+    { timeout: 120000 }, async () => {
+  const { createHost } = require('../src/host');
+  const { buildRows, reconcileAgainstInventory } =
+      require(path.join(ROOT, 'scripts/m3-capability-matrix.js'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm4-matrix-nc-'));
+  const host = await createHost({ executable: EXE, workspaceRoot: root,
+      traceFile: path.join(root, 'traces', 'nc', 'trace.ndjson'),
+      browserArgs: ['about:blank'] });
+  try {
+    const caps = await host.capabilities();
+    // positive arm: the untouched LIVE surface reconciles clean
+    const clean = reconcileAgainstInventory(buildRows(caps));
+    assert.equal(clean.inventory.size, 66);
+
+    // plant: delete one registration from the LIVE caps (env_current —
+    // the same family member the old doctored-JSON control dropped)
+    const before = caps.tools.length;
+    caps.tools = caps.tools.filter((t) => t.name !== 'env_current');
+    assert.equal(caps.tools.length, before - 1, 'the plant really removed one');
+    // the generator's OWN reconciliation must throw naming the tool —
+    // silent absence is structurally impossible, proven on live input
+    assert.throws(() => reconcileAgainstInventory(buildRows(caps)),
+        (err) => /absent from the matrix/.test(err.message) &&
+                 err.message.includes('env_current'),
+        'the live-surface deletion flips the generator red');
+  } finally {
+    await host.close();
+  }
 });
