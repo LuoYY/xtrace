@@ -1,6 +1,6 @@
 # 开放项登记册（债务 / 边界 / 设计 IOU / 外部依赖 / 授权门槛）
 
-- 版本：v1.4（2026-09-27，项目架构师；`accepted-m3` 达成：D-M3-5 与 M4-8 关闭；M4 工单已发布）。
+- 版本：v1.5（2026-09-27，项目架构师；M1.1 达成 + M4-E0 通过；M3-9/M4-7 关闭；新增 D-M4-1/2/3）。
 - 维护规则：① 每轮终审由架构师更新本册（新增/关闭/改归属）；② 关闭一项必须有证据指针（门禁名 + 证据目录），不许以"已修"字样关闭；③ 类型分五种——**债务**（必须修）、**边界**（不修，但引用结论时不得越级）、**设计 IOU**（欠一份设计文档）、**外部依赖**（不在我们手里）、**授权门槛**（需用户显式授权）；④ 归属里程碑变更走裁决。
 
 ## 1. M2 名下（P6-R2）—— **全部关闭**（2026-09-27，R3 复审，`accepted-p6`）
@@ -20,10 +20,10 @@
 
 | ID | 项 | 类型 | 状态 | 证据/指针 |
 | --- | --- | --- | --- | --- |
-| M1.1-a | 本地 **412→200 重放服务** + 真实两段流上验 nav_chain 锚点（echo oracle 三级） | 债务 | 未启动 | [P6 交接 §6](chromium-p6-agent-loop-handoff.md)；**依赖 R2-C**（多 producer 游标）先修 |
-| M1.1-b | 三站语料带 **tap 窗口 + dump 锚点** 复跑 → vPC 序列 + 解码表资产 | 债务 | 未启动 | 同上；纪律：本地复跑 + 死代理护栏，不回连原站 |
-| M1.1-c | 每站产物包 + README **等级标注**（vPC=derived、dump=observed、锚点=derived） | 债务 | 未启动 | 同上 |
-| M1.1-d | 若瑞数 cookie 时效导致拿不到真二阶段 → 降级为"合成两段流 + 语料级锚点"，产物等级如实降级 | 边界（预案） | 待触发 | 架构师已承诺届时据此裁 |
+| M1.1-a | 本地 **412→200 重放服务** + 真实两段流上验 nav_chain 锚点（echo oracle 三级） | 债务 | **关闭 09-27**（三站 S 臂 GREEN；L1/L2/L3 齐；R 臂未触发且原因诚实——本地无挑战材料） | `m11-a-X9WsGE`（我亲跑）+ 工程师三站目录 | [P6 交接 §6](chromium-p6-agent-loop-handoff.md)；**依赖 R2-C**（多 producer 游标）先修 |
+| M1.1-b | 三站语料带 **tap 窗口 + dump 锚点** 复跑 → vPC 序列 + 解码表资产 | 债务 | **关闭 09-27**（三站 taps observed + vPC derived 在盘；**dump 资产未取得**——语料 renderer 不让出主线程致 requestDump 全超时，dump 机器在 p55-s0 已证，归 M4-E4/E5 设计输入） | `m11-b-xj1-mujplx60`（我亲跑）等 | 同上；纪律：本地复跑 + 死代理护栏，不回连原站 |
+| M1.1-c | 每站产物包 + README **等级标注**（vPC=derived、dump=observed、锚点=derived） | 债务 | **关闭 09-27**（等级标注齐，无越级；热点/init 区跨 run 不可复现已转 D-M4-3 披露债） | `docs/m1-1-corpus-tail-report.md` | 同上 |
+| M1.1-d | 若瑞数 cookie 时效导致拿不到真二阶段 → 降级为"合成两段流 + 语料级锚点"，产物等级如实降级 | 边界（预案） | **已触发并执行**（S 臂 = 预授权合成锚；声明在案） | 架构师已承诺届时据此裁 |
 | M1.1-e | 语料 412 页的 JS 属 **README 级**证据（非机制级） | 边界 | 长期 | P5.5 交接 §18.3 |
 
 ## 3. M3 名下（工具面完整）
@@ -41,7 +41,7 @@
 | **D-P6-1** | E5 驱动器曾一次不可复现失败（首个 workspace-open 等待超时），且 driver-error 路径不落 report/面板/console → flake 即盲区。**M3 进入条件** | 债务 | 开放 | [P6 交接 §R3.4](chromium-p6-execution-handoff.md)；失败运行 `validation/p6-e5-n5OkSm`、通过运行 `validation/p6-e5-SQj0yC` |
 | **D-P6-2** | S3 门禁布尔式优先级缺陷：盘上读数成功时 `s3ok` 不参与判定（R2-A 的两条正则实际未被要求）。**M3 进入条件** | 债务 | 开放 | §R3.4；行为本身已亲验正确，缺陷在门禁 |
 | **D-P6-3** | 真机 `(terminal, coverage)` pair 只在 E6 驱动器断言；`r1-adapters.test.js:433` 仍留冗余弱断言 `\|\| stop.terminal != null`。**M3 进入条件** | 债务 | 开放 | §R3.4 |
-| M3-9 | P6-R3 的四条小项：stop 成功路径不清截止定时器（8s 滞留）、B1 锚点三处装饰缺陷（negativeControl 恒 null / 负控是算术非真注入 / 读侧无等式）、grep 锚点仅存在性检查、E5 残留死取值与恒真三元 | 债务（小） | 开放 | §R3.4 m-R3-4…8；随 M3-E0 一并清 |
+| M3-9 | P6-R3 的四条小项（stop 定时器清理 / B1 锚点装饰 / grep 锚点降级 / E5 死取值） | 债务（小） | **关闭 09-27**（M3-E0 `cb01d27` 已清；工程师在 M4-E0 复核时指出本行滞留未关，已核） | §R3.4 m-R3-4…8 |
 
 ### 3.1 M3 终审 R1 整改项（架构师登记，2026-09-27；`accepted-m3` 前必须关闭）
 
@@ -55,7 +55,7 @@
 | **D-M3-M2**（关闭 09-27，GUI 接线一项转 M4-8） | host-exec 产品面六缺口：pendingList 无 action 载荷；运行中执行不可列（`cancelExecution` 不可路由）；GUI 出货无 hostExecPolicy 而矩阵带策略跑；执行器全量继承 `process.env`（密钥面）未披露；`timeout_ms` 无上限；writeRoots 用未解析字符串前缀 | 债务（重要） | **关闭 09-27**（probe1/2 翻转、run_tests host 62/62、矩阵 66 全覆盖、E5/E6 绿） | §R1.4-M2 |
 | **D-M3-M3**（关闭 09-27，裁决生效：归 M5-2） | `exec -a` 进程名伪装静默消失（全仓无 argv0 设置点）；架构师裁决：**改归 M5**（伪装面同族），记录措辞更正 | 债务（重要）→ M5 登记 M5-2a | **关闭 09-27** | §R1.4-M3 |
 | **D-M3-5**（关闭 09-27） | **架构师自纠 delta（R1-C1）**：R1 评审的"tier==清单需确认列"指令错误——那列是 frx 习惯、不是 §5.2 tier 合同；`fs_write`/`fs_mkdir`/`fs_copy` 须回 stateful（工作区写动作），`r1-tiers` 门禁改**语义合同表**（例外引用裁决编号 + "清单列是⇒stateful"总闸）+ 红测试（agent 来源 fs_write 停 pending）。**M3 验收前必落（估 15 分钟）** | 债务（阻塞 delta，责任在架构师裁决文本） | **关闭 09-27**（点验：tiers 回 stateful、语义合同表 + 总闸、红测试、run_tests host 64/64） | [M3 执行记录 §R2.3](chromium-m3-execution-handoff.md) |
-| M4-7 | 矩阵覆盖债：19 个 available 工具渲染 "(no direct gate — gap)"——披露诚实但要排期清零（M4 起每档先补 5 个） | 债务（覆盖，排期） | 开放 | `docs/m3-capability-matrix.md` |
+| M4-7 | 矩阵覆盖债 | 债务（覆盖） | **关闭 09-27**（M4-E0 top-up：available 无门禁者 19→3，全为内部原语；MD4 上限 ≤9 达标；env 指纹族 6 项渲染分类用词见 m-3 小项） | `test/e0-coverage-topup.test.js`；矩阵重生成 |
 | M4-8 | `runningExecutions()` 已可路由但 GUI 未接线（IPC + 面板按钮） | 债务（小） | **关闭 09-27**（D-M3-5 顺带落：`evidence:running`/`cancel-execution` IPC + Running 按钮） | M3 执行记录 §R2.4 M2-② |
 | M4-9 | 小项批：`MAX_TIMEOUT_BYTES` 死 import；矩阵缺项负控自引用（建议改活 host 缺项）；`net_list` 缓冲滚窗后游标应披露 `buffer_oldest_seq` | 债务（小） | 开放 | M3 执行记录 §R2.4 m-R2-1/2/3 |
 
@@ -72,6 +72,10 @@
 | M4-4 | WebIDL 第二批接口选择（需求驱动）+ 分路径测试 | 债务 | 未启动 | 路线图 M4 行 |
 | M4-5 | **gate 关 vs "无 observer 编译" 的精确零差对照**（需 P0 基线 d8） | 边界→债务 | 开放 | P4 交接 E7 披露；M4 用 P0 基线 d8 补齐 |
 | M4-6 | 同配置跨跑总事件数波动源于**页面非确定性**（非 observer 开销） | 边界 | 长期 | P4 交接 E7 披露 |
+
+| D-M4-1 | run_tests.sh battery 形态挂起过一次（host 套件 e4 双活浏览器测试 24 分钟未返回 + 孤儿 ChromiumX 撑住管道 + 外层 `\| grep` 缓冲藏掉输出）；隔离重跑 67/67 在 180s 绿 | 债务（门禁可靠性） | 开放（M4 排期） | [M4 执行记录 §审查](chromium-m4-execution-state.md)；处置：活测试兜底杀子进程 kill-list + 跑批禁 grep 缓冲 + 连绿两次才算稳定 |
+| D-M4-2 | E5 的 console 断言把 Electron 内部启动竞态（sandbox_bundle）当产品错误（9 场景全 ok 仍 RED） | 债务（门禁可靠性） | 开放（M4 排期） | 具名基础设施噪声白名单（每条注理由、report 显示被滤条数） |
+| D-M4-3 | M1.1-b 热点/init 区/事件规模跨 run 不可复现（同 bundle 6@65↔6@50、规模 ±45% 随负载）——报告须披露为逐 run 推导；M4-E4/E5 dump 锚点不得假设固定偏移 | 债务（披露） | 开放（M4 排期） | 我亲跑 vs 工程师跑的 xj1 报告对照 |
 
 ## 5. M5 名下（对抗面对等）
 
