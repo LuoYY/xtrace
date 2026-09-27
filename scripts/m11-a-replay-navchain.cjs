@@ -39,6 +39,13 @@ const runDir = fs.mkdtempSync(path.join(root,
 const trace = path.join(runDir, 'trace.ndjson');
 const echoLog = path.join(runDir, 'echo.ndjson');
 
+// ONE server, TWO origins on the same port: the corpus origin is the
+// `localhost` HOST, the driver/stage-2 origin is the 127.0.0.1 IP —
+// cross-site, so the spinning corpus VM (iframe) is an OOPIF in its
+// own process and the top frame stays responsive for the stage-2
+// commit. (127.0.0.2 is NOT bindable in this sandbox — Errno 49;
+// same-origin isolation cannot split a top frame from its own iframe —
+// the commit queues behind the VM's tight loop. Both tried.)
 const server = spawn('python3', ['-u',
     path.join(root, 'scripts/m11_replay_server.py'),
   '--corpus-dir', path.join(root, 'analysis/corpus-capture'),
@@ -47,15 +54,28 @@ const server = spawn('python3', ['-u',
 
 const report = { site: SITE, run_dir: runDir };
 
-(async () => {
-  const port = await new Promise((r) => {
-    let t = '';
-    server.stdout.on('data', (c) => {
-      t += c;
-      const m = t.match(/"port":\s*(\d+)/);
-      if (m) { r(Number(m[1])); }
-    });
+const waitPort = (proc) => new Promise((res, rej) => {
+  let t = '';
+  const settle = (fn, arg) => { proc.stdout.removeAllListeners(); fn(arg); };
+  proc.stdout.on('data', (c) => {
+    t += c;
+    const m = t.match(/"port":\s*(\d+)/);
+    if (m) { settle(res, Number(m[1])); }
   });
+  proc.once('exit', (code) => settle(rej,
+      new Error('replay server exited early, code=' + code)));
+});
+
+(async () => {
+  const port = await waitPort(server);
+  const ORIGIN = `http://127.0.0.1:${port}`;
+  const CORPUS_ORIGIN = `http://localhost:${port}`;
+  // tell the server where the stage-1 driver's iframe points (the
+  // corpus origin), before the page loads
+  await fetch(ORIGIN + '/set-iframe?src=' +
+      encodeURIComponent(CORPUS_ORIGIN + '/'))
+      .then((r) => r.json()).then((j) => { report.iframe_set = j; })
+      .catch((e) => { report.iframe_set_err = String(e); });
 
   const env = Object.fromEntries(Object.entries(process.env)
       .filter(([k]) => !k.startsWith('XTRACE_')));
@@ -66,8 +86,10 @@ const report = { site: SITE, run_dir: runDir };
     '--xtrace-enable', `--xtrace-file=${trace}`,
     '--xtrace-categories=reverse', '--xtrace-causality=off',
     '--xtrace-ignition-observer', '--js-flags=--max-opt=0',
+    // dead-proxy guard: any off-localhost egress fails instantly; the
+    // corpus (localhost) is bypassed along with the loopback IP
     '--proxy-server=http://127.0.0.1:9',
-    '--proxy-bypass-list=127.0.0.1', 'about:blank'];
+    '--proxy-bypass-list=127.0.0.1;localhost', 'about:blank'];
   const fd = fs.openSync(path.join(runDir, 'stderr.log'), 'w');
   const child = spawn(exe, argv, { env, cwd: root,
       stdio: ['ignore', 'ignore', fd, 'pipe', 'pipe'] });
@@ -78,51 +100,65 @@ const report = { site: SITE, run_dir: runDir };
       onEvent: (e) => cdpEvents.push(e) });
   try {
     const { targetId } = await c.send('Target.createTarget',
-        { url: `http://127.0.0.1:${port}/` });
+        { url: ORIGIN + '/' });
     const { sessionId } = await c.send('Target.attachToTarget',
         { targetId, flatten: true });
     await c.send('Page.enable', {}, sessionId);
     await c.send('Runtime.enable', {}, sessionId);
 
-    // ---- stage 1: the 412 wrapper runs the corpus VM ----------------
-    const readCookie = () => c.send('Runtime.evaluate',
-        { expression: 'document.cookie', returnByValue: true }, sessionId)
-        .then((r) => r.result.value || '');
+    // ---- stage 1: the 412 driver embeds the corpus VM (OOPIF) -------
+    // The corpus VM BLOCKS its own renderer's main thread in the local
+    // context (no server challenge material — the P5.5 capture used
+    // --capture-seconds precisely because it never talks to the page).
+    // The A top frame is responsive (the VM is cross-site-isolated);
+    // cookie polling and the anchor stay at the BROWSER level anyway.
+    const jarCookies = () => c.send('Storage.getCookies')
+        .then((r) => r.cookies || []);
     await new Promise((r) => setTimeout(r, 1500));
-    const baseline = await readCookie();
-    report.stage1_baseline_cookie = baseline;
+    const key = (k) => k.domain + '|' + k.name;
+    const baseline = new Set((await jarCookies()).map(key));
+    report.stage1_baseline_cookies = [...baseline];
 
-    // arm R probe: does the VM set a fresh cookie locally? (17K
-    // events/s corpus calibration; 10s is ~4x the corpus settle)
+    // arm R probe: did the corpus VM set a fresh cookie (on the B
+    // origin)? ~17K events/s corpus calibration; 12s covers several
+    // corpus settles. If it did, the driver FORWARDS the very same
+    // name+value to the A jar (declared synthetic bridge: the real
+    // flow is same-origin, so the VM's cookie rides the reload for
+    // free; the two-origin replay needs the copy) — the ANCHOR VALUE
+    // is VM-computed either way, and the engine-observed set event on
+    // B carries it.
     let vmCookie = null;
-    for (let i = 0; i < 20 && !vmCookie; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      const now = await readCookie();
-      const base = new Set(baseline.split(';').map((s) =>
-          s.split('=')[0].trim()).filter(Boolean));
-      const fresh = now.split(';').map((s) => s.trim())
-          .filter((p) => p && !base.has(p.split('=')[0]));
+    for (let i = 0; i < 12 && !vmCookie; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const fresh = (await jarCookies()).filter((k) => !baseline.has(key(k)));
       if (fresh.length) { vmCookie = fresh[0]; }
     }
     let anchor;
     if (vmCookie) {
-      report.arm = 'R: corpus VM set a fresh cookie in the local context';
-      anchor = vmCookie.split('=').slice(1).join('=');
-      report.anchor_cookie_name = vmCookie.split('=')[0];
+      report.arm = 'R: corpus VM computed the anchor (set on the corpus ' +
+          'origin, forwarded verbatim to the stage-2 origin — synthetic ' +
+          'bridge, declared)';
+      anchor = vmCookie.value;
+      report.anchor_cookie_name = vmCookie.name;
+      await c.send('Storage.setCookies', { cookies: [
+          { name: vmCookie.name, value: vmCookie.value,
+            url: ORIGIN + '/', path: '/' }] });
     } else {
       report.arm = 'S: pre-authorized synthetic anchor (corpus boundary: ' +
           'no server challenge material locally — P5.5 README)';
       anchor = 'm11-' + Math.random().toString(36).slice(2, 12);
-      await c.send('Runtime.evaluate',
-          { expression: `document.cookie='xtrace_m11=${anchor}; path=/'`,
-            returnByValue: true }, sessionId);
+      await c.send('Storage.setCookies', { cookies: [
+          { name: 'xtrace_m11', value: anchor, url: ORIGIN + '/',
+            path: '/' }] });
       report.anchor_cookie_name = 'xtrace_m11';
     }
     report.anchor_value_head = anchor.slice(0, 24);
 
-    // ---- same-URL reload: the server must see the new cookie → 200 --
-    await c.send('Runtime.evaluate',
-        { expression: 'location.reload()', returnByValue: true }, sessionId);
+    // ---- same-URL navigation: the server must see the new cookie → 200
+    // (the top frame is responsive — the corpus iframe spins isolated
+    // in its own process — so the stage transition commits cleanly and
+    // the succession lands on one nav_chain)
+    await c.send('Page.navigate', { url: ORIGIN + '/' }, sessionId);
     await new Promise((r) => setTimeout(r, 6000));
     const page = await c.send('Runtime.evaluate', { expression:
         "document.getElementById('result') ? " +
@@ -156,28 +192,41 @@ const report = { site: SITE, run_dir: runDir };
       path.join(runDir, 'trace.manifest.json'), 'utf8'));
   const chains = (manifest.identity || {}).nav_chain || [];
   report.nav_chain_rows = chains.length;
-  const cookieSet = lines.filter((e) => e.api === 'Document.cookie.set');
+  // arm R carrier: Document.cookie.set (the VM's own set, observed);
+  // arm S carrier: Document.cookie.get on the stage-2 page (our page
+  // reads the jar once — engine-observed). Both carry the anchor VALUE.
+  const wantRe = new RegExp(report.anchor_cookie_name + '=([^"\\\\&;\\s]+)');
   let setEvent = null;
-  for (const e of cookieSet) {
-    const m = JSON.stringify(e.args || [])
-        .match(new RegExp(report.anchor_cookie_name + '=([^"\\\\&;\\s]+)'));
-    if (m) { setEvent = { event: e, value: m[1] }; break; }
+  for (const e of lines.filter((x) => x.api === 'Document.cookie.set')) {
+    const m = JSON.stringify(e.args || []).match(wantRe);
+    if (m) { setEvent = { api: 'set', value: m[1], wall_us: e.wall_time_us }; break; }
   }
-  report.l2 = { cookie_set_event: !!setEvent,
+  let getEvent = null;
+  for (const e of lines.filter((x) => x.api === 'Document.cookie.get')) {
+    const m = JSON.stringify(e.args || []).match(wantRe);
+    if (m) { getEvent = { api: 'get', value: m[1], wall_us: e.wall_time_us }; break; }
+  }
+  const carrier = setEvent || getEvent;
+  report.l2 = { carrier: carrier && carrier.api || null,
                 nav_chain_rows: chains.length };
   report.l3 = {
-    value_equal_l1_l2: !!(ok200 && setEvent &&
-        ok200.cookie_header.includes(setEvent.value)),
-    ordering_set_before_200: !!(setEvent && ok200 &&
-        Number(setEvent.event.wall_time_us / 1000) <
-        ok200.ts * 1000 - 0),
+    value_equal_l1_l2: !!(ok200 && carrier &&
+        ok200.cookie_header.includes(carrier.value)),
+    // arm R: engine set precedes the request; arm S: the engine-side
+    // read FOLLOWS the request (the jar fact precedes it) — ordering
+    // is recorded per arm, never conflated
+    ordering: carrier && ok200
+        ? (setEvent
+            ? Number(setEvent.wall_us) < ok200.ts * 1e6
+            : Number(getEvent.wall_us) > ok200.ts * 1e6)
+        : false,
   };
 
   const pass = !report.error &&
       report.stage2_page && report.stage2_page.stage === 2 &&
       report.stage2_page.cookieSeen === true &&
-      first412 && ok200 && setEvent && chains.length >= 1 &&
-      report.l3.value_equal_l1_l2 && report.l3.ordering_set_before_200;
+      first412 && ok200 && carrier && chains.length >= 1 &&
+      report.l3.value_equal_l1_l2 && report.l3.ordering;
 
   fs.writeFileSync(path.join(runDir, 'report.json'),
       JSON.stringify(report, null, 2));

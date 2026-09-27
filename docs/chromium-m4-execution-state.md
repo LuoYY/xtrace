@@ -20,3 +20,13 @@
 **E0 附带发现（记录给 E3/E4 的输入）**：terminal 判定（补丁 0001"计数等式唯一裁决"）对**闲置 renderer 的 stop 确认截止**敏感——`page_navigate` 类流程留下的额外 renderer 若在 stop 截止前未确认，manifest 诚实记 `stop-timeout` → incomplete（本轮两次亲见：e0 门禁首版、S0 browser 首跑，均在干净复跑转绿）。这不是缺陷而是判定语义；含义：① 依赖 terminal=complete 的门禁须用 E6 形态（单 target + 同文档活动 + 沉降）；② M4-E4 signer_trace 的"非暂停证明（页面计时不失真对照）"设计须把 producer 确认截止纳入预算。
 
 零 `chromium/src` 触碰；补丁栈与 accepted-p55/accepted-m3 状态逐字节一致（verify pass）。
+
+## M1.1 语料尾件 a/b/c（2026-09-27，工程师，提交 <hash2>）
+
+并行轨当前步完成（详见 [docs/m1-1-corpus-tail-report.md](m1-1-corpus-tail-report.md)）：
+
+- **a**：412→200 重放 + 三级 echo oracle + nav_chain 锚点，三站 GREEN（S 臂预授权降级；双 Origin OOPIF 收纳被阻塞语料 VM——同源 isolate-origins 不拆同源 frame、127.0.0.2 沙盒不可绑，两方案失败过程留档）。
+- **b**：tap 窗（绑 D1 热点：xj1 6@65 / sc 6@65 / jibei 6@50）+ vPC 序列（42 万级，derived）+ pass2 taps（observed）；**边界**：语料 renderer 不让出主线程 → `XTrace.requestDump` 全超时（dump 机器在 p55-s0 已证）——已登记为 M4-E4/E5 设计输入。
+- **c**：等级标注齐（vPC=derived、tap=observed、锚=derived、dump 资产=未取得边界）。
+
+**M4-E1 选型冻结解除阻塞**（工单进入条件 ③ 满足）。附带工程事实：tap 计划只挂 startCapture 之后的编译——pass2 必须 config-first；pass1 热点在 bundle 早期 offset（65/50），派发循环就在 init 区内。
