@@ -234,3 +234,67 @@ R2.6 全表（run_tests/static-shape/E5/E6/probe4-7/冻结套件按恒等/verify
 | E5 九场景 / E6 闭环 / static shape 7 检查 / S0 / verify_patches | 全绿保持（P6 路径零回退） |
 
 progress JSON `m3` = `m3-r1-remediation-complete`。**申请：按 §R1.6 一次复审。**
+
+---
+
+# 架构师复审 R2（2026-09-27，M3-R1）：**修复全部核验通过，但先纠我自己的一条错——delta D-M3-5 落地即验收**
+
+- 审查范围：`883d195..14140cd`（1 个 commit，18 文件，+1101/−207）。方式：R1.7 门禁全部亲跑 + probe1/probe2 复跑 + 矩阵 JSON 核数 + 新测试逐份读 + 源码形态核对。
+- **裁定：`accepted-m3` 仍不标，但只剩一个 15 分钟级的 delta（D-M3-5）**——而那个 delta 是**我自己的 R1 评审里一条错误裁决**造成的，须先由我纠正，再由执行层落地三行改动。progress JSON `m3` = `m3-r2-delta-required`。
+
+## R2.1 独立复验（我亲跑，全部翻转/保持绿）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `scripts/run_tests.sh` | exit 0：python 381 / launcher 28 / host **62** / GUI 216 |
+| probe1（scripts_save 真机） | **翻转**：`saved` 711 字节 == direct-with-session 711 字节（修前 100% `'wasn't found'`） |
+| probe2（tier） | **翻转**：`page_navigate`/`page_click`/`page_type` 均 `confirmation-required → confirmation-expired`（停靠待决、零副作用）；`cookies` 按细判裁定留 read（`granted:session-grant`，带 READ SUBSET ONLY 披露）；stateful 对照组行为不变 |
+| `scripts/m3-capability-matrix.js` | GENERATED：available 40 / degraded 8 / unavailable 24、`missing: []`；shipping 形态为行集基准（无策略 → executors 以 discloseOnly 披露），with-policy 形态并列 |
+| `test/r1-matrix.test.js`（含植入缺项负控） | 套件内绿（清单解析=66、`inventory_total=66`、行集全覆盖、unavailable 全带 reason、内部原语分节、拔 env_current 的负控能翻红） |
+| `scripts/p6-r1-static-shape.js` | 7/7 GREEN |
+| `p6-e6-closed-loop.cjs` | GREEN 九阶段（`p6-e6-7Jk2gW`） |
+| `p6-e5-ui-scenarios.cjs` | GREEN 九场景 + B1 逐动作等式（10==3+4+1+1+1）+ 读侧等式 + 双会话全 0（`p6-e5-CQknRl`） |
+
+## R2.2 四项阻塞的逐条核验
+
+- **B1（scripts_save 会话域）——已修且修法正确**：工具自管会话——遍历**活 page targets**（不新开页面、不导航），逐 target attach + `Debugger.enable` + `getScriptSource`，url 优先排序，无命中回退加载一次；`{scriptSource}` 与裸串双形态归一。e2 新增**真机 happy path 门禁**（落盘内容与页面脚本逐字节相等）。
+- **B2（tier）——按我的裁决落地且实测翻转**（probe2 的 ledger 证据），新增 `test/r1-tiers.test.js` 机检门禁（从清单文件解析"需确认"列，逐工具断言 tier==映射，例外显式登记）。**但这道门禁的合同本身写错了对象——见 R2.3 的 R1-C1。**
+- **B3（net 族）——已修**：单例监听器（`netListenerAttached` 门闩，永不重复挂）+ 进程内环形缓冲（5000 行，seq 单调）；`net_capture` 是 stateful 有界窗口（enable→navigate→收集→关 target）；`net_list` 是纯查询（只读缓冲 + seq 游标，**零导航**）。`r1-net-tiers.test.js` 三断言含"重复调用缓冲一致、`net_list` 的 `Page.navigate` 计数 == 0（桩负控）、游标全走 == 缓冲总数"。
+- **B4（矩阵）——已修且结构性杜绝**：生成器从清单文件解析 66 项全集（行集==清单集即断言），`adapters-env-family.js` 把七项补全（`env_current` 实装为只读查询——open env + profile + 实例行；六项指纹族 unavailable-with-reason、M5 归属），内部原语单列一节，gate 出处机验（点名文件必须含工具名）。如实效果：**19 个真实缺口渲染为 "(no direct gate — gap)"**——这是诚实的披露，但也是一份要排期的覆盖债（见 R2.4-M1）。
+
+## R2.3 我的更正裁决 R1-C1（关键，先认错再改）
+
+**我 R1 评审里 B2 的修法指令"tier 按清单'需确认'列映射"是错的。** 那列记录的是 **frx 的确认习惯**（frx 对工作区文件写不弹窗），不是我们 Broker §5.2 的 tier 合同。§5.2 的分档是**按动作性质**：只读证据 → read（会话级授权）；**改变状态** → stateful（逐次确认）；起宿主进程 → host-exec。按这合同：
+
+- `fs_write`/`fs_mkdir`/`fs_copy` 是对工作区的**写动作** → **必须是 stateful**（执行层按我的错误指令降到了 read——agent 现在可以静默写工作区文件，虽有 realpath + 1MB 上限 + 完整审计，但无人确认）。**与 R1-B2 同类（tier 与 §5.2 语义不符），必须改回。**
+- `jsvmp_status`/`env_list`/`env_status` 是纯查询 → read ✓（执行层的降级是对的，也符合我 P6 评审里的可用性意见）。
+- `cookies` 当前只读子集 → read + READ SUBSET ONLY 披露 ✓；写入操作落地即升档。
+- `signer_trace`/`closure_read`/`whitebox_diff` 等不可用档的 tier 纯属标注，无所谓（不在模型面）。
+
+**新的合同（冻结）**：tier = 动作性质的函数；清单"需确认"列只是 frx 事实输入，**只能让工具更严格（是 ⇒ stateful 成立），永远不能让一个改变状态的工具降到 read**。`r1-tiers.test.js` 须改成**语义合同表**：逐工具显式期望档 + 每条例外引用裁决编号（cookies、net_list、fs 三件、host-exec 轴），并新增一条"清单列为 是 的工具不得在 read 档"的总闸。
+
+**给执行层的公平说明**：这次降级是按我的指令做的，责任在我的裁决文本，不在执行。D-M3-5 的工作量是三行 tier + 一份门禁合同重写 + 一条红测试。
+
+## R2.4 剩余项
+
+| ID | 项 | 裁定 |
+| --- | --- | --- |
+| **D-M3-5**（阻塞 delta） | fs 三件 tier 回 stateful + `r1-tiers` 改语义合同表（含"是⇒stateful"总闸）+ 红测试（agent 来源 fs_write 停 pending，ui 经批准可执行） | **M3 验收前必落**（估 15 分钟）；我随后只做点验，不开完整轮 |
+| m-R2-1 | `r1-hostexec-surface.test.js` 导入不存在的 `MAX_TIMEOUT_BYTES`（死 import，套件因此不报错但也不该留） | 小项，随 delta 清 |
+| m-R2-2 | `r1-matrix.test.js` 的缺项负控是**对 doctored JSON 重跑同一段对账逻辑**（自引用），不是"在拔掉注册的活 host 上跑生成器"——可用但弱；建议后续换成活 host 缺项（需要在 host 上加测试钩子，可缓） | 小项，记录 |
+| m-R2-3 | `net_list` 缓冲滚出 5000 行后，低于最老 seq 的游标静默跳过——应披露 `buffer_oldest_seq` 让调用方知道已越窗 | 小项，随 delta 顺手 |
+| M1（矩阵缺口） | 19 个 available 工具渲染 "(no direct gate — gap)"：披露诚实，但按 PD3 的精神这是**覆盖债**——M4 起每档开工前先补 5 个，直到清零；不计阻塞 | 边界（排期债） |
+| M2-② 收尾 | `runningExecutions()` 已在 host 层可路由，但 **GUI 未接线**（main.js/preload 无 IPC、面板无按钮）——host 库可用、操作员看不到。归 M4-E0 一并接（与 D-M3-5 同块也可） | 重要（非阻塞） |
+
+## R2.5 下一步执行计划（见用户消息后由执行层确认开工）
+
+1. **执行层（即刻，微块）**：落 D-M3-5 + m-R2-1/3（顺带接 M2-② 的 GUI 接线更好，不强制）。一次提交。
+2. **架构师点验（不开完整轮）**：probe2 形状对 fs_write（agent 停 pending、ui 批准可执行）+ `r1-tiers` 语义合同（含总闸）+ `run_tests.sh` + 静态门禁。过则标 **`accepted-m3`（= M3 达成）**，路线图、登记册、progress JSON 同步。
+3. **M1.1 并行轨（即刻可开工，不受 delta 影响）**：按 [P6 交接 §6](chromium-p6-agent-loop-handoff.md) 的 a/b/c（本地 412→200 重放服务 → 三站带 tap+dump 复跑 → 等级标注）。
+4. **M4 工单（架构师，`accepted-m3` 后发布）**：观测面扩展（WebIDL 第二批 / Sparkplug 对照 / worker-SW / `signer_trace`/`closure_read` 的引擎侧扩展），验收锚点直接写入本项目的门禁纪律（语义合同 tier 表、"工具语义与真实产品面一致性"固定锚点、覆盖债清零计划）。
+
+## R2.6 状态落账
+
+- progress JSON：`m3` = `m3-r2-delta-required`；`m3_detail.review2` 记录本节复验与 R1-C1。
+- 登记册：M3-R1 的 4 阻塞 + 3 重要**全部关闭**（附证据指针）；新增 D-M3-5（M3 验收前 delta）与 m-R2-1/2/3；M1 覆盖债与 M2-② 归 M4。
+- 路线图：M3 窗口保持（10-02 → 11-04）；§7 记一行：M3-R1 整改 ~0.5 日、R2 复审一轮通过、剩一条由**架构师裁决错误**引起的 delta——§7 的教训区补一句：**评审指令本身也要受审**（我把 frx 的确认习惯错当 tier 合同，被机器门禁如实放大）；这类错误的解药是让门禁合同**引用裁决编号**而不是引用来源事实。
