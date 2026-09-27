@@ -1,6 +1,6 @@
 # 开放项登记册（债务 / 边界 / 设计 IOU / 外部依赖 / 授权门槛）
 
-- 版本：v1.3（2026-09-27，项目架构师；M3 R2 复审后更新：R1 的 4 阻塞 3 重要全部关闭，新增架构师自纠 delta D-M3-5）。
+- 版本：v1.4（2026-09-27，项目架构师；`accepted-m3` 达成：D-M3-5 与 M4-8 关闭；M4 工单已发布）。
 - 维护规则：① 每轮终审由架构师更新本册（新增/关闭/改归属）；② 关闭一项必须有证据指针（门禁名 + 证据目录），不许以"已修"字样关闭；③ 类型分五种——**债务**（必须修）、**边界**（不修，但引用结论时不得越级）、**设计 IOU**（欠一份设计文档）、**外部依赖**（不在我们手里）、**授权门槛**（需用户显式授权）；④ 归属里程碑变更走裁决。
 
 ## 1. M2 名下（P6-R2）—— **全部关闭**（2026-09-27，R3 复审，`accepted-p6`）
@@ -54,13 +54,15 @@
 | **D-M3-M1**（关闭 09-27；19 个真实缺口转为覆盖债 → 见 M4-7） | 矩阵 gate 出处为手写映射且只查文件存在（不查文件是否真行使该工具）；`scripts_capture_all` 用文案豁免占位 | 债务（重要） | **关闭 09-27**（probe1/2 翻转、run_tests host 62/62、矩阵 66 全覆盖、E5/E6 绿） | §R1.4-M1 |
 | **D-M3-M2**（关闭 09-27，GUI 接线一项转 M4-8） | host-exec 产品面六缺口：pendingList 无 action 载荷；运行中执行不可列（`cancelExecution` 不可路由）；GUI 出货无 hostExecPolicy 而矩阵带策略跑；执行器全量继承 `process.env`（密钥面）未披露；`timeout_ms` 无上限；writeRoots 用未解析字符串前缀 | 债务（重要） | **关闭 09-27**（probe1/2 翻转、run_tests host 62/62、矩阵 66 全覆盖、E5/E6 绿） | §R1.4-M2 |
 | **D-M3-M3**（关闭 09-27，裁决生效：归 M5-2） | `exec -a` 进程名伪装静默消失（全仓无 argv0 设置点）；架构师裁决：**改归 M5**（伪装面同族），记录措辞更正 | 债务（重要）→ M5 登记 M5-2a | **关闭 09-27** | §R1.4-M3 |
-| **D-M3-5** | **架构师自纠 delta（R1-C1）**：R1 评审的"tier==清单需确认列"指令错误——那列是 frx 习惯、不是 §5.2 tier 合同；`fs_write`/`fs_mkdir`/`fs_copy` 须回 stateful（工作区写动作），`r1-tiers` 门禁改**语义合同表**（例外引用裁决编号 + "清单列是⇒stateful"总闸）+ 红测试（agent 来源 fs_write 停 pending）。**M3 验收前必落（估 15 分钟）** | 债务（阻塞 delta，责任在架构师裁决文本） | 开放 | [M3 执行记录 §R2.3](chromium-m3-execution-handoff.md) |
+| **D-M3-5**（关闭 09-27） | **架构师自纠 delta（R1-C1）**：R1 评审的"tier==清单需确认列"指令错误——那列是 frx 习惯、不是 §5.2 tier 合同；`fs_write`/`fs_mkdir`/`fs_copy` 须回 stateful（工作区写动作），`r1-tiers` 门禁改**语义合同表**（例外引用裁决编号 + "清单列是⇒stateful"总闸）+ 红测试（agent 来源 fs_write 停 pending）。**M3 验收前必落（估 15 分钟）** | 债务（阻塞 delta，责任在架构师裁决文本） | **关闭 09-27**（点验：tiers 回 stateful、语义合同表 + 总闸、红测试、run_tests host 64/64） | [M3 执行记录 §R2.3](chromium-m3-execution-handoff.md) |
 | M4-7 | 矩阵覆盖债：19 个 available 工具渲染 "(no direct gate — gap)"——披露诚实但要排期清零（M4 起每档先补 5 个） | 债务（覆盖，排期） | 开放 | `docs/m3-capability-matrix.md` |
-| M4-8 | `runningExecutions()` 已可路由但 GUI 未接线（IPC + 面板按钮） | 债务（小） | 开放 | M3 执行记录 §R2.4 M2-② |
+| M4-8 | `runningExecutions()` 已可路由但 GUI 未接线（IPC + 面板按钮） | 债务（小） | **关闭 09-27**（D-M3-5 顺带落：`evidence:running`/`cancel-execution` IPC + Running 按钮） | M3 执行记录 §R2.4 M2-② |
 | M4-9 | 小项批：`MAX_TIMEOUT_BYTES` 死 import；矩阵缺项负控自引用（建议改活 host 缺项）；`net_list` 缓冲滚窗后游标应披露 `buffer_oldest_seq` | 债务（小） | 开放 | M3 执行记录 §R2.4 m-R2-1/2/3 |
 
 
 ## 4. M4 名下（观测面扩展）
+
+> **工单已发布**：[chromium-m4-observation-handoff.md](chromium-m4-observation-handoff.md) v1.0（2026-09-27；进入条件已满足）。本表逐项归其 E0–E7。
 
 | ID | 项 | 类型 | 状态 | 证据/指针 |
 | --- | --- | --- | --- | --- |

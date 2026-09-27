@@ -315,3 +315,23 @@ progress JSON `m3` = `m3-r1-remediation-complete`。**申请：按 §R1.6 一次
 终验（2026-09-27 亲跑全绿）：`run_tests.sh` exit 0（host 64/64——逐文件带超时复核 12/12 通过；此前一次 battery 挂起为并发残留进程，非产品缺陷）；矩阵重生成（66 行双形态不变）；静态门禁 7/7；E6 闭环 GREEN；E5 九场景 + B1 锚点 GREEN；probe2 形状保持（三工具停靠，cookies 细判形态）。
 
 progress JSON `m3` = `m3-r2-delta-complete`。**申请：点验后标 accepted-m3。**
+
+---
+
+# 架构师点验与验收（2026-09-27）：**accepted-m3，M3（工具面完整）达成**
+
+D-M3-5 delta（`4dd3a73`）点验通过，不开完整轮（承诺的即是点验）：
+
+| 点验项 | 结果 |
+| --- | --- |
+| fs 三件 tier | `fs_write`/`fs_mkdir`/`fs_copy` = `STATEFUL_CONTROL`（源码形态核对） |
+| 语义合同表（`r1-tiers.test.js`） | 逐工具期望档 + 每条例外引用裁决编号；**总闸**"清单列为 是 ⇒ 不得在 read 档"且例外表仅 cookies 一条（R2.3 细判）；**红测试**：agent 来源 fs_write 停 pending、deny 零落盘、ui 批准落地 |
+| m-R2-1/3 | 死 import 删除；`net_list` 披露 `buffer_oldest_seq` + `cursor_behind_buffer` |
+| M4-8（M2-② 提前落） | `evidence:running`/`evidence:cancel-execution` IPC + preload + 面板 Running 按钮（Broker 路由的取消） |
+| 全门禁复跑 | `run_tests.sh` 381/**64**/28/216 exit 0；静态形态 7/7；矩阵重生成 40/8/24 + `missing:[]`；E6 九阶段绿（`p6-e6-m5NXCi`）；E5 九场景 + B1 等式 + 双会话全 0 绿（`p6-e5-swU4LZ`）；补丁栈自 accepted-p55 零变动 |
+
+**裁定：`accepted-m3` 已标（progress JSON）。M3（工具面完整）达成 2026-09-27**——路线图上此档达成节点为 09-27，比 v1.6 的"10-05 前"又提前。
+
+**P6→M3 全程小结（供路线图 §7 与后续工单引用）**：M3 共三轮（首轮执行 ~1 日 + R1 整改 ~0.5 日 + delta 15 分钟级），两轮审查 + 一次点验；缺陷类收敛为"工具语义与真实产品面一致性"（会话域/tier/监听器生命周期/矩阵覆盖）+ 一条架构师裁决错误（R1-C1）。门禁文化已内化：本轮新门禁自带负控、机检合同引用裁决编号、盘面对账逐 capture 等式。这些形态已写进 [M4 工单](chromium-m4-observation-handoff.md) 的 MD4 固定锚点。
+
+**下一步**：M1.1 并行轨继续；**M4 工单已发布**（`docs/chromium-m4-observation-handoff.md` v1.0，进入条件已满足：accepted-m3 ✓ + 登记册 M3 名下无开放阻塞 ✓ + M1.1-b 产物先行）。
