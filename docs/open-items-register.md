@@ -1,6 +1,6 @@
 # 开放项登记册（债务 / 边界 / 设计 IOU / 外部依赖 / 授权门槛）
 
-- 版本：v1.1（2026-09-27，项目架构师；P6 R3 复审后更新：M2 名下 8 项全部关闭，新增 3 条 M3 进入条件债务）。**唯一跨阶段汇总处**：各阶段的细节仍以其交接文档为准（本册只登记"归谁、在哪一档关、证据在哪"），避免同一债务在多处漂移。
+- 版本：v1.2（2026-09-27，项目架构师；M3 R1 终审后更新：M3 名下状态重排 + 新增 4 阻塞 3 重要）。**唯一跨阶段汇总处**：各阶段的细节仍以其交接文档为准（本册只登记"归谁、在哪一档关、证据在哪"），避免同一债务在多处漂移。
 - 维护规则：① 每轮终审由架构师更新本册（新增/关闭/改归属）；② 关闭一项必须有证据指针（门禁名 + 证据目录），不许以"已修"字样关闭；③ 类型分五种——**债务**（必须修）、**边界**（不修，但引用结论时不得越级）、**设计 IOU**（欠一份设计文档）、**外部依赖**（不在我们手里）、**授权门槛**（需用户显式授权）；④ 归属里程碑变更走裁决。
 
 ## 1. M2 名下（P6-R2）—— **全部关闭**（2026-09-27，R3 复审，`accepted-p6`）
@@ -31,17 +31,30 @@
 | ID | 项 | 类型 | 状态 | 证据/指针 |
 | --- | --- | --- | --- | --- |
 | M3-1 | **frx 源码移交**（A 组 2 项 + D 组 frx 轨 5 项的前提；MPL-2.0 逐文件核对） | 外部依赖 | 未到位 | [M3 交接 §7](chromium-m3-tool-surface-handoff.md)；当前 `jsvmp_split_dispatcher`/`jsvmp_disassemble` 已按 unavailable-with-reason 注册 |
-| M3-2 | host-exec 档（tier c）实装：策略白名单、具体动作确认载荷、argv/路径审计、超时/输出上限/取消 | 债务 | 未启动 | M3 交接 §4 PD1、§5 E1 |
-| M3-3 | 能力矩阵**自动生成**（禁止手写）+ "每个 available 项必有一条门禁名"断言 | 债务 | 未启动 | PD3、E0/E7 |
-| M3-4 | Broker 不可绕过从约定变**结构**（broker-bound 适配器、`.run(` 调用点静态门禁 + 负控） | 债务 | 未启动 | PD4、E6 |
-| M3-5 | 完整环境管理器（端口扫描/bind 探测/进程状态机/实例所有权/`exec -a`）+ 双 env 并行实测；指纹挂载点仅预留 | 债务 | 未启动 | §3.3、E4 |
-| M3-6 | **可重连控制面设计文档**（传输选型/capture 状态恢复/与 `resolveOrphan` 的关系/失败模式表）——本轮只设计不实现 | 设计 IOU | 未启动 | PD2、E6；IOU 源自 P3 终审记录与草稿 §362 |
-| M3-7 | `resolveOrphan` 与只读收养两路径的门禁（P6-R2 H 项的一半归此） | 债务 | 未启动 | E6 |
-| M3-8 | C 组 14 项 CDP 映射 + `page_automation_scan` 的 Chromium 环境面适配（字段面差异逐项披露） | 债务 | 未启动 | §3.1、E3 |
+| M3-2 | host-exec 档（tier c）实装：策略白名单、具体动作确认载荷、argv/路径审计、超时/输出上限/取消 | 债务 | **机制落地**（R1 复审确认：默认拒/防呆/载荷/审计/取消杀子进程均实测）；**产品面缺口未关** → 转 D-M3-M2 | M3 交接 §4 PD1；`test/e1-host-exec.test.js` |
+| M3-3 | 能力矩阵**自动生成**（禁止手写）+ "每个 available 项必有一条门禁名"断言 | 债务 | **部分落地**：生成器存在且对活组合根生成（已实测）；**覆盖断言不符**（缺清单 7 项静默缺席）+ gate 出处未机验 → 转 D-M3-B4 / M1 | `scripts/m3-capability-matrix.js`、`docs/m3-capability-matrix.md` |
+| M3-4 | Broker 不可绕过从约定变**结构**（broker-bound 适配器、`.run(` 调用点静态门禁 + 负控） | 债务 | **关闭 09-27** | `host.adapters.all()` 剥离 run/available；静态门禁 7 检查含植入旁路负控（我亲跑 GREEN） |
+| M3-5 | 完整环境管理器（端口扫描/bind 探测/进程状态机/实例所有权/`exec -a`）+ 双 env 并行实测；指纹挂载点仅预留 | 债务 | **大部分落地**（双 env 并行实测我亲跑绿）；`exec -a` 静默消失 → 架构师裁决改归 M5（D-M3-M3）；端口机制管道传输下无消费面（advisory，已披露，架构师认领工单过度纳入） | `test/e4-env.test.js`；[M3 交接 §3.3](chromium-m3-tool-surface-handoff.md) |
+| M3-6 | **可重连控制面设计文档**（传输选型/capture 状态恢复/与 `resolveOrphan` 的关系/失败模式表）——本轮只设计不实现 | 设计 IOU | **关闭 09-27**（交付合格：不承诺断连期无缝，诚实） | `docs/chromium-reconnect-design.md` v1.0 |
+| M3-7 | `resolveOrphan` 与只读收养两路径的门禁（P6-R2 H 项的一半归此） | 债务 | **关闭 09-27**（收养幂等 + index 落地、终止真杀，各有断言；E5 resolve-orphan 交互实测） | `test/e6-structural.test.js`、`validation/p6-e5-pluSSA` |
+| M3-8 | C 组 14 项 CDP 映射 + `page_automation_scan` 的 Chromium 环境面适配（字段面差异逐项披露） | 债务 | **部分落地**：14 项均有真浏览器门禁（我亲跑 51/51 套件内）；**tier 错配 + net 族泄漏/假查询** → 转 D-M3-B2/B3 | `test/e3-cgroup.test.js` |
 | **D-P6-1** | E5 驱动器曾一次不可复现失败（首个 workspace-open 等待超时），且 driver-error 路径不落 report/面板/console → flake 即盲区。**M3 进入条件** | 债务 | 开放 | [P6 交接 §R3.4](chromium-p6-execution-handoff.md)；失败运行 `validation/p6-e5-n5OkSm`、通过运行 `validation/p6-e5-SQj0yC` |
 | **D-P6-2** | S3 门禁布尔式优先级缺陷：盘上读数成功时 `s3ok` 不参与判定（R2-A 的两条正则实际未被要求）。**M3 进入条件** | 债务 | 开放 | §R3.4；行为本身已亲验正确，缺陷在门禁 |
 | **D-P6-3** | 真机 `(terminal, coverage)` pair 只在 E6 驱动器断言；`r1-adapters.test.js:433` 仍留冗余弱断言 `\|\| stop.terminal != null`。**M3 进入条件** | 债务 | 开放 | §R3.4 |
 | M3-9 | P6-R3 的四条小项：stop 成功路径不清截止定时器（8s 滞留）、B1 锚点三处装饰缺陷（negativeControl 恒 null / 负控是算术非真注入 / 读侧无等式）、grep 锚点仅存在性检查、E5 残留死取值与恒真三元 | 债务（小） | 开放 | §R3.4 m-R3-4…8；随 M3-E0 一并清 |
+
+### 3.1 M3 终审 R1 整改项（架构师登记，2026-09-27；`accepted-m3` 前必须关闭）
+
+| ID | 项 | 类型 | 状态 | 证据/指针 |
+| --- | --- | --- | --- | --- |
+| **D-M3-B1** | `scripts_save` 在真浏览器 100% 抛错（browser 级 `Debugger.getScriptSource` 无 sessionId → "wasn't found"；带 sessionId 同一调用返回 711 字节）；e2 happy path 是假 host；矩阵却标 available | 债务（阻塞） | 开放 | [M3 执行记录 §R1.3-B1](chromium-m3-execution-handoff.md)；`docs/review-artifacts/m3-r1/probe1-*.cjs` |
+| **D-M3-B2** | C 组 tier 错配：agent 来源 `page_navigate`/`page_click`/`page_type`/`cookies` 静默会话级放行（实测 ledger 四行 granted:session-grant）；清单"需确认"列均为是；`net_list` 读档却导航 | 债务（阻塞） | 开放 | §R1.3-B2；`probe2`（ledger 证据）；须新增 tier==清单列机检门禁 |
+| **D-M3-B3** | net 族：每调用挂**永不摘除**的监听器（泄漏 + 过期收集器堆积）；`net_list` 重新导航而非查询缓冲（假查询）；游标等式在动态页面不可核对 | 债务（阻塞） | 开放 | §R1.3-B3；修法已裁（单例监听器 + 有界缓冲 + 窗口捕获 + 纯查询） |
+| **D-M3-B4** | 能力矩阵对清单**静默缺席 7 项**（env/指纹族，M5 归属）：`env_current`/`env_import`/`env_import_fingerprint`/`env_read_config`/`env_write_config`/`env_generate_fingerprint`/`env_capture_fingerprint`；记录算术不符（65 行 vs 66 清单） | 债务（阻塞，纪律类第三次复发） | 开放 | §R1.3-B4；我亲跑的清单↔矩阵 diff |
+| **D-M3-M1** | 矩阵 gate 出处为手写映射且只查文件存在（不查文件是否真行使该工具）；`scripts_capture_all` 用文案豁免占位 | 债务（重要） | 开放 | §R1.4-M1 |
+| **D-M3-M2** | host-exec 产品面六缺口：pendingList 无 action 载荷；运行中执行不可列（`cancelExecution` 不可路由）；GUI 出货无 hostExecPolicy 而矩阵带策略跑；执行器全量继承 `process.env`（密钥面）未披露；`timeout_ms` 无上限；writeRoots 用未解析字符串前缀 | 债务（重要） | 开放 | §R1.4-M2 |
+| **D-M3-M3** | `exec -a` 进程名伪装静默消失（全仓无 argv0 设置点）；架构师裁决：**改归 M5**（伪装面同族），记录措辞更正 | 债务（重要）→ M5 登记 M5-2a | 裁决已下 | §R1.4-M3 |
+
 
 ## 4. M4 名下（观测面扩展）
 
@@ -59,7 +72,7 @@
 | ID | 项 | 类型 | 状态 | 证据/指针 |
 | --- | --- | --- | --- | --- |
 | M5-1 | 指纹伪装层设计（三档策略：CDP override/启动开关优先，Blink patch 只补剩余字段） | 设计 IOU | 未启动 | 草稿 §1.1/§5、迁移分析报告 §7 |
-| M5-2 | 完整环境管理器剩余项：指纹挂载、暖 profile 复用、一键生成"profile+指纹+采集配置" | 债务 | 未启动 | 草稿 §37、路线图 M5 |
+| M5-2 | 完整环境管理器剩余项：指纹挂载、暖 profile 复用、一键生成"profile+指纹+采集配置"；**+ `exec -a` 进程名伪装（R1 裁决改归本档，M3-5 划出）** | 债务 | 未启动 | 草稿 §37、路线图 M5；M3 执行记录 §R1.4-M3 |
 | M5-3 | 四项指纹依赖 env 工具（`env_current_process` 等）从 unavailable 转可用 | 债务 | 未启动 | 清单 §3.4；P6-R1 已按 unavailable-with-reason 注册 |
 | M5-4 | **活站对等验证需用户显式授权**；未授权则 M5 以本地重放 + 派生一致性规则收口，"活站对等"记为未验证边界 | 授权门槛 | 未授权 | 路线图 §1 M5 行、§5 |
 
