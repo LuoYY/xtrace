@@ -18,7 +18,7 @@
 
 ## 2. 状态判定（E0 结束前写入 progress JSON）
 
-- **当前三态：`not-transferred`**（依据：仓库与 git 历史零 frx 源文件）。
+- **当前三态：`transferred-in-progress`**（AUTH-3 授权 2026-09-27；源路径亲核在盘）。
 - 影响：M3-E5 按"未到位"分支执行——frx 轨五项 + A 组两项保持 unavailable-with-reason，**禁止自研弱替**（M3 交接 §7.4）；M3 以缩减范围达成的缺口记入能力矩阵与登记册。
 - 移交发生时：逐文件登记 `docs/frx-migration-provenance.md`（文件→来源路径→许可→本地改动摘要），再按 E5 实装分支走。
 
