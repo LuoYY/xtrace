@@ -172,7 +172,10 @@ function createEnvManager({ workspace,
 
     /** Claim a free port for an env instance (scan from `from`).
      * Returns { port, conflict } — a conflict row names the env that
-     * already holds the port (state machine: port-conflict). */
+     * already holds the port (state machine: port-conflict).
+     * ADVISORY ONLY (architect R1.5-2): the pipe transport consumes
+     * no ports; this neither holds nor registers the port — re-eval
+     * when the reconnect transport lands. */
     async claimPort(envName, { from = 9300, tries = 40 } = {}) {
       for (const [name, inst] of instances) {
         if (inst.port && !inst.stopped) {

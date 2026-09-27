@@ -69,7 +69,9 @@ progress JSON：`p6` 保持 `accepted-p6`；`m3` = `e0-debt-gate-complete`；`m3
 
 ### E4 完整 env 管理器（M3 边界）
 
-`env-manager.js` 扩展：`probePort`（真实 bind 探测）、`claimPort`（扫描 + **port-conflict 状态机**——冲突行指认占用 env）、`registerInstance`/`instanceStatus`/`terminateInstance`（SIGTERM→SIGKILL，状态机 running→stopped）、`allInstances`；fingerprint 挂载点**预留**（env.json 记录、不解释——M5）。双 env 并行实测（live Chromium×2）：各自 profile 被启动规格消费、进程互不干扰、实例行状态机全断言；exec -a 归启动器（规格承载 profile 的断言沿用 R1 锚点）。5 门禁全绿（`test/e4-env.test.js`）。
+`env-manager.js` 扩展：`probePort`（真实 bind 探测）、`claimPort`（扫描 + **port-conflict 状态机**——冲突行指认占用 env）、`registerInstance`/`instanceStatus`/`terminateInstance`（SIGTERM→SIGKILL，状态机 running→stopped）、`allInstances`；fingerprint 挂载点**预留**（env.json 记录、不解释——M5）。双 env 并行实测（live Chromium×2）：各自 profile 被启动规格消费、进程互不干扰、实例行状态机全断言。5 门禁全绿（`test/e4-env.test.js`）。
+
+**R1 更正（exec -a）**：上一版"exec -a 归启动器"的措辞不实——启动器无任何 argv0 设置点，`registerInstance` 的 argv0 只是调用方标签。按架构师 R1.4-M3 裁决：**进程名伪装正式改归 M5**（与指纹层同族），M3 完成定义划掉；见登记册 M5-2。端口机制为 advisory（管道传输无消费面，架构师已认领工单过度纳入）。
 
 ### E5 frx 轨（not-transferred 分支）
 
@@ -201,3 +203,34 @@ R2.6 全表（run_tests/static-shape/E5/E6/probe4-7/冻结套件按恒等/verify
 - 登记册：M3 名下新增 R1-B1..B4 与 M1–M3（关闭时须附证据指针）。
 - 路线图：M3 窗口（10-02 → 11-04）**保持**——整改块估 0.5–1 日，仍在窗口内；§7 补一行 M3 首段实测（执行 ~1 日两轮 commit，本轮审查发现 4 阻塞）。
 - 给执行层的直接评价：这一轮门禁文化的内化是真实的（负控自带、盘面对账、静态门禁自证），剩下的缺陷全部集中在**"工具语义与真实产品面的一致性"**（会话域、tier、监听器生命周期、矩阵覆盖）——这一类以后写进工单的固定锚点，我会在 M4 工单里直接列。
+
+---
+
+# M3-R1 整改执行记录（2026-09-27，工程师）
+
+按 §R1.6 的 R1-1..R1-7 一次推进、一次提交。零 chromium/src 改动。
+
+## R1 整改实现对照
+
+| 项 | 实现 | 验收证据 |
+| --- | --- | --- |
+| R1-1（B1） | `scripts_save` 会话域修正：工具自管会话——**遍历活 page targets**（不再新开页面导航），attach + Debugger.enable + getScriptSource 逐个尝试，可选 url 优先排序、无命中时回退加载一次；`{scriptSource}` 与裸串双形态归一。404/残片护栏不变 | **probe1 转绿**：真机调用成功（saved 711 字节 == direct 对照）；`test/e2-dgroup.test.js` 新增真机 happy path 门禁（落盘内容与页面脚本逐字节相等，SHA 级对账），假 host 门禁改为 walk-aware（Target.getTargets/attach/enable 样样核对） |
+| R1-2（B2） | `page_navigate`/`page_click`/`page_type` 升 STATEFUL_CONTROL；`cookies` 留 read + **READ SUBSET ONLY** 披露（写入落地即升档）；tier 全面对齐清单"需确认"列：`jsvmp_status`/`env_list`/`env_status`/`fs_write`/`fs_mkdir`/`fs_copy` 降 read（清单=否），`signer_trace`/`closure_read`/`whitebox_diff`/`env_write_current_process_config`/`env_reset_current_process_default`/`env_generate_fingerprint`/`env_import` 升 stateful（清单=是） | `test/r1-tiers.test.js`：**机检门禁**——解析清单文件的需确认列，逐工具断言 tier==列映射（是→stateful/否→read），host-exec 轴与两处架构师裁定例外显式登记；probe2 形状入库：agent 来源 navigate/click/type 全停 pending（deny 后副作用零），ledger 无 session-grant 行 |
+| R1-3（B3） | net 族重构：**单例监听器**（首次调用挂一次，永不重复）+ **进程内共享环形缓冲**（5000 行上限，seq 单调）→ `net_capture` 是 stateful **有界窗口**（enable→navigate→收集→关 target）；`net_list` 是**纯查询**（只读缓冲，D2 游标在冻结行上，**零导航**） | `test/r1-net-tiers.test.js` 三断言：重复 capture+list 后缓冲行为一致（非每调用重复）；**net_list 的 Page.navigate 调用数==0**（桩计数负控）；游标全走==缓冲总数（frozen rows 上等式成立） |
+| R1-4（B4） | 生成器**从清单文件解析 66 项工具全集**（行集==清单集，缺席即抛）；新增 `adapters-env-family.js`：**env_current 实装**（open env + profile + 实例行，read）+ 六项指纹族 unavailable-with-reason（M5 归属）；内部原语（trace_query 等 6 项）**单列一节**不混入清单计数；gate 出处**机验**（点名文件必须含工具名字符串，available 工具无豁免） | 矩阵重生成：**inventory_total=66、行集 66 全覆盖、available=40/degraded=8/unavailable=24**（shipping 形态）；19 个真实缺口如实渲染 "(no direct gate — gap)"；`test/r1-matrix.test.js`：66 解析断言 + unavailable 全带 reason + **植入缺项负控翻红**（拔掉 env_current 行 → 覆盖检查抓到） |
+| R1-5（M2） | ① `pendingList()` 携带 `action` 载荷（确认面显示 argv/writePath）；② 新增 `runningExecutions()`（运行中执行列表 + kill_registered 标志——cancelExecution 可路由）；③ 矩阵改**双形态**（shipping:no-policy 出货形态为行集基准——run_node/run_python 以 discloseOnly 行披露 "requires a hostExecPolicy" + with-policy 形态计数并列）；④ 执行器 **env 白名单**（PATH/HOME/LANG/TMPDIR/TEMP/LC_ALL，planted 密钥不漏）；⑤ `timeout_ms` 钳 MAX_TIMEOUT_MS=120s（看门狗不可关）；⑥ writeRoots **realpath 对 realpath** 比较（符号链接根判定与写入层一致） | `test/r1-hostexec-surface.test.js` 5 门禁：pending action 深比较、running 列表 id==confirmation id + kill_registered、M3R5_SECRET 漏不出/PATH 在、10 小时 timeout 被钳到 120s 内 timed_out、符号链接根下真实目录写允许+真外拒 |
+| R1-6（M3） | **exec -a 记录更正**（上版"归启动器"措辞不实——启动器无 argv0 设置点；按裁决改归 M5 登记册 M5-2，M3 完成定义划掉）；`fs_read` **UTF-8 字节边界披露**（字节精确切片可切多字节序列，先拼页再解码）；`claimPort` **advisory 注记**（管道传输无端口消费面，重连定案后重评）；executors 的 `void action` 死行删除 | 执行记录 R1 节 + 源码注记 |
+| R1-7 | 文档与状态账（本节）+ progress JSON | 见下 |
+
+## R1.7 复审门禁（R2.6 全表 + 追加，2026-09-27 亲跑全绿）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `bash scripts/run_tests.sh` | exit 0（python 381 / launcher 28 / **host 62** / GUI 216；本轮新增 11 测试：tier 机检/矩阵覆盖+负控/net 三断言/host-exec 面 5 门禁/真机 scripts_save） |
+| `probe1`（scripts_save 真机） | **转绿**：saved 711 字节 == direct 对照（修前 100% "wasn't found"） |
+| `probe2`（tier） | navigate/click/type agent 来源**全停 pending**（deny 后副作用零）；cookies granted+READ SUBSET ONLY 披露（架构师细判裁定形态） |
+| `scripts/m3-capability-matrix.js` | GENERATED：66 清单行全覆盖 + 双形态计数（shipping 40/8/24、with-policy 42/8/22）+ 19 真实缺口如实渲染 |
+| `test/r1-matrix.test.js` 缺项负控 | 植入缺席（拔 env_current）→ 覆盖检查**翻红**，恢复即绿 |
+| E5 九场景 / E6 闭环 / static shape 7 检查 / S0 / verify_patches | 全绿保持（P6 路径零回退） |
+
+progress JSON `m3` = `m3-r1-remediation-complete`。**申请：按 §R1.6 一次复审。**

@@ -16,7 +16,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { launchBrowser } = require('./cdp');
-const { createBroker } = require('./broker');
+const { createBroker, TIERS: TIERS__HOSTEXEC } = require('./broker');
 const { createWorkspace } = require('./workspace');
 const { createEnvManager } = require('./env-manager');
 const { createEvidenceIndex } = require('./evidence-index');
@@ -27,6 +27,7 @@ const { createCGroupAdapters } = require('./adapters-cgroup');
 const { createFrxTrackAdapters } = require('./adapters-frx-track');
 const { createDisclosedUnavailableAdapters }
   = require('./adapters-disclosed');
+const { createEnvFamilyAdapters } = require('./adapters-env-family');
 const { createExecutors } = require('./executors');
 const { negotiate } = require('./capabilities');
 
@@ -191,9 +192,28 @@ async function createHost({
       ...createCGroupAdapters({ workspace, host }),
       ...createDGroupNativeAdapters({ workspace, host }),
       ...createFrxTrackAdapters(),
+      ...createEnvFamilyAdapters({ envs }),
       ...createDisclosedUnavailableAdapters(),
       ...(policy && policy.hostExecPolicy
-          ? createExecutors({ workspace }) : []),
+          ? createExecutors({ workspace })
+          : [   // R1-5(3): the SHIPPING form (no policy) still
+                // discloses the executors as unavailable — the matrix
+                // reflects the product shape without silent absence.
+            { name: 'run_node', tier: TIERS__HOSTEXEC.HOST_EXEC,
+              discloseOnly: true,
+              unavailableReason: 'requires a hostExecPolicy object; the ' +
+                  'shipped GUI configuration carries none',
+              input: {}, available: () => false,
+              run: async () => {
+                throw new Error('host-exec disabled (no policy)'); } },
+            { name: 'run_python', tier: TIERS__HOSTEXEC.HOST_EXEC,
+              discloseOnly: true,
+              unavailableReason: 'requires a hostExecPolicy object; the ' +
+                  'shipped GUI configuration carries none',
+              input: {}, available: () => false,
+              run: async () => {
+                throw new Error('host-exec disabled (no policy)'); } },
+          ]),
     ];
     host.tools = new Map();
     for (const adapter of adapters) {

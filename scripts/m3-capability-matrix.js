@@ -18,24 +18,42 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.resolve(__dirname, '..');
 const { createHost } = require(path.join(ROOT, 'xtrace-host/src/host'));
 
+// R1-4 (B4): the tool UNIVERSE comes from the inventory FILE — the
+// generator parses the 66 `| \`name\` | ... | 是/否 | ... |` rows and
+// asserts the matrix row set == the inventory set. Silent absence is
+// the third-recurrence defect class; this kills it structurally.
+function parseInventory() {
+  const text = fs.readFileSync(
+      path.join(ROOT, 'docs/tool-inventory.md'), 'utf8');
+  const tools = new Set();
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\|\s*`([a-z_0-9]+)`\s*\|/);
+    if (m && m[1] !== 'T') {
+      tools.add(m[1]);
+    }
+  }
+  return tools;
+}
+
 // gate provenance: tool -> shipped gate that exercises it (the
 // generator asserts each named file exists; empty = unexercised, which
 // the matrix discloses as a gap rather than hiding)
 const GATES = {
   'trace_query': 'xtrace-host/test/r1-core.test.js',
-  'trace_summary': 'xtrace-host/test/r1-core.test.js',
-  'api_top': 'xtrace-host/test/r1-core.test.js (indirect via summary)',
-  'assets_list': 'xtrace-host/test/r1-adapters.test.js',
-  'asset_read': 'xtrace-host/test/r1-adapters.test.js',
-  'code_search': 'xtrace-host/test/r1-adapters.test.js',
-  'scripts_list': 'xtrace-host/test/r1-adapters.test.js',
+  'trace_summary': 'xtrace-host/test/e6-structural.test.js',
+  'api_top': null,   // disclosed gap
+
+  'assets_list': null,   // disclosed gap
+  'asset_read': null,   // disclosed gap
+  'code_search': 'xtrace-host/test/r1-core.test.js',
+  'scripts_list': 'xtrace-host/test/r1-core.test.js',
   'jsvmp_query': 'xtrace-host/test/r1-adapters.test.js',
   'webapi_query': 'xtrace-host/test/r1-adapters.test.js',
-  'find_param_entry': 'xtrace-host/test/r1-adapters.test.js',
-  'crypto_scan': 'xtrace-host/test/r1-adapters.test.js',
+  'find_param_entry': 'xtrace-host/test/r1-core.test.js',
+  'crypto_scan': 'xtrace-host/test/r1-core.test.js',
   'evidence_jump': 'xtrace-host/test/r1-adapters.test.js',
-  'notes_get': 'xtrace-host/test/r1-core.test.js (via skill gates)',
-  'recall': 'xtrace-host/test/r1-core.test.js (broker read rows)',
+  'notes_get': 'xtrace-host/test/r1-core.test.js',
+  'recall': 'scripts/p6-e5-ui-scenarios.cjs',
   'jsvmp_split_dispatcher': 'unavailable-with-reason — no gate required',
   'jsvmp_disassemble': 'unavailable-with-reason — no gate required',
   'env_current_process': 'unavailable-with-reason — no gate required',
@@ -46,16 +64,16 @@ const GATES = {
   'skill_get': 'xtrace-host/test/r1-core.test.js',
   'skill_read_resource': 'xtrace-host/test/r1-adapters.test.js',
   'jsvmp_trace': 'xtrace-host/test/r1-core.test.js (composition root)',
-  'jsvmp_status': 'scripts/p6-e5-ui-scenarios.cjs (agent probe)',
-  'webapi_trace': 'xtrace-host/test/r1-adapters.test.js (start path)',
-  'scripts_capture_all': '— (start-path sibling; exercised via E5 start)',
-  'env_create': 'xtrace-host/test/r1-core.test.js',
-  'env_list': 'xtrace-host/test/r1-core.test.js',
-  'env_status': 'xtrace-host/test/r1-core.test.js',
-  'env_update': 'xtrace-host/test/r1-core.test.js',
+  'jsvmp_status': null,   // disclosed gap
+  'webapi_trace': null,   // disclosed gap
+  'scripts_capture_all': null,   // disclosed gap
+  'env_create': 'scripts/p6-e6-closed-loop.cjs',
+  'env_list': null,   // disclosed gap
+  'env_status': null,   // disclosed gap
+  'env_update': null,   // disclosed gap
   'env_open': 'xtrace-host/test/r1-core.test.js',
-  'env_close': 'xtrace-host/test/r1-core.test.js',
-  'env_delete': 'xtrace-host/test/r1-core.test.js',
+  'env_close': null,   // disclosed gap
+  'env_delete': null,   // disclosed gap
   'page_navigate': 'xtrace-host/test/e3-cgroup.test.js',
   'page_elements': 'xtrace-host/test/e3-cgroup.test.js',
   'page_click': 'xtrace-host/test/e3-cgroup.test.js',
@@ -73,7 +91,7 @@ const GATES = {
   'fs_list': 'xtrace-host/test/e2-dgroup.test.js',
   'fs_read': 'xtrace-host/test/e2-dgroup.test.js',
   'fs_write': 'xtrace-host/test/e2-dgroup.test.js',
-  'fs_mkdir': 'xtrace-host/test/e2-dgroup.test.js',
+  'fs_mkdir': null,   // disclosed gap
   'fs_copy': 'xtrace-host/test/e2-dgroup.test.js',
   'scripts_save': 'xtrace-host/test/e2-dgroup.test.js',
   'notes_add': 'unavailable-with-reason — no gate required',
@@ -94,16 +112,42 @@ async function main() {
       'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'm3-matrix-'));
   const traceFile = path.join(root, 'traces', 'matrix', 'trace.ndjson');
-  const host = await createHost({ executable: exe, workspaceRoot: root,
-      traceFile, browserArgs: ['about:blank'],
-      // M3-E1: the executors ride the surface only under a policy —
-      // the matrix negotiates WITH one (that is the shipped shape the
-      // gate map references).
-      policy: { hostExecPolicy: {
+  // R1-5(3): the matrix runs BOTH negotiation forms and reports them
+  // side by side — the SHIPPING form (no hostExecPolicy: the GUI ships
+  // none, so run_node/run_python are absent from the surface) is the
+  // headline; the with-policy form documents what a policy unlocks.
+  const FORMS = [
+    { label: 'shipping:no-policy', policy: null },
+    { label: 'with-policy', policy: { hostExecPolicy: {
         paths: { read: [], write: [path.join(root, 'out')] },
-        network: { allow: [] }, deps: { npm: [] } } } });
+        network: { allow: [] }, deps: { npm: [] } } } },
+  ];
+  const formResults = [];
+  const negotiated = await (async () => {
+    let merged = null;
+    for (const form of FORMS) {
+      const h = await createHost({ executable: exe, workspaceRoot: root,
+          traceFile, browserArgs: ['about:blank'], policy: form.policy });
+      try {
+        const caps = await h.capabilities();
+        formResults.push({ label: form.label, counts: {
+          available: caps.tools.filter((t) => t.state === 'available').length,
+          degraded: caps.tools.filter((t) => t.state === 'degraded').length,
+          unavailable: caps.tools.filter((t) => t.state === 'unavailable')
+              .length },
+          absent_under_this_form: FORMS.length > 1
+              ? null : undefined });
+        if (form.label === 'shipping:no-policy') {
+          merged = caps;   // the headline form drives the rows
+        }
+      } finally {
+        await h.close();
+      }
+    }
+    return merged;
+  })();
   try {
-    const negotiated = await host.capabilities();
+    void negotiated;
     const rows = negotiated.tools.map((t) => {
       const gate = GATES[t.name] || null;
       // gate provenance must point at a real file (or be an explicit
@@ -113,10 +157,31 @@ async function main() {
         if (!fs.existsSync(path.join(ROOT, rel))) {
           throw new Error(`gate file missing for ${t.name}: ${rel}`);
         }
+        // R1-4/M1: the named file must EXERCISE the tool — it has to
+        // contain the tool name string (machine check, no prose
+        // exemptions for available tools)
+        const body = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+        const exercised = body.includes(t.name);
+        if (t.state === 'available' && !exercised) {
+          throw new Error(`gate does not exercise ${t.name}: ${rel} ` +
+              `carries no reference to the tool`);
+        }
+        if (!exercised) {
+          return {
+            name: t.name, tier: t.tier, state: t.state,
+            reason: t.reason || null,
+            gate: `(no direct gate — gap: ${rel} never names the tool)`,
+          };
+        }
+      }
+      if (gate && t.state === 'available' &&
+          /sibling|文案|—/.test(gate)) {
+        throw new Error(`available tool ${t.name} has a prose gate ` +
+            `exemption: "${gate}" — a real gate file is required`);
       }
       return {
         name: t.name, tier: t.tier, state: t.state,
-        reason: t.reason || null, gate,
+        reason: t.reason || null, gate: gate || '(none — disclosed gap)',
       };
     });
     const counts = {
@@ -126,8 +191,26 @@ async function main() {
     };
     const missing = Object.keys(GATES).filter((name) =>
         !rows.some((r) => r.name === name));
+    // R1-4: the coverage check is against the INVENTORY set, not the
+    // hand-written GATES table — every inventory tool must appear as a
+    // matrix row (registered adapter or disclosed-unavailable).
+    const inventory = parseInventory();
+    const rowNames = new Set(rows.map((r) => r.name));
+    const absent = [...inventory].filter((n) => !rowNames.has(n));
+    if (absent.length) {
+      throw new Error('inventory tools absent from the matrix (silent ' +
+          'absence): ' + absent.join(','));
+    }
+    // internal primitives (matrix extras not in the inventory) are
+    // listed separately, not mixed into the inventory count
+    const internalPrimitives = rows.filter(
+        (r) => !inventory.has(r.name)).map((r) => r.name);
     const matrix = { generated_ms: Date.now(), enhanced: negotiated.enhanced,
-                     counts, missing_gates_for: missing, tools: rows };
+                     counts, missing_gates_for: missing,
+                     inventory_total: inventory.size,
+                     negotiation_forms: formResults,
+                     internal_primitives: internalPrimitives,
+                     tools: rows };
     const outDir = path.join(ROOT,
         'chromium/src/out/XTraceIntegration/validation');
     fs.mkdirSync(outDir, { recursive: true });
@@ -139,55 +222,39 @@ async function main() {
                     `${r.reason || ''} | ${r.gate || '(none — disclosed gap)'} |`)]
         .join('\n');
     const mdPath = path.join(ROOT, 'docs', 'm3-capability-matrix.md');
+    const mdRows = rows.filter((r) => inventory.has(r.name));
+    const mdTable = ['| tool | tier | state | reason | gate |',
+                '| --- | --- | --- | --- | --- |',
+                ...mdRows.map((r) => `| ${r.name} | ${r.tier} | ${r.state} | ` +
+                    `${r.reason || ''} | ${r.gate || '(none — disclosed gap)'} |`)]
+        .join('\n');
+    const internalSection = internalPrimitives.length
+        ? '\n## Host internal primitives (NOT inventory rows — excluded ' +
+          'from the counts above)\n\n' +
+          internalPrimitives.map((n) => '- ' + n).join('\n') + '\n'
+        : '';
     fs.writeFileSync(mdPath,
         '# M3 capability matrix (AUTO-GENERATED — do not hand-edit)\n\n' +
-        `Generated by scripts/m3-capability-matrix.js against the live ` +
-        `composition root. Counts: available=${counts.available} ` +
-        `degraded=${counts.degraded} unavailable=${counts.unavailable}.\n\n` +
-        md + '\n');
+        'Generated by scripts/m3-capability-matrix.js against the live ' +
+        'composition root; rows reflect the SHIPPING form (no ' +
+        'hostExecPolicy — see negotiation_forms in the JSON for the ' +
+        'with-policy counts). Inventory rows: ' + inventory.size +
+        ' (available=' + counts.available +
+        ' degraded=' + counts.degraded +
+        ' unavailable=' + counts.unavailable +
+        '; internal primitives listed separately).\n\n' +
+        mdTable + '\n' + internalSection);
     console.log(JSON.stringify({ counts, missing,
         json, md: mdPath }, null, 1));
-    // consistency: every inventory A-13 + B-5+7 first-batch tool present
-    const required = [
-      // A-group inventory 13
-      'code_search', 'scripts_list', 'jsvmp_query', 'webapi_query',
-      'find_param_entry', 'crypto_scan', 'jsvmp_split_dispatcher',
-      'jsvmp_disassemble', 'skill_list', 'skill_get', 'skill_read_resource',
-      'notes_get', 'recall',
-      // B-group five + env seven
-      'jsvmp_trace', 'jsvmp_status', 'webapi_trace', 'scripts_capture_all',
-      'env_create', 'env_list', 'env_status', 'env_update', 'env_open',
-      'env_close', 'env_delete',
-      // M5-disclosed four
-      'env_current_process', 'env_read_current_process_config',
-      'env_write_current_process_config', 'env_reset_current_process_default',
-      // M3 C-group 14 (IN; signer_trace/closure_read OUT to M4)
-      'page_navigate', 'page_elements', 'page_click', 'page_type',
-      'page_scroll', 'page_screenshot', 'page_info', 'page_eval',
-      'hook_inject', 'cookies', 'net_capture', 'net_list', 'net_get',
-      'page_automation_scan',
-      // M3 D-group native six + scripts_save
-      'fs_list', 'fs_read', 'fs_write', 'fs_mkdir', 'fs_copy',
-      'scripts_save',
-      // M3 D-group frx track five (not-transferred -> unavailable)
-      'notes_add', 'remember', 'wasm_probe', 'wasm_disasm', 'js_trace',
-      // M4/M5 OUT (disclosed unavailable)
-      'signer_trace', 'closure_read', 'whitebox_diff',
-      // M3-E1 executors (unavailable without a policy object)
-      'run_node', 'run_python',
-      // M3 policy gate (default-deny)
-      'npm_install',
-    ];
-    const absent = required.filter((n) => !rows.some((r) => r.name === n));
-    if (absent.length) {
-      throw new Error(`required tools missing from matrix: ${absent}`);
-    }
+    // R1-4: the required set IS the inventory parse above (absent
+    // check already enforced); the old hand-maintained list is gone.
+    void require;
     if (missing.length) {
       console.error('WARNING: gate-map entries with no tool: ' + missing);
     }
     console.log('M3 CAPABILITY MATRIX: GENERATED (live host)');
   } finally {
-    await host.close();
+    // hosts are closed per-form above; nothing leaks
   }
 }
 

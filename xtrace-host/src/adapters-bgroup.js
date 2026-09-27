@@ -175,7 +175,7 @@ function createBGroupAdapters({ workspace, host, envs }) {
   });
 
   a.push({
-    name: 'jsvmp_status', tier: TIERS.STATEFUL_CONTROL,
+    name: 'jsvmp_status', tier: TIERS.READ_EVIDENCE,
     input: {},
     output: 'capture + capability posture',
     sideEffects: 'none (read via the control domain)',
@@ -274,25 +274,33 @@ function createBGroupAdapters({ workspace, host, envs }) {
   });
 
   // ---- the env seven ----------------------------------------------------
+  // Inventory 需确认 column: env_list/env_status are 否 (pure reads);
+  // the five mutating operations stay stateful-control.
   const envSpec = {
-    env_create: (args) => envs.create(requireName(args), { notes: args.notes }),
-    env_list: () => envs.list(),
-    env_status: (args) => envs.status(requireName(args)),
-    env_update: (args) => envs.update(requireName(args),
-                                       { notes: args && args.notes }),
-    env_open: (args) => envs.open(requireName(args)),
-    env_close: (args) => envs.close(requireName(args)),
-    env_delete: (args) => envs.delete(requireName(args)),
+    env_create: { tier: TIERS.STATEFUL_CONTROL,
+      run: (args) => envs.create(requireName(args), { notes: args.notes }) },
+    env_list: { tier: TIERS.READ_EVIDENCE, run: () => envs.list() },
+    env_status: { tier: TIERS.READ_EVIDENCE,
+      run: (args) => envs.status(requireName(args)) },
+    env_update: { tier: TIERS.STATEFUL_CONTROL,
+      run: (args) => envs.update(requireName(args),
+                                 { notes: args && args.notes }) },
+    env_open: { tier: TIERS.STATEFUL_CONTROL,
+      run: (args) => envs.open(requireName(args)) },
+    env_close: { tier: TIERS.STATEFUL_CONTROL,
+      run: (args) => envs.close(requireName(args)) },
+    env_delete: { tier: TIERS.STATEFUL_CONTROL,
+      run: (args) => envs.delete(requireName(args)) },
   };
-  for (const [name, run] of Object.entries(envSpec)) {
+  for (const [name, spec] of Object.entries(envSpec)) {
     a.push({
-      name, tier: TIERS.STATEFUL_CONTROL,
+      name, tier: spec.tier,
       input: { name: 'string', notes: 'string?' },
       output: 'env record',
       sideEffects: name.startsWith('env_create') || name === 'env_delete' ||
                    name.startsWith('env_open')
           ? 'workspace profile lifecycle' : 'env metadata',
-      run: async (args) => run(args || {}),
+      run: async (args) => spec.run(args || {}),
     });
   }
 

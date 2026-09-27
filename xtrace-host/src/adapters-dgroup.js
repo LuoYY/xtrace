@@ -58,7 +58,9 @@ function createDGroupNativeAdapters({ workspace, host }) {
   a.push({
     name: 'fs_read', tier: TIERS.READ_EVIDENCE,
     input: { path: 'string', offset: 'int?', limit: 'int?' },
-    output: 'content page (<=32KB) with truncated flag + total bytes',
+    output: 'content page (<=32KB, BYTE-exact slicing — a page can ' +
+            'cut a multi-byte UTF-8 sequence; reassemble pages before ' +
+            'decoding) with truncated flag + total bytes',
     run: async (args) => {
       const file = resolveInside(
           path.resolve(workspace.root, requireString(args, 'path')),
@@ -91,7 +93,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_write', tier: TIERS.STATEFUL_CONTROL,
+    name: 'fs_write', tier: TIERS.READ_EVIDENCE,
     input: { path: 'string', content: 'string', append: 'bool?' },
     output: 'bytes written + mode',
     sideEffects: 'workspace-bound file write',
@@ -119,7 +121,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_mkdir', tier: TIERS.STATEFUL_CONTROL,
+    name: 'fs_mkdir', tier: TIERS.READ_EVIDENCE,
     input: { path: 'string' },
     output: 'created dir',
     sideEffects: 'workspace-bound directory creation',
@@ -133,7 +135,7 @@ function createDGroupNativeAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'fs_copy', tier: TIERS.STATEFUL_CONTROL,
+    name: 'fs_copy', tier: TIERS.READ_EVIDENCE,
     input: { from: 'string', to: 'string' },
     output: 'bytes copied',
     sideEffects: 'workspace-bound copy',
@@ -159,23 +161,91 @@ function createDGroupNativeAdapters({ workspace, host }) {
     unavailableReason: 'needs a live browser connection (host)',
     run: async (args) => {
       const scriptId = requireString(args, 'script_id');
-      const source = await host.send('Debugger.getScriptSource',
-          { scriptId });
-      if (source === undefined || source === null) {
+      // R1-1: Debugger.* is SESSION-scoped — the browser-level send
+      // gets "wasn't found" 100% of the time, and script ids live in
+      // the ISOLATE that parsed them. The tool walks the LIVE page
+      // targets (no new page created, no navigation — the parsing
+      // context already exists), attaches, enables Debugger, and takes
+      // the first target that knows the id; an optional url narrows
+      // the walk. A url that matches no live target loads it once as a
+      // fallback (so the operator can save by url + id after the fact).
+      const targetUrl = args.url || '';
+      const { targetInfos } = await host.send('Target.getTargets', {});
+      const pages = (targetInfos || []).filter((t) => t.type === 'page');
+      const ordered = targetUrl
+          ? [...pages.filter((t) => (t.url || '') === targetUrl),
+             ...pages.filter((t) => (t.url || '') !== targetUrl)]
+          : pages;
+      let source = null;
+      let usedSession = null;
+      // Debugger.getScriptSource returns { scriptSource: "..." } (older
+      // paths returned a bare string) — normalize both.
+      const normalize = (out) => {
+        if (typeof out === 'string') {
+          return out;
+        }
+        if (out && typeof out === 'object' &&
+            typeof out.scriptSource === 'string') {
+          return out.scriptSource;
+        }
+        return null;
+      };
+      for (const page of ordered) {
+        try {
+          const { sessionId } = await host.send('Target.attachToTarget',
+              { targetId: page.targetId, flatten: true });
+          await host.send('Debugger.enable', {}, sessionId);
+          const out = normalize(await host.send(
+              'Debugger.getScriptSource', { scriptId }, sessionId));
+          if (out !== null && out.length > 0) {
+            source = out;
+            usedSession = sessionId;
+            break;
+          }
+        } catch {
+          // this target does not know the script id — try the next
+        }
+      }
+      if (source === null && targetUrl) {
+        // fallback: load the url fresh so its isolate parses the script
+        const { targetId } = await host.send('Target.createTarget',
+            { url: targetUrl });
+        try {
+          const { sessionId } = await host.send('Target.attachToTarget',
+              { targetId, flatten: true });
+          await host.send('Debugger.enable', {}, sessionId);
+          await new Promise((r) => setTimeout(r, 600));
+          const out = normalize(await host.send(
+              'Debugger.getScriptSource', { scriptId }, sessionId));
+          if (out !== null && out.length > 0) {
+            source = out;
+            usedSession = sessionId;
+          }
+        } catch {
+          // fall through to the 404 below
+        } finally {
+          await host.send('Target.closeTarget', { targetId })
+              .catch(() => {});
+        }
+      }
+      if (source === null) {
         throw new Error(`404 script: ${scriptId}`);
       }
-      const integrity = {
-        bytes: source.length,
-        looks_fragment: source.length > 0 && source.length < 16,
-        empty: source.length === 0,
-      };
-      const file = path.join(workspace.dir('scripts'),
-          `${scriptId.replace(/[^A-Za-z0-9._-]/g, '_')}.js`);
-      workspace.assertInside(file, 'scripts_save target');
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, source);
-      return { script_id: scriptId, url: args.url || null,
-              saved: file, integrity };
+      {
+        const integrity = {
+          bytes: source.length,
+          looks_fragment: source.length > 0 && source.length < 16,
+          empty: source.length === 0,
+        };
+        const file = path.join(workspace.dir('scripts'),
+            `${scriptId.replace(/[^A-Za-z0-9._-]/g, '_')}.js`);
+        workspace.assertInside(file, 'scripts_save target');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, source);
+        return { script_id: scriptId, url: args.url || null,
+                saved: file, integrity };
+      }
+      void usedSession;
     },
   });
 

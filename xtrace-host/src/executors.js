@@ -11,6 +11,19 @@ const { TIERS } = require('./broker');
 
 const DEFAULT_EXEC_TIMEOUT_MS = 20000;
 const MAX_OUTPUT_BYTES = 65536;
+const MAX_TIMEOUT_MS = 120000;   // R1-5: caller cannot disable the watchdog
+// R1-5: children get a MINIMAL env (PATH/HOME/LANG) — the full
+// process.env (secrets included) never silently leaks into host-exec
+// children. The disclosure is explicit in each result.
+function childEnv() {
+  const out = {};
+  for (const key of ['PATH', 'HOME', 'LANG', 'TMPDIR', 'TEMP', 'LC_ALL']) {
+    if (process.env[key] !== undefined) {
+      out[key] = process.env[key];
+    }
+  }
+  return out;
+}
 
 function createExecutors({ workspace }) {
   function makeExecutor(name, interpreter, defaultArgs) {
@@ -27,8 +40,10 @@ function createExecutors({ workspace }) {
           throw new Error('host-exec: missing audited argv payload');
         }
         const argv = [...defaultArgs, ...action.argv.map(String)];
-        const timeoutMs = Number(args.timeout_ms) > 0
-            ? Number(args.timeout_ms) : DEFAULT_EXEC_TIMEOUT_MS;
+        const timeoutMs = Math.min(
+            Number(args.timeout_ms) > 0 ? Number(args.timeout_ms)
+                                        : DEFAULT_EXEC_TIMEOUT_MS,
+            MAX_TIMEOUT_MS);
         const maxBytes = Number(args.max_output_bytes) > 0
             ? Math.min(Number(args.max_output_bytes), MAX_OUTPUT_BYTES)
             : MAX_OUTPUT_BYTES;
@@ -36,7 +51,7 @@ function createExecutors({ workspace }) {
           const child = spawn(interpreter, argv, {
             cwd: workspace.root,
             stdio: ['ignore', 'pipe', 'pipe'],
-            env: process.env,
+            env: childEnv(),   // R1-5: allowlisted, not process.env
             shell: false,   // PD1: NEVER a shell
           });
           let out = '';
@@ -84,7 +99,7 @@ function createExecutors({ workspace }) {
               finish({ exit_code: null, cancelled: true });
             });
           }
-          void action;
+
           child.on('error', (e) => {
             if (!settled) {
               finish({ exit_code: -1 });

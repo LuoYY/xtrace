@@ -152,9 +152,18 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
       }
     }
     if (action.writePath) {
-      const inside = writeRoots.some((root) =>
-          action.writePath === root ||
-          action.writePath.startsWith(root.replace(/\/$/, '') + '/'));
+      // R1-5: resolve BOTH sides before comparing — the unresolved
+      // prefix let policy say "allowed" while the workspace's realpath
+      // gate refused the actual write (audit/write disagreement).
+      const resolvedWrite = fs.existsSync(action.writePath)
+          ? path.resolve(fs.realpathSync(action.writePath))
+          : path.resolve(action.writePath);
+      const inside = writeRoots.some((root) => {
+        const resolvedRoot = fs.existsSync(root)
+            ? fs.realpathSync(root) : path.resolve(root);
+        return resolvedWrite === resolvedRoot ||
+            resolvedWrite.startsWith(resolvedRoot.replace(/\/$/, '') + '/');
+      });
       if (!inside) {
         verdicts.push(`write-outside-policy:${action.writePath}`);
       }
@@ -353,11 +362,23 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     return true;
   }
 
-  /** Snapshot of the pending queue for the human confirmation surface. */
+  /** Snapshot of the pending queue for the human confirmation surface
+   * — INCLUDING the concrete action payload (PD1: the confirmation
+   * shows argv / writePath, not just the tool name). */
   function pendingList() {
     return [...pending.values()].map((e) => ({
       id: e.id, tool: e.toolName, origin: e.origin, reason: e.reason,
       created_ms: e.created_ms, expires_ms: e.expires_ms,
+      action: e.action || null,
+    }));
+  }
+
+  /** M3-R1-5: RUNNING host-exec executions with their kill handles —
+   * the product surface for cancelExecution routing. */
+  function runningExecutions() {
+    return [...activeExecutions.entries()].map(([id, record]) => ({
+      id, tool: record.toolName, origin: record.origin,
+      kill_registered: Boolean(record.kill),
     }));
   }
 
@@ -480,6 +501,7 @@ function createBroker({ workspace, policy, clock = () => Date.now(),
     cancelExecution,
     cancelAllPending,
     pendingList,
+    runningExecutions,
     pendingIds: () => [...pending.values()].map((e) => e.id),
     pendingCount: () => pending.size,
     audit,

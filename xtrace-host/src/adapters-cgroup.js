@@ -44,7 +44,7 @@ function createCGroupAdapters({ workspace, host }) {
   }
 
   a.push({
-    name: 'page_navigate', tier: TIERS.READ_EVIDENCE,
+    name: 'page_navigate', tier: TIERS.STATEFUL_CONTROL,
     input: { url: 'string', target_url: 'string?' },
     output: 'final URL + load state (a fresh page is opened)',
     run: async (args) => {
@@ -106,7 +106,7 @@ function createCGroupAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'page_click', tier: TIERS.READ_EVIDENCE,
+    name: 'page_click', tier: TIERS.STATEFUL_CONTROL,
     input: { url: 'string', selector: 'string' },
     output: 'clicked + resulting location/marker',
     run: async (args) => {
@@ -128,7 +128,7 @@ function createCGroupAdapters({ workspace, host }) {
   });
 
   a.push({
-    name: 'page_type', tier: TIERS.READ_EVIDENCE,
+    name: 'page_type', tier: TIERS.STATEFUL_CONTROL,
     input: { url: 'string', selector: 'string', text: 'string',
              press_enter: 'bool?' },
     output: 'value after input/change events (event sequence asserted ' +
@@ -246,8 +246,12 @@ function createCGroupAdapters({ workspace, host }) {
 
   a.push({
     name: 'cookies', tier: TIERS.READ_EVIDENCE,
-    degradedReason: 'scope = the CURRENT browser context (Chromium ' +
-                    'per-context cookie jar), not Firefox\'s global ' +
+    degradedReason: 'READ SUBSET ONLY: Storage.getCookies — the ' +
+                    "inventory's set/delete semantics are NOT " +
+                    'implemented; writes, when they land, immediately ' +
+                    'promote this tool to stateful control. Scope = ' +
+                    'the CURRENT browser context (Chromium per-context ' +
+                    'cookie jar), not Firefox\'s global ' +
                     'nsICookieManager view — the result names the context',
     input: {},
     output: 'cookies of the current context',
@@ -263,63 +267,92 @@ function createCGroupAdapters({ workspace, host }) {
     },
   });
 
+  // ---- R1-3 (B3): the net family over ONE shared bounded buffer ----
+  //
+  // A single singleton listener feeds a ring buffer of request rows;
+  // net_capture opens/closes a bounded CAPTURE WINDOW (stateful: the
+  // confirmation payload names the target URL); net_list is a PURE
+  // query of the buffer (no navigation, D2 cursor over frozen rows so
+  // paging equations hold). No listener is ever attached per call.
+  const NET_BUFFER_MAX = 5000;
+  const netBuffer = [];
+  let netListenerAttached = false;
+  let netSequence = 0;
+
+  function ensureNetListener() {
+    if (netListenerAttached) {
+      return;
+    }
+    netListenerAttached = true;
+    host.onEvent((msg) => {
+      if (msg.method === 'Network.requestWillBeSent' &&
+          msg.params && msg.params.request) {
+        netBuffer.push({ seq: ++netSequence,
+                        url: msg.params.request.url,
+                        method: msg.params.request.method });
+        if (netBuffer.length > NET_BUFFER_MAX) {
+          netBuffer.splice(0, netBuffer.length - NET_BUFFER_MAX);
+        }
+      }
+    });
+  }
+
+  async function captureWindow(url, waitMs, captureState) {
+    // enable the domain on the page's session, navigate, collect into
+    // the capture window, then detach (single shared buffer underneath)
+    ensureNetListener();
+    const { targetId } = await host.send('Target.createTarget',
+        { url: 'about:blank' });
+    try {
+      const { sessionId } = await host.send('Target.attachToTarget',
+          { targetId, flatten: true });
+      await host.send('Network.enable', {}, sessionId);
+      const before = netSequence;
+      await host.send('Page.navigate', { url }, sessionId);
+      await new Promise((r) => setTimeout(r,
+          Math.min(waitMs, 5000)));
+      captureState.rows = netBuffer.filter((r) => r.seq > before);
+      captureState.closed = true;
+    } finally {
+      await host.send('Target.closeTarget', { targetId }).catch(() => {});
+    }
+  }
+
   a.push({
     name: 'net_capture', tier: TIERS.STATEFUL_CONTROL,
     input: { url: 'string', wait_ms: 'int?' },
-    output: 'requests seen while loading the page (bounded list)',
-    sideEffects: 'enables the Network domain for the page session',
+    output: 'requests seen inside a bounded capture window',
+    sideEffects: 'opens a page and enables the Network domain for it',
     run: async (args) => {
-      const h = requireHost();
-      const seen = [];
-      h.onEvent((msg) => {
-        if (msg.method === 'Network.requestWillBeSent' &&
-            msg.params && msg.params.request) {
-          seen.push({ url: msg.params.request.url,
-                      method: msg.params.request.method });
-        }
-      });
-      // Enable the domain BEFORE navigation (attach on about:blank, then
-      // navigate) — the initial document request would otherwise fire
-      // before the session listener exists.
-      await withPage(h, 'about:blank', async (sessionId) => {
-        await h.send('Network.enable', {}, sessionId);
-        await h.send('Page.navigate',
-            { url: requireString(args, 'url') }, sessionId);
-        await new Promise((r) => setTimeout(r,
-            Math.min(Number(args.wait_ms) || 1500, 5000)));
-      });
-      return { url: args.url, requests: seen.slice(0, 200),
-               truncated: seen.length > 200, total: seen.length };
+      requireHost();   // a live browser is still required for the window
+      const state = { rows: [], closed: false };
+      await captureWindow(requireString(args, 'url'),
+          Number(args.wait_ms) > 0 ? Number(args.wait_ms) : 1500, state);
+      return { url: args.url, requests: state.rows.slice(0, 200),
+               truncated: state.rows.length > 200,
+               total: state.rows.length };
     },
   });
 
   a.push({
     name: 'net_list', tier: TIERS.READ_EVIDENCE,
-    input: { url: 'string', wait_ms: 'int?', cursor: 'int?' },
-    output: 'request URLs (windowed, D2 contract with next_cursor)',
+    input: { cursor: 'int?', limit: 'int?' },
+    output: 'buffer rows (pure query, D2 cursor over frozen rows)',
     run: async (args) => {
-      const h = requireHost();
-      const seen = [];
-      h.onEvent((msg) => {
-        if (msg.method === 'Network.requestWillBeSent' &&
-            msg.params && msg.params.request) {
-          seen.push(msg.params.request.url);
-        }
-      });
-      await withPage(h, 'about:blank', async (sessionId) => {
-        await h.send('Network.enable', {}, sessionId);
-        await h.send('Page.navigate',
-            { url: requireString(args, 'url') }, sessionId);
-        await new Promise((r) => setTimeout(r,
-            Math.min(Number(args.wait_ms) || 1500, 5000)));
-      });
+      ensureNetListener();
       const cursor = Number(args.cursor) >= 0 ? Number(args.cursor) : 0;
-      const window = seen.slice(cursor, cursor + 100);
-      return { total: seen.length, cursor,
-               window_complete: cursor + 100 >= seen.length,
-               next_cursor: cursor + 100 < seen.length
-                   ? cursor + 100 : null,
-               urls: window };
+      const limit = Math.min(Number(args.limit) || 100, 200);
+      const snapshot = netBuffer.filter((r) => r.seq > cursor)
+          .slice(0, limit);
+      const lastSeq = snapshot.length ? snapshot[snapshot.length - 1].seq
+                                      : cursor;
+      return { total: netBuffer.length,
+               buffer_sequence: netSequence,
+               cursor,
+               window_complete: netBuffer.every((r) => r.seq <= lastSeq),
+               next_cursor: netBuffer.some((r) => r.seq > lastSeq)
+                   ? lastSeq : null,
+               urls: snapshot.map((r) => r.url) };
     },
   });
 

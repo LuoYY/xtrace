@@ -136,8 +136,20 @@ test('E2: scripts_save — 404 guard, fragment verdict, happy save', async () =>
   const fakeHost = {
     closed: false,
     send: async (method, params) => {
+      if (method === 'Target.getTargets') {
+        return { targetInfos: [{ targetId: 't1', type: 'page',
+                                 url: 'http://127.0.0.1/x.js' }] };
+      }
+      if (method === 'Target.attachToTarget') {
+        return { sessionId: 's1' };
+      }
+      if (method === 'Debugger.enable') {
+        return {};
+      }
       assert.equal(method, 'Debugger.getScriptSource');
-      return sources[params.scriptId];
+      const out = sources[params.scriptId];
+      // real shape: { scriptSource } — the normalizer handles strings too
+      return out === undefined ? undefined : { scriptSource: out };
     },
   };
   const { ws, broker, tools } = setup({ host: fakeHost });
@@ -167,4 +179,83 @@ test('E2: scripts_save — 404 guard, fragment verdict, happy save', async () =>
       bare.tools.scripts_save, { script_id: 'x' }),
       /host\.send is not a function|null/);
   void ws;
+});
+
+
+// R1-1 gate: scripts_save on a REAL browser (probe1 shape) — the
+// session-domain fix must hold in the shipping path: the saved content
+// is byte-equal to the page script the direct session fetch returns.
+const { spawn: spawnP } = require('node:child_process');
+const pathM = require('node:path');
+test('E2/R1-1: scripts_save real-browser happy path', { timeout: 120000 }, async () => {
+  const { createHost: createLiveHost } = require('../src/host');
+  const ROOT2 = pathM.resolve(__dirname, '..', '..');
+  const EXE2 = pathM.join(ROOT2,
+      'chromium/src/out/XTraceIntegration/ChromiumX.app/Contents/MacOS/Chromium');
+  const serverSrc = [
+    'import importlib.util, pathlib, socketserver',
+    'p = pathlib.Path(' + JSON.stringify(pathM.join(ROOT2, 'scripts',
+        'serve_test_page.py')) + ')',
+    "spec = importlib.util.spec_from_file_location('s', p)",
+    'm = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(m)',
+    "with socketserver.TCPServer(('127.0.0.1', 0), "
+        + "m.make_test_page_handler(p.parent.parent / 'test-pages')) "
+        + 'as server:',
+    ' print(server.server_address[1], flush=True)',
+    ' server.serve_forever()',
+  ].join('\n');
+  const server = spawnP('python3', ['-u', '-c', serverSrc],
+      { stdio: ['ignore', 'pipe', 'ignore'] });
+  const root = tmp();
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    const port = await new Promise((r) => {
+      let t = '';
+      server.stdout.on('data', (c) => {
+        t += c;
+        if (t.includes('\n')) { r(Number(t.trim())); }
+      });
+    });
+    const host = await createLiveHost({ executable: EXE2,
+        workspaceRoot: root,
+        traceFile: pathM.join(root, 'traces', 'live', 'trace.ndjson'),
+        browserArgs: ['about:blank'] });
+    try {
+      const { targetId } = await host.send('Target.createTarget',
+          { url: `http://127.0.0.1:${port}/crypto-sign-smoke.html` });
+      const { sessionId } = await host.send('Target.attachToTarget',
+          { targetId, flatten: true });
+      const parsed = [];
+      host.onEvent((m) => {
+        if (m.method === 'Debugger.scriptParsed') { parsed.push(m.params); }
+      });
+      await host.send('Debugger.enable', {}, sessionId);
+      await new Promise((r) => setTimeout(r, 1200));
+      assert.ok(parsed.length > 0, 'scripts parsed');
+      const target = parsed.find((s) => s.url &&
+          s.url.includes('crypto-sign')) || parsed[0];
+      // through the composition root, no sessionId hint to the tool
+      const saved = await host.callTool('scripts_save',
+          { script_id: target.scriptId },
+          { origin: 'ui', reason: 'R1-1 real-browser gate',
+            basisHint: 'ui-direct-click' });
+      assert.ok(!/threw|wasn.t found/.test(JSON.stringify(saved)),
+          'no session-domain error');
+      assert.equal(saved.integrity.looks_fragment, false);
+      // byte-equal against the direct session fetch (the oracle)
+      const direct = await host.send('Debugger.getScriptSource',
+          { scriptId: target.scriptId }, sessionId);
+      const directText = typeof direct === 'string' ? direct
+          : direct.scriptSource;
+      const savedText = fs.readFileSync(saved.saved, 'utf8');
+      assert.equal(savedText, directText, 'saved == direct byte-for-byte');
+      assert.equal(saved.integrity.bytes, directText.length);
+      await host.send('Target.closeTarget', { targetId }).catch(() => {});
+    } finally {
+      await host.close();
+    }
+  } finally {
+    server.kill();
+  }
 });

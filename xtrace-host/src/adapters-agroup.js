@@ -454,14 +454,25 @@ function createAGroupAdapters({ workspace, index, host }) {
   });
 
   // ---- fingerprint-layer env tools: disclosed unavailable (M5) ---------
+  // Inventory 需确认 column: the write-side two are 是 (stateful
+  // semantics even while unavailable); the read-side two are 否.
   for (const name of ['env_current_process',
-                      'env_read_current_process_config',
-                      'env_write_current_process_config',
-                      'env_reset_current_process_default']) {
+                      'env_read_current_process_config']) {
     a.push({
       name, tier: TIERS.READ_EVIDENCE,
       unavailableReason: 'depends on the fingerprint override layer (P7); ' +
                          'not present in the P6 first batch',
+      input: {},
+      available: () => false,
+      run: async () => { throw new Error('unavailable until P7'); },
+    });
+  }
+  for (const name of ['env_write_current_process_config',
+                      'env_reset_current_process_default']) {
+    a.push({
+      name, tier: TIERS.STATEFUL_CONTROL,
+      unavailableReason: 'depends on the fingerprint override layer (P7); ' +
+                         'write semantics would mislead — refused outright',
       input: {},
       available: () => false,
       run: async () => { throw new Error('unavailable until P7'); },
